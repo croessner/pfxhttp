@@ -1,0 +1,24 @@
+---
+# pfxhttp config file
+
+server:
+
+  listen:
+    type: "tcp"
+    address: "127.0.0.1"
+    port: 2345
+
+  tls:
+    enabled: true
+    skip_verify: true
+
+socket_maps:
+
+  demo:
+    target: https://127.0.0.1:9443/api/v1/custom/demo
+    payload: >
+      {
+        "key": "{{ .Key }}"
+      }
+    status_code: 200
+    value_field: "demo_value"
