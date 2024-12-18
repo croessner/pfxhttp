@@ -7,8 +7,8 @@ import (
 
 // Receiver defines an interface for handling NetString data by reading it and retrieving associated properties.
 type Receiver interface {
-	// ReadNetString processes a NetString instance and populates the implementing type's data structure.
-	ReadNetString(netString *NetString) error
+	// ReadNetString processes a NetData instance and populates the implementing type's data structure.
+	ReadNetString(netString NetData) error
 
 	// GetName returns the name associated with the implementing Receiver.
 	GetName() string
@@ -39,7 +39,7 @@ func (r *PostfixReceiver) GetKey() string {
 }
 
 // ReadNetString parses the provided NetString into the PostfixReceiver's name and key, returning an error if invalid.
-func (r *PostfixReceiver) ReadNetString(netString *NetString) error {
+func (r *PostfixReceiver) ReadNetString(netString NetData) error {
 	data := netString.String()
 	pattern := regexp.MustCompile(`^(\S+)\s(\S+)$`)
 
