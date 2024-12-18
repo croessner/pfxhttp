@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"text/template"
 	"time"
 )
@@ -16,6 +18,19 @@ import (
 var httpClient *http.Client
 
 func InitializeHttpClient(cfg *Config) {
+	var proxyFunc func(*http.Request) (*url.URL, error)
+
+	if cfg.Server.HTTPClient.Proxy != "" {
+		proxyURL, err := url.Parse(cfg.Server.HTTPClient.Proxy)
+		if err != nil {
+			proxyFunc = http.ProxyFromEnvironment
+		} else {
+			proxyFunc = http.ProxyURL(proxyURL)
+		}
+	} else {
+		proxyFunc = http.ProxyFromEnvironment
+	}
+
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 10 * time.Second,
@@ -24,6 +39,11 @@ func InitializeHttpClient(cfg *Config) {
 	transport := &http.Transport{
 		DialContext:         dialer.DialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
+		Proxy:               proxyFunc,
+		MaxConnsPerHost:     cfg.Server.HTTPClient.MaxConnsPerHost,
+		MaxIdleConns:        cfg.Server.HTTPClient.MaxIdleConns,
+		MaxIdleConnsPerHost: cfg.Server.HTTPClient.MaxIdleConnsPerHost,
+		IdleConnTimeout:     cfg.Server.HTTPClient.IdleConnTimeout,
 	}
 
 	if cfg.Server.TLS.Enabled {
@@ -44,7 +64,7 @@ func InitializeHttpClient(cfg *Config) {
 	}
 
 	httpClient = &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   60 * time.Second,
 		Transport: transport,
 	}
 
@@ -89,6 +109,8 @@ func (c *Client) RenderTemplate(tmpl string) (string, error) {
 }
 
 func (c *Client) SendAndReceive() error {
+	c.sender = NewPostfixSender()
+
 	settings, ok := c.config.SocketMaps[c.receiver.GetName()]
 	if !ok {
 		return errors.New("receiver settings not found in socket maps")
@@ -110,6 +132,15 @@ func (c *Client) SendAndReceive() error {
 
 	req.Header.Set("Content-Type", "application/json")
 
+	if len(settings.CustomHeaders) != 0 {
+		for _, header := range settings.CustomHeaders {
+			headerKey, headerValue := splitHeader(header)
+			if headerKey != "" && headerValue != "" {
+				req.Header.Set(headerKey, headerValue)
+			}
+		}
+	}
+
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, http.ErrHandlerTimeout) {
@@ -118,17 +149,31 @@ func (c *Client) SendAndReceive() error {
 
 			return nil
 		} else {
-			return err
+			c.sender.SetStatus("TEMP")
+			c.sender.SetData(err.Error())
+
+			return nil
 		}
 	}
 
 	return c.handleResponse(resp, settings)
 }
 
+func splitHeader(header string) (headerKey string, headerValue string) {
+	headerParts := strings.SplitN(header, ":", 2)
+
+	if len(headerParts) != 2 {
+		return "", ""
+	}
+
+	headerKey = strings.TrimSpace(headerParts[0])
+	headerValue = strings.TrimSpace(headerParts[1])
+
+	return headerKey, headerValue
+}
+
 func (c *Client) handleResponse(resp *http.Response, request Request) error {
 	var responseData map[string]any
-
-	c.sender = NewPostfixSender()
 
 	if resp.StatusCode != request.StatusCode {
 		c.sender.SetStatus("PERM")
@@ -146,7 +191,7 @@ func (c *Client) handleResponse(resp *http.Response, request Request) error {
 		return errors.New("failed to read response body: " + err.Error())
 	}
 
-	if err := json.Unmarshal(bodyBytes, &responseData); err != nil {
+	if err = json.Unmarshal(bodyBytes, &responseData); err != nil {
 		return errors.New("failed to unmarshal JSON: " + err.Error())
 	}
 
@@ -154,7 +199,7 @@ func (c *Client) handleResponse(resp *http.Response, request Request) error {
 		c.sender.SetStatus("NOTFOUND")
 		c.sender.SetData("")
 	} else {
-		if value, ok := rawValue.(string); !ok {
+		if value, ok := rawValue.(string); ok {
 			c.sender.SetStatus("OK")
 			c.sender.SetData(value)
 		} else {

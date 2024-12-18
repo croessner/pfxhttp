@@ -5,17 +5,26 @@ server:
 
   listen:
     type: "tcp"
-    address: "127.0.0.1"
-    port: 2345
+    address: "[::]"
+    port: 23450
+
+  http_client:
+    max_connections_per_host: 10
+    max_idle_connections: 4
+    max_idle_connections_per_host: 1
+    idle_connection_timeout: 10
 
   tls:
     enabled: true
-    skip_verify: true
+    http_client_skip_verify: true
 
 socket_maps:
 
   demo:
     target: https://127.0.0.1:9443/api/v1/custom/demo
+    custom_headers:
+      # User 'test', password 'test'
+      - "Authorization: Basic dGVzdDp0ZXN0"
     payload: >
       {
         "key": "{{ .Key }}"

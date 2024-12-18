@@ -1,6 +1,10 @@
 package main
 
-import "github.com/spf13/viper"
+import (
+	"time"
+
+	"github.com/spf13/viper"
+)
 
 type Config struct {
 	Server     Server             `mapstructure:"server"`
@@ -8,8 +12,9 @@ type Config struct {
 }
 
 type Server struct {
-	Listen Listen `mapstructure:"listen"`
-	TLS    TLS    `mapstructure:"tls"`
+	Listen     Listen     `mapstructure:"listen"`
+	HTTPClient HTTPClient `mapstructure:"http_client"`
+	TLS        TLS        `mapstructure:"tls"`
 }
 
 type Listen struct {
@@ -18,18 +23,27 @@ type Listen struct {
 	Port    int    `mapstructure:"port"`
 }
 
+type HTTPClient struct {
+	MaxConnsPerHost     int           `mapstructure:"max_connections_per_host"`
+	MaxIdleConns        int           `mapstructure:"max_idle_connections"`
+	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host"`
+	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout"`
+	Proxy               string        `mapstructure:"proxy"`
+}
+
 type TLS struct {
 	Enabled    bool   `mapstructure:"enabled"`
 	Cert       string `mapstructure:"cert"`
 	Key        string `mapstructure:"key"`
-	SkipVerify bool   `mapstructure:"skip_verify"`
+	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
 }
 
 type Request struct {
-	Target     string `mapstructure:"target"`
-	Payload    string `mapstructure:"payload"`
-	StatusCode int    `mapstructure:"status_code"`
-	ValueField string `mapstructure:"value_field"`
+	Target        string   `mapstructure:"target"`
+	CustomHeaders []string `mapstructure:"custom_headers"`
+	Payload       string   `mapstructure:"payload"`
+	StatusCode    int      `mapstructure:"status_code"`
+	ValueField    string   `mapstructure:"value_field"`
 }
 
 func (cfg *Config) HandleConfig() error {

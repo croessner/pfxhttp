@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
+	"time"
 )
 
 type TCPNetStringServer struct {
@@ -96,14 +97,14 @@ func (s *TCPNetStringServer) handleConnection(conn net.Conn) {
 		s.logger.Info("Connection closed", slog.String("client", clientAddr))
 
 		_ = conn.Close()
+
+		s.wg.Done()
 	}()
 
 	for {
 		select {
 		case <-s.ctx.Done():
-			s.wg.Done()
-
-			break
+			return
 		default:
 			netString, err := s.readNetString(conn)
 			if err != nil {
@@ -113,6 +114,11 @@ func (s *TCPNetStringServer) handleConnection(conn net.Conn) {
 
 				s.logger.Error("Error reading NetString", slog.String("client", clientAddr), slog.String("error", err.Error()))
 
+				return
+			}
+
+			// Client closed connection
+			if netString == nil {
 				return
 			}
 
@@ -152,37 +158,102 @@ func (s *TCPNetStringServer) handleConnection(conn net.Conn) {
 	}
 }
 
-func (s *TCPNetStringServer) readNetString(conn net.Conn) (*NetString, error) {
-	lengthBytes := make([]byte, 2)
+func isConnectionResetError(err error) bool {
+	var netOpErr *net.OpError
 
-	_, err := io.ReadFull(conn, lengthBytes)
-	if err != nil {
-		return nil, err
+	if errors.As(err, &netOpErr) {
+		if netOpErr.Err.Error() == "read: connection reset by peer" {
+			return true
+		}
 	}
 
-	length := binary.BigEndian.Uint16(lengthBytes)
+	return false
+}
+
+func (s *TCPNetStringServer) readNetString(conn net.Conn) (*NetString, error) {
+	lengthBuf := make([]byte, 0, 10)
+
+	for {
+		endLoop := false
+
+		select {
+		case <-s.ctx.Done():
+			return nil, io.EOF
+		default:
+			singleByte := make([]byte, 1)
+
+			err := conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if err != nil {
+				return nil, err
+			}
+
+			_, err = conn.Read(singleByte)
+			if err != nil {
+				var netErr net.Error
+
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					continue
+				}
+
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || isConnectionResetError(err) {
+					return nil, nil
+				}
+
+				return nil, err
+			}
+
+			if singleByte[0] == ':' {
+				endLoop = true
+
+				break
+			}
+
+			lengthBuf = append(lengthBuf, singleByte[0])
+		}
+
+		if endLoop {
+			break
+		}
+	}
+
+	length, err := strconv.Atoi(string(lengthBuf))
+	if err != nil {
+		return nil, fmt.Errorf("invalid length: %w", err)
+	}
 
 	data := make([]byte, length)
 
 	_, err = io.ReadFull(conn, data)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not read data: %w", err)
+	}
+
+	trailingByte := make([]byte, 1)
+
+	_, err = conn.Read(trailingByte)
+	if err != nil {
+		return nil, fmt.Errorf("error reading trailing comma: %w", err)
+	}
+
+	if trailingByte[0] != ',' {
+		return nil, fmt.Errorf("missing trailing comma")
 	}
 
 	return NewNetString(data), nil
 }
 
 func (s *TCPNetStringServer) writeNetString(conn net.Conn, netString *NetString) error {
-	lengthBytes := make([]byte, 2)
+	length := strconv.Itoa(int(netString.Length()))
+	payload := netString.Data()
 
-	binary.BigEndian.PutUint16(lengthBytes, netString.Length())
+	// Combine <length>:<data>, into a single byte slice
+	message := append([]byte(length+":"), payload...)
+	message = append(message, ',')
 
-	_, err := conn.Write(lengthBytes)
+	_, err := conn.Write(message)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not write NetString: %w", err)
 	}
 
-	_, err = conn.Write(netString.Data())
-
-	return err
+	return nil
 }
