@@ -12,7 +12,18 @@ import (
 	"time"
 )
 
-type TCPNetStringServer struct {
+// GenericServer defines an interface for managing a TCP server with methods to start and stop the server.
+type GenericServer interface {
+	// Start initializes and starts the server, enabling it to accept and process client connections.
+	Start() error
+
+	// Stop gracefully shuts down the server, ensuring all active connections are closed and all routines are completed.
+	Stop()
+}
+
+// NetStringServer represents a TCP server that processes requests encoded in NetString format.
+// It manages connections, reads incoming NetStrings, and sends processed responses back to clients.
+type NetStringServer struct {
 	address string
 
 	config   *Config
@@ -23,10 +34,11 @@ type TCPNetStringServer struct {
 	wg       sync.WaitGroup
 }
 
-func NewTCPNetStringServer(ctx context.Context, config *Config, logger *slog.Logger) *TCPNetStringServer {
+// NewNetStringServer creates and initializes a new NetStringServer instance with the provided context, config, and logger.
+func NewNetStringServer(ctx context.Context, config *Config, logger *slog.Logger) GenericServer {
 	childCtx, closer := context.WithCancel(ctx)
 
-	return &TCPNetStringServer{
+	return &NetStringServer{
 		config: config,
 		logger: logger,
 		ctx:    childCtx,
@@ -35,7 +47,8 @@ func NewTCPNetStringServer(ctx context.Context, config *Config, logger *slog.Log
 	}
 }
 
-func (s *TCPNetStringServer) Start() error {
+// Start initializes and starts the NetStringServer, accepting client connections and processing them.
+func (s *NetStringServer) Start() error {
 	var (
 		conn net.Conn
 		err  error
@@ -78,7 +91,8 @@ func (s *TCPNetStringServer) Start() error {
 	}
 }
 
-func (s *TCPNetStringServer) Stop() {
+// Stop gracefully shuts down the NetStringServer by stopping connections, waiting for all routines to complete, and closing the listener.
+func (s *NetStringServer) Stop() {
 	if s.closer != nil {
 		s.closer()
 	}
@@ -88,7 +102,10 @@ func (s *TCPNetStringServer) Stop() {
 	_ = s.listener.Close()
 }
 
-func (s *TCPNetStringServer) handleConnection(conn net.Conn) {
+var _ GenericServer = (*NetStringServer)(nil)
+
+// handleConnection manages an individual client connection, processing requests and sending responses in NetString format.
+func (s *NetStringServer) handleConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 
 	s.logger.Info("New connection established", slog.String("client", clientAddr))
@@ -133,7 +150,7 @@ func (s *TCPNetStringServer) handleConnection(conn net.Conn) {
 				return
 			}
 
-			client := NewClient(s.config)
+			client := NewBridgeClient(s.config)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()
@@ -158,6 +175,7 @@ func (s *TCPNetStringServer) handleConnection(conn net.Conn) {
 	}
 }
 
+// isConnectionResetError checks if the given error is a "connection reset by peer" error in a network operation.
 func isConnectionResetError(err error) bool {
 	var netOpErr *net.OpError
 
@@ -170,7 +188,8 @@ func isConnectionResetError(err error) bool {
 	return false
 }
 
-func (s *TCPNetStringServer) readNetString(conn net.Conn) (*NetString, error) {
+// readNetString reads and parses a NetString from the specified network connection, returning the parsed NetString or an error.
+func (s *NetStringServer) readNetString(conn net.Conn) (*NetString, error) {
 	lengthBuf := make([]byte, 0, 10)
 
 	for {
@@ -242,7 +261,10 @@ func (s *TCPNetStringServer) readNetString(conn net.Conn) (*NetString, error) {
 	return NewNetString(data), nil
 }
 
-func (s *TCPNetStringServer) writeNetString(conn net.Conn, netString *NetString) error {
+// writeNetString encodes the given NetString and writes it to the specified network connection.
+// It combines the NetString's length, data, and trailing comma into a single message and sends it via the connection.
+// Returns an error if the write operation fails.
+func (s *NetStringServer) writeNetString(conn net.Conn, netString NetData) error {
 	length := strconv.Itoa(int(netString.Length()))
 	payload := netString.Data()
 

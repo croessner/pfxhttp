@@ -29,7 +29,7 @@ func loadConfig() *Config {
 	return cfg
 }
 
-func handleSignals(server *TCPNetStringServer) {
+func handleSignals(server GenericServer) {
 	signalChan := make(chan os.Signal, 1)
 
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
@@ -47,7 +47,7 @@ func handleSignals(server *TCPNetStringServer) {
 }
 
 func runServer(ctx context.Context, cfg *Config) {
-	server := NewTCPNetStringServer(ctx, cfg, logger)
+	server := NewNetStringServer(ctx, cfg, logger)
 
 	handleSignals(server)
 

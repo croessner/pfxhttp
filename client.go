@@ -17,6 +17,7 @@ import (
 
 var httpClient *http.Client
 
+// InitializeHttpClient configures and initializes the global HTTP client based on the provided configuration.
 func InitializeHttpClient(cfg *Config) {
 	var proxyFunc func(*http.Request) (*url.URL, error)
 
@@ -73,21 +74,44 @@ func InitializeHttpClient(cfg *Config) {
 	}
 }
 
-type Client struct {
-	config   *Config
-	receiver *PostfixReceiver
-	sender   *PostfixSender
+// GenericClient is an interface for managing the lifecycle of communication processes between senders and receivers.
+type GenericClient interface {
+	// SetReceiver sets the Receiver that will handle incoming NetString data for the implementing GenericClient.
+	SetReceiver(Receiver)
+
+	// GetSender retrieves the Sender used for handling outgoing data in the implementing GenericClient.
+	GetSender() Sender
+
+	// RenderTemplate processes the provided template string,
+	// substituting placeholders with context data, and returns the result.
+	RenderTemplate(string) (string, error)
+
+	// SendAndReceive initiates the request-response process
+	// by sending data with the Sender and receiving a response with the Receiver.
+	SendAndReceive() error
 }
 
-func (c *Client) SetReceiver(receiver *PostfixReceiver) {
+// BridgeClient represents a client capable of handling data flow between a receiver and sender within a configurable setup.
+// It uses a configuration object to manage operations and leverages Receiver and Sender interfaces to facilitate communication.
+// Receives data via a Receiver, processes it using defined logic, and sends results through a Sender.
+type BridgeClient struct {
+	config   *Config
+	receiver Receiver
+	sender   Sender
+}
+
+// SetReceiver assigns the specified Receiver to the BridgeClient for handling incoming data operations.
+func (c *BridgeClient) SetReceiver(receiver Receiver) {
 	c.receiver = receiver
 }
 
-func (c *Client) GetSender() *PostfixSender {
+// GetSender retrieves the Sender instance currently associated with the BridgeClient.
+func (c *BridgeClient) GetSender() Sender {
 	return c.sender
 }
 
-func (c *Client) RenderTemplate(tmpl string) (string, error) {
+// RenderTemplate parses and renders the provided template string using data from the receiver's key.
+func (c *BridgeClient) RenderTemplate(tmpl string) (string, error) {
 	var rendered bytes.Buffer
 
 	parsedTemplate, err := template.New("template").Parse(tmpl)
@@ -108,7 +132,12 @@ func (c *Client) RenderTemplate(tmpl string) (string, error) {
 	return rendered.String(), nil
 }
 
-func (c *Client) SendAndReceive() error {
+// SendAndReceive handles the data flow by sending a POST request with rendered payload and processes the response.
+// It retrieves the target and payload template from the configuration, renders the template, and sends the request.
+// Custom headers can be included if specified in the settings. Timeout and other errors update the sender's status.
+// Validates the response against expected status and value fields, updating the sender's status accordingly.
+// Returns an error if request creation, template rendering, or response handling fails.
+func (c *BridgeClient) SendAndReceive() error {
 	c.sender = NewPostfixSender()
 
 	settings, ok := c.config.SocketMaps[c.receiver.GetName()]
@@ -159,6 +188,10 @@ func (c *Client) SendAndReceive() error {
 	return c.handleResponse(resp, settings)
 }
 
+var _ GenericClient = (*BridgeClient)(nil)
+
+// splitHeader splits a header string into a key and value pair, separating by the first colon.
+// Returns empty strings if the input is improperly formatted.
 func splitHeader(header string) (headerKey string, headerValue string) {
 	headerParts := strings.SplitN(header, ":", 2)
 
@@ -172,7 +205,8 @@ func splitHeader(header string) (headerKey string, headerValue string) {
 	return headerKey, headerValue
 }
 
-func (c *Client) handleResponse(resp *http.Response, request Request) error {
+// handleResponse processes the HTTP response and updates the sender's status and data based on the response content.
+func (c *BridgeClient) handleResponse(resp *http.Response, request Request) error {
 	var responseData map[string]any
 
 	if resp.StatusCode != request.StatusCode {
@@ -211,6 +245,7 @@ func (c *Client) handleResponse(resp *http.Response, request Request) error {
 	return nil
 }
 
-func NewClient(cfg *Config) *Client {
-	return &Client{config: cfg}
+// NewBridgeClient creates and returns a new instance of BridgeClient configured using the provided Config object.
+func NewBridgeClient(cfg *Config) GenericClient {
+	return &BridgeClient{config: cfg}
 }
