@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -233,16 +234,52 @@ func (c *BridgeClient) handleResponse(resp *http.Response, request Request) erro
 		c.sender.SetStatus("NOTFOUND")
 		c.sender.SetData("")
 	} else {
-		if value, ok := rawValue.(string); ok {
-			c.sender.SetStatus("OK")
-			c.sender.SetData(value)
-		} else {
+		value := convertResponse(rawValue, 0)
+		if value == "" {
 			c.sender.SetStatus("PERM")
-			c.sender.SetData(fmt.Sprintf("unexpected value received: %v", value))
+			c.sender.SetData(fmt.Sprintf("unexpected value received: type=%T value=%v", rawValue, rawValue))
+
+			return nil
 		}
+
+		if len(value) > 100000 {
+			c.sender.SetStatus("PERM")
+			c.sender.SetData(fmt.Sprintf("value too long: %d", len(value)))
+		}
+
+		c.sender.SetStatus("OK")
+		c.sender.SetData(value)
 	}
 
 	return nil
+}
+
+// convertResponse converts a rawValue of any type to a string based on its type, respecting a maximum recursion level.
+func convertResponse(rawValue any, level uint16) string {
+	if level == math.MaxUint16 {
+		return ""
+	}
+
+	switch value := rawValue.(type) {
+	case bool:
+		return fmt.Sprintf("%t", value)
+	case float64:
+		return fmt.Sprintf("%f", value)
+	case string:
+		return value
+	case []string:
+		return strings.Join(value, ",")
+	case []any:
+		var values []string
+
+		for _, v := range value {
+			values = append(values, convertResponse(v, level+1))
+		}
+
+		return strings.Join(values, ",")
+	default:
+		return ""
+	}
 }
 
 // NewBridgeClient creates and returns a new instance of BridgeClient configured using the provided Config object.

@@ -21,6 +21,7 @@ type Listen struct {
 	Type    string `mapstructure:"type"`
 	Address string `mapstructure:"address"`
 	Port    int    `mapstructure:"port"`
+	Mode    string `mapstructure:"mode"`
 }
 
 type HTTPClient struct {

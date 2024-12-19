@@ -42,7 +42,8 @@ The configuration file must have the name pfxhttp.yml.
 server:
 
   listen:
-    # tcp, tcp6 or unix
+    # 'tcp', 'tcp6' or 'unix'
+    # By using 'unix' the paramter 'mode' must also be specified
     type: "tcp"
     
     # An IPv4 or IPv6 address (also 0.0.0.0 or [::]). For "unix" this is a path.
@@ -50,6 +51,9 @@ server:
     
     # TCP port, if any.
     port: 23450
+    
+    # Optional unix socket mode
+    mode: "0666"
 
   http_client:
     # These values tune the HTTP client inside pfxhttp. The names should be self-explaining. If unsure leave them unconfigured.
@@ -98,10 +102,7 @@ socket_maps:
 >
 > You can use Nauthilus for example, to implement several socket map hooks. See https://github.com/croessner/nauthilus
 
-## Under development
-
-This version is still not tested very much. It has successfully passed telnet-tests with a real HTTP server referenced in the configuration file, but it
-has not been tested in Postfix itself. As soon as this is the case, this information will be removed.
+## Contribute
 
 Feel free to improve it.
 

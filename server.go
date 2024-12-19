@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -50,6 +51,7 @@ func NewNetStringServer(ctx context.Context, config *Config, logger *slog.Logger
 // Start initializes and starts the NetStringServer, accepting client connections and processing them.
 func (s *NetStringServer) Start() error {
 	var (
+		mode int64
 		conn net.Conn
 		err  error
 	)
@@ -67,6 +69,17 @@ func (s *NetStringServer) Start() error {
 		s.logger.Error("Could not start server", slog.String("error", err.Error()))
 
 		return fmt.Errorf("could not start server: %w", err)
+	}
+
+	if s.config.Server.Listen.Type == "unix" && s.config.Server.Listen.Mode != "" {
+		mode, err = strconv.ParseInt(s.config.Server.Listen.Mode, 8, 64)
+		if err != nil {
+			s.logger.Error("Could not parse socket mode", slog.String("error", err.Error()))
+		}
+
+		if err = os.Chmod(s.config.Server.Listen.Address, os.FileMode(mode)); err != nil {
+			s.logger.Error("Could not set permissions on socket", slog.String("error", err.Error()))
+		}
 	}
 
 	s.logger.Info("Server is listening...", slog.String("type", s.config.Server.Listen.Type), slog.String("address", s.address))
