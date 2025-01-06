@@ -46,6 +46,8 @@ type Request struct {
 	Payload       string   `mapstructure:"payload"`
 	StatusCode    int      `mapstructure:"status_code"`
 	ValueField    string   `mapstructure:"value_field"`
+	ErrorField    string   `mapstructure:"error_field"`
+	NoErrorValue  string   `mapstructure:"no_error_value"`
 }
 
 func (cfg *Config) HandleConfig() error {

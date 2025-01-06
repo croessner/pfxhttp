@@ -210,13 +210,6 @@ func splitHeader(header string) (headerKey string, headerValue string) {
 func (c *BridgeClient) handleResponse(resp *http.Response, request Request) error {
 	var responseData map[string]any
 
-	if resp.StatusCode != request.StatusCode {
-		c.sender.SetStatus("PERM")
-		c.sender.SetData("unexpected status code received: " + resp.Status)
-
-		return nil
-	}
-
 	defer func(Body io.ReadCloser) {
 		_ = Body.Close()
 	}(resp.Body)
@@ -230,7 +223,26 @@ func (c *BridgeClient) handleResponse(resp *http.Response, request Request) erro
 		return errors.New("failed to unmarshal JSON: " + err.Error())
 	}
 
-	if rawValue, ok := responseData[request.ValueField]; !ok {
+	if request.ErrorField != "" {
+		if rawValue, found := getNestedValue(responseData, request.ErrorField, 0); found {
+			value := convertResponse(rawValue, 0)
+			if value != "" && request.NoErrorValue != "" && value != request.NoErrorValue {
+				c.sender.SetStatus("PERM")
+				c.sender.SetData(fmt.Sprintf("unexpected error received: %s", value))
+
+				return nil
+			}
+		}
+	}
+
+	if resp.StatusCode != request.StatusCode {
+		c.sender.SetStatus("PERM")
+		c.sender.SetData("unexpected status code received: " + resp.Status)
+
+		return nil
+	}
+
+	if rawValue, found := getNestedValue(responseData, request.ValueField, 0); !found {
 		c.sender.SetStatus("NOTFOUND")
 		c.sender.SetData("")
 	} else {
@@ -252,6 +264,31 @@ func (c *BridgeClient) handleResponse(resp *http.Response, request Request) erro
 	}
 
 	return nil
+}
+
+// getNestedValue recursively searches for a key in a nested map and returns the value and a boolean indicating success.
+// responseData is the map[string]any to search within.
+// key is the string to search for.
+// level is the current recursion depth, used to prevent infinite recursion.
+// Returns the value associated with the key and a boolean indicating whether the key was found.
+func getNestedValue(responseData map[string]any, key string, level uint) (any, bool) {
+	if level == math.MaxUint16 {
+		return nil, false
+	}
+
+	for k1, v1 := range responseData {
+		if k1 == key {
+			return v1, true
+		}
+
+		if v2, ok := v1.(map[string]any); ok {
+			if value, ok := getNestedValue(v2, key, level+1); ok {
+				return value, true
+			}
+		}
+	}
+
+	return nil, false
 }
 
 // convertResponse converts a rawValue of any type to a string based on its type, respecting a maximum recursion level.

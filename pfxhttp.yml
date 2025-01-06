@@ -34,3 +34,5 @@ socket_maps:
       }
     status_code: 200
     value_field: "demo_value"
+    error_field: "error"
+    no_error_value: "none"

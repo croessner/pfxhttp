@@ -99,6 +99,13 @@ socket_maps:
     
     # The JSON result must have this field to retrieve the value, which is then sent back to Postfix.
     value_field: "demo_value"
+
+    # The JSON result may contain an optional error message. This is the name of the field in the response.
+    error_field: "error"
+
+    # If error_field is set, this field can always be returned. The optional no_error_value parameter then defines a 
+    # value identical to a success message.
+    no_error_value: "none"
 ```
 
 As of writing this document, Postfix has a hard coded socket map reply size of 100000 (Postfix version <= 3.9.1).

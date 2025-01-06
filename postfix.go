@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"regexp"
+	"strings"
 )
 
 // Receiver defines an interface for handling NetString data by reading it and retrieving associated properties.
@@ -49,7 +50,7 @@ func (r *PostfixReceiver) ReadNetString(netString NetData) error {
 	}
 
 	r.name = matches[1]
-	r.key = matches[2]
+	r.key = strings.ReplaceAll(matches[2], "\"<>\"", "<>")
 
 	return nil
 }
