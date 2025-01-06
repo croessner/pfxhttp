@@ -72,7 +72,10 @@ server:
     # Optional: A client certificate and key
     #cert:
     #key:
-    
+  
+  # Default Postfix limit  
+  #socketmap_max_reply_size: 100000
+  
 socket_maps:
 
   # Blocks with socket map definitions. Each identifier should match a socketmap name.
@@ -97,6 +100,8 @@ socket_maps:
     # The JSON result must have this field to retrieve the value, which is then sent back to Postfix.
     value_field: "demo_value"
 ```
+
+As of writing this document, Postfix has a hard coded socket map reply size of 100000 (Postfix version <= 3.9.1).
 
 > Mote
 >

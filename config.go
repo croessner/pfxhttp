@@ -12,9 +12,10 @@ type Config struct {
 }
 
 type Server struct {
-	Listen     Listen     `mapstructure:"listen"`
-	HTTPClient HTTPClient `mapstructure:"http_client"`
-	TLS        TLS        `mapstructure:"tls"`
+	Listen              Listen     `mapstructure:"listen"`
+	HTTPClient          HTTPClient `mapstructure:"http_client"`
+	TLS                 TLS        `mapstructure:"tls"`
+	SockmapMaxReplySize int        `mapstructure:"socketmap_max_reply_size"`
 }
 
 type Listen struct {
@@ -48,6 +49,10 @@ type Request struct {
 }
 
 func (cfg *Config) HandleConfig() error {
+	if cfg.Server.SockmapMaxReplySize <= 0 {
+		cfg.Server.SockmapMaxReplySize = 100000
+	}
+
 	return viper.Unmarshal(cfg)
 }
 

@@ -242,7 +242,7 @@ func (c *BridgeClient) handleResponse(resp *http.Response, request Request) erro
 			return nil
 		}
 
-		if len(value) > 100000 {
+		if len(value) > c.config.Server.SockmapMaxReplySize {
 			c.sender.SetStatus("PERM")
 			c.sender.SetData(fmt.Sprintf("value too long: %d", len(value)))
 		}

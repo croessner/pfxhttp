@@ -18,6 +18,9 @@ server:
     enabled: true
     http_client_skip_verify: true
 
+  # Default Postfix limit
+  socketmap_max_reply_size: 100000
+
 socket_maps:
 
   demo:
