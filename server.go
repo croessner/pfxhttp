@@ -20,6 +20,9 @@ type GenericServer interface {
 
 	// Stop gracefully shuts down the server, ensuring all active connections are closed and all routines are completed.
 	Stop()
+
+	// GetContext returns the context used by the server to manage its lifecycle and handle cancellations or deadlines.
+	GetContext() context.Context
 }
 
 // NetStringServer represents a TCP server that processes requests encoded in NetString format.
@@ -28,20 +31,18 @@ type NetStringServer struct {
 	address string
 
 	config   *Config
-	logger   *slog.Logger
 	ctx      context.Context
 	closer   context.CancelFunc
 	listener net.Listener
 	wg       sync.WaitGroup
 }
 
-// NewNetStringServer creates and initializes a new NetStringServer instance with the provided context, config, and logger.
-func NewNetStringServer(ctx context.Context, config *Config, logger *slog.Logger) GenericServer {
+// NewNetStringServer creates and initializes a new NetStringServer instance with the provided context and config.
+func NewNetStringServer(ctx context.Context, config *Config) GenericServer {
 	childCtx, closer := context.WithCancel(ctx)
 
 	return &NetStringServer{
 		config: config,
-		logger: logger,
 		ctx:    childCtx,
 		closer: closer,
 		wg:     sync.WaitGroup{},
@@ -56,17 +57,19 @@ func (s *NetStringServer) Start() error {
 		err  error
 	)
 
+	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+
 	if s.config.Server.Listen.Type == "unix" {
 		s.address = s.config.Server.Listen.Address
 	} else {
 		s.address = fmt.Sprintf("%s:%d", s.config.Server.Listen.Address, s.config.Server.Listen.Port)
 	}
 
-	s.logger.Info("Starting server...", slog.String("address", s.address))
+	logger.Info("Starting server...", slog.String("address", s.address), slog.String("version", version))
 
 	s.listener, err = net.Listen(s.config.Server.Listen.Type, s.address)
 	if err != nil {
-		s.logger.Error("Could not start server", slog.String("error", err.Error()))
+		logger.Error("Could not start server", slog.String("error", err.Error()))
 
 		return fmt.Errorf("could not start server: %w", err)
 	}
@@ -74,26 +77,26 @@ func (s *NetStringServer) Start() error {
 	if s.config.Server.Listen.Type == "unix" && s.config.Server.Listen.Mode != "" {
 		mode, err = strconv.ParseInt(s.config.Server.Listen.Mode, 8, 64)
 		if err != nil {
-			s.logger.Error("Could not parse socket mode", slog.String("error", err.Error()))
+			logger.Error("Could not parse socket mode", slog.String("error", err.Error()))
 		}
 
 		if err = os.Chmod(s.config.Server.Listen.Address, os.FileMode(mode)); err != nil {
-			s.logger.Error("Could not set permissions on socket", slog.String("error", err.Error()))
+			logger.Error("Could not set permissions on socket", slog.String("error", err.Error()))
 		}
 	}
 
-	s.logger.Info("Server is listening...", slog.String("type", s.config.Server.Listen.Type), slog.String("address", s.address))
+	logger.Info("Server is listening...", slog.String("type", s.config.Server.Listen.Type), slog.String("address", s.address))
 
 	for {
 		conn, err = s.listener.Accept()
 		if errors.Is(err, net.ErrClosed) {
-			s.logger.Info("Server is shutting down...")
+			logger.Info("Server is shutting down...")
 
 			return nil
 		}
 
 		if err != nil {
-			s.logger.Error("Error accepting connection", slog.String("error", err.Error()))
+			logger.Error("Error accepting connection", slog.String("error", err.Error()))
 
 			continue
 		}
@@ -115,16 +118,22 @@ func (s *NetStringServer) Stop() {
 	_ = s.listener.Close()
 }
 
+func (s *NetStringServer) GetContext() context.Context {
+	return s.ctx
+}
+
 var _ GenericServer = (*NetStringServer)(nil)
 
 // handleConnection manages an individual client connection, processing requests and sending responses in NetString format.
 func (s *NetStringServer) handleConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 
-	s.logger.Info("New connection established", slog.String("client", clientAddr))
+	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+
+	logger.Info("New connection established", slog.String("client", clientAddr))
 
 	defer func() {
-		s.logger.Info("Connection closed", slog.String("client", clientAddr))
+		logger.Info("Connection closed", slog.String("client", clientAddr))
 
 		_ = conn.Close()
 
@@ -142,7 +151,7 @@ func (s *NetStringServer) handleConnection(conn net.Conn) {
 					break
 				}
 
-				s.logger.Error("Error reading NetString", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error reading NetString", slog.String("client", clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -152,13 +161,13 @@ func (s *NetStringServer) handleConnection(conn net.Conn) {
 				return
 			}
 
-			s.logger.Info("Received request", slog.String("client", clientAddr), slog.String("request", netString.String()))
+			logger.Debug("Received request", slog.String("client", clientAddr), slog.String("request", netString.String()))
 
 			received := NewPostfixReceiver()
 
 			err = received.ReadNetString(netString)
 			if err != nil {
-				s.logger.Error("Error reading request", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error reading request", slog.String("client", clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -168,7 +177,7 @@ func (s *NetStringServer) handleConnection(conn net.Conn) {
 
 			err = client.SendAndReceive()
 			if err != nil {
-				s.logger.Error("Error sending request", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error sending request", slog.String("client", clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -178,12 +187,12 @@ func (s *NetStringServer) handleConnection(conn net.Conn) {
 
 			err = s.writeNetString(conn, response)
 			if err != nil {
-				s.logger.Error("Error writing response", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error writing response", slog.String("client", clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
 
-			s.logger.Info("Response sent", slog.String("client", clientAddr), slog.String("response", responseData))
+			logger.Debug("Response sent", slog.String("client", clientAddr), slog.String("response", responseData))
 		}
 	}
 }

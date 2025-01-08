@@ -5,8 +5,12 @@ server:
 
   listen:
     type: "tcp"
-    address: "[::]"
+    address: "0.0.0.0"
     port: 23450
+
+  logging:
+    json: false
+    level: info
 
   http_client:
     max_connections_per_host: 10

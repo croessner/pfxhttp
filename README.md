@@ -17,7 +17,7 @@ Future versions could be extended here...
 The program is written in Go and is compiled as follows:
 
 ```shell
-go build -o pfxhttp .
+make
 ```
 
 > Note
@@ -55,6 +55,13 @@ server:
     # Optional unix socket mode
     mode: "0666"
 
+  logging:
+    # Optional flag to get logging JSON formatted
+    json: true
+    
+    # Optional log level. Supported: debug, info, error. Unknown values result in info level.
+    level: info
+    
   http_client:
     # These values tune the HTTP client inside pfxhttp. The names should be self-explaining. If unsure leave them unconfigured.
     max_connections_per_host: 10

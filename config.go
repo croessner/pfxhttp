@@ -13,6 +13,7 @@ type Config struct {
 
 type Server struct {
 	Listen              Listen     `mapstructure:"listen"`
+	Logging             Logging    `mapstructure:"logging"`
 	HTTPClient          HTTPClient `mapstructure:"http_client"`
 	TLS                 TLS        `mapstructure:"tls"`
 	SockmapMaxReplySize int        `mapstructure:"socketmap_max_reply_size"`
@@ -23,6 +24,11 @@ type Listen struct {
 	Address string `mapstructure:"address"`
 	Port    int    `mapstructure:"port"`
 	Mode    string `mapstructure:"mode"`
+}
+
+type Logging struct {
+	JSON  bool   `mapstructure:"json"`
+	Level string `mapstructure:"level"`
 }
 
 type HTTPClient struct {
