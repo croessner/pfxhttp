@@ -9,8 +9,7 @@ The mapping between Postfix and HTTP takes place in a configuration file. Socket
 The payload itself is JSON. When a request is made, the key in the template is replaced by the search key from Postfix and sent to the HTTP server. This
 processes the request and sends back JSON.
 
-In the current development, the JSON response is expected to have a “flat” structure, i.e. the response key can be found directly in the top level of the response.
-Future versions could be extended here...
+**pfxhttp** also supports policy services. Please look at the configuration example to get detailed information about the usage.
 
 ## Installation
 
