@@ -16,6 +16,8 @@ import (
 	"time"
 )
 
+const TempServerProblem = "Temporary server problem"
+
 var httpClient *http.Client
 
 // InitializeHttpClient configures and initializes the global HTTP client based on the provided configuration.
@@ -75,6 +77,87 @@ func InitializeHttpClient(cfg *Config) {
 	}
 }
 
+// splitHeader splits a header string into a key and value pair, separating by the first colon.
+// Returns empty strings if the input is improperly formatted.
+func splitHeader(header string) (headerKey string, headerValue string) {
+	headerParts := strings.SplitN(header, ":", 2)
+
+	if len(headerParts) != 2 {
+		return "", ""
+	}
+
+	headerKey = strings.TrimSpace(headerParts[0])
+	headerValue = strings.TrimSpace(headerParts[1])
+
+	return headerKey, headerValue
+}
+
+// getNestedValue recursively searches for a key in a nested map and returns the value and a boolean indicating success.
+// responseData is the map[string]any to search within.
+// key is the string to search for.
+// level is the current recursion depth, used to prevent infinite recursion.
+// Returns the value associated with the key and a boolean indicating whether the key was found.
+func getNestedValue(responseData map[string]any, key string, level uint) (any, bool) {
+	if level == math.MaxUint16 {
+		return nil, false
+	}
+
+	for k1, v1 := range responseData {
+		if k1 == key {
+			return v1, true
+		}
+
+		if v2, ok := v1.(map[string]any); ok {
+			if value, ok := getNestedValue(v2, key, level+1); ok {
+				return value, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
+// convertResponse converts a rawValue of any type to a string based on its type, respecting a maximum recursion level.
+func convertResponse(rawValue any, level uint16) string {
+	if level == math.MaxUint16 {
+		return ""
+	}
+
+	switch value := rawValue.(type) {
+	case bool:
+		return fmt.Sprintf("%t", value)
+	case float64:
+		return fmt.Sprintf("%f", value)
+	case string:
+		return value
+	case []string:
+		return strings.Join(value, ",")
+	case []any:
+		var values []string
+
+		for _, v := range value {
+			values = append(values, convertResponse(v, level+1))
+		}
+
+		return strings.Join(values, ",")
+	default:
+		return ""
+	}
+}
+
+// parsePolicyResult splits a given string value into an action and text using a single-space separator.
+// Returns the first part as the action and the second part as the text if it exists; otherwise, text is empty.
+func parsePolicyResult(value string) (action string, text string) {
+	parts := strings.SplitN(value, " ", 2)
+
+	action = parts[0]
+	if len(parts) > 1 {
+		text = parts[1]
+	}
+
+	return action, text
+}
+
 // GenericClient is an interface for managing the lifecycle of communication processes between senders and receivers.
 type GenericClient interface {
 	// SetReceiver sets the Receiver that will handle incoming NetString data for the implementing GenericClient.
@@ -92,27 +175,27 @@ type GenericClient interface {
 	SendAndReceive() error
 }
 
-// BridgeClient represents a client capable of handling data flow between a receiver and sender within a configurable setup.
+// MapClient represents a client capable of handling data flow between a receiver and sender within a configurable setup.
 // It uses a configuration object to manage operations and leverages Receiver and Sender interfaces to facilitate communication.
 // Receives data via a Receiver, processes it using defined logic, and sends results through a Sender.
-type BridgeClient struct {
+type MapClient struct {
 	config   *Config
 	receiver Receiver
 	sender   Sender
 }
 
-// SetReceiver assigns the specified Receiver to the BridgeClient for handling incoming data operations.
-func (c *BridgeClient) SetReceiver(receiver Receiver) {
+// SetReceiver assigns the specified Receiver to the MapClient for handling incoming data operations.
+func (c *MapClient) SetReceiver(receiver Receiver) {
 	c.receiver = receiver
 }
 
-// GetSender retrieves the Sender instance currently associated with the BridgeClient.
-func (c *BridgeClient) GetSender() Sender {
+// GetSender retrieves the Sender instance currently associated with the MapClient.
+func (c *MapClient) GetSender() Sender {
 	return c.sender
 }
 
 // RenderTemplate parses and renders the provided template string using data from the receiver's key.
-func (c *BridgeClient) RenderTemplate(tmpl string) (string, error) {
+func (c *MapClient) RenderTemplate(tmpl string) (string, error) {
 	var rendered bytes.Buffer
 
 	parsedTemplate, err := template.New("template").Parse(tmpl)
@@ -138,7 +221,7 @@ func (c *BridgeClient) RenderTemplate(tmpl string) (string, error) {
 // Custom headers can be included if specified in the settings. Timeout and other errors update the sender's status.
 // Validates the response against expected status and value fields, updating the sender's status accordingly.
 // Returns an error if request creation, template rendering, or response handling fails.
-func (c *BridgeClient) SendAndReceive() error {
+func (c *MapClient) SendAndReceive() error {
 	c.sender = NewPostfixSender()
 
 	settings, ok := c.config.SocketMaps[c.receiver.GetName()]
@@ -189,25 +272,10 @@ func (c *BridgeClient) SendAndReceive() error {
 	return c.handleResponse(resp, settings)
 }
 
-var _ GenericClient = (*BridgeClient)(nil)
-
-// splitHeader splits a header string into a key and value pair, separating by the first colon.
-// Returns empty strings if the input is improperly formatted.
-func splitHeader(header string) (headerKey string, headerValue string) {
-	headerParts := strings.SplitN(header, ":", 2)
-
-	if len(headerParts) != 2 {
-		return "", ""
-	}
-
-	headerKey = strings.TrimSpace(headerParts[0])
-	headerValue = strings.TrimSpace(headerParts[1])
-
-	return headerKey, headerValue
-}
+var _ GenericClient = (*MapClient)(nil)
 
 // handleResponse processes the HTTP response and updates the sender's status and data based on the response content.
-func (c *BridgeClient) handleResponse(resp *http.Response, request Request) error {
+func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 	var responseData map[string]any
 
 	defer func(Body io.ReadCloser) {
@@ -266,60 +334,157 @@ func (c *BridgeClient) handleResponse(resp *http.Response, request Request) erro
 	return nil
 }
 
-// getNestedValue recursively searches for a key in a nested map and returns the value and a boolean indicating success.
-// responseData is the map[string]any to search within.
-// key is the string to search for.
-// level is the current recursion depth, used to prevent infinite recursion.
-// Returns the value associated with the key and a boolean indicating whether the key was found.
-func getNestedValue(responseData map[string]any, key string, level uint) (any, bool) {
-	if level == math.MaxUint16 {
-		return nil, false
+// NewMapClient creates and returns a new instance of MapClient configured using the provided Config object.
+func NewMapClient(cfg *Config) GenericClient {
+	return &MapClient{config: cfg}
+}
+
+// PolicyClient is a client structure for managing communication processes between senders and receivers.
+type PolicyClient struct {
+	config   *Config
+	receiver Receiver
+	sender   Sender
+}
+
+var _ GenericClient = (*PolicyClient)(nil)
+
+// SetReceiver assigns the given Receiver to the PolicyClient, updating the client to use the specified receiver for its operations.
+func (p *PolicyClient) SetReceiver(receiver Receiver) {
+	p.receiver = receiver
+}
+
+// GetSender retrieves the Sender instance associated with the PolicyClient.
+func (p *PolicyClient) GetSender() Sender {
+	return p.sender
+}
+
+// RenderTemplate parses and executes a template string using the receiver's key and returns the rendered output or an error.
+func (p *PolicyClient) RenderTemplate(tmpl string) (string, error) {
+	var rendered bytes.Buffer
+
+	parsedTemplate, err := template.New("template").Parse(tmpl)
+	if err != nil {
+		return "", err
 	}
 
-	for k1, v1 := range responseData {
-		if k1 == key {
-			return v1, true
-		}
+	templateData := struct {
+		Key string
+	}{
+		Key: p.receiver.GetKey(),
+	}
 
-		if v2, ok := v1.(map[string]any); ok {
-			if value, ok := getNestedValue(v2, key, level+1); ok {
-				return value, true
+	if err = parsedTemplate.Execute(&rendered, templateData); err != nil {
+		return "", err
+	}
+
+	return rendered.String(), nil
+}
+
+// SendAndReceive sends an HTTP request based on receiver settings and handles the response, updating the sender's status and data.
+func (p *PolicyClient) SendAndReceive() error {
+	p.sender = NewPostfixSender()
+
+	settings, ok := p.config.PolicyServices[p.receiver.GetName()]
+	if !ok {
+		return errors.New("receiver settings not found in socket maps")
+	}
+
+	if settings.Target == "" {
+		return errors.New("target URL is not specified in the settings")
+	}
+
+	renderedPayload, err := p.RenderTemplate(settings.Payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", settings.Target, bytes.NewBuffer([]byte(renderedPayload)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	if len(settings.CustomHeaders) != 0 {
+		for _, header := range settings.CustomHeaders {
+			headerKey, headerValue := splitHeader(header)
+			if headerKey != "" && headerValue != "" {
+				req.Header.Set(headerKey, headerValue)
 			}
 		}
 	}
 
-	return nil, false
-}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		p.sender.SetStatus("DEFER")
+		p.sender.SetData(TempServerProblem)
 
-// convertResponse converts a rawValue of any type to a string based on its type, respecting a maximum recursion level.
-func convertResponse(rawValue any, level uint16) string {
-	if level == math.MaxUint16 {
-		return ""
+		return nil
 	}
 
-	switch value := rawValue.(type) {
-	case bool:
-		return fmt.Sprintf("%t", value)
-	case float64:
-		return fmt.Sprintf("%f", value)
-	case string:
-		return value
-	case []string:
-		return strings.Join(value, ",")
-	case []any:
-		var values []string
+	return p.handleResponse(resp, settings)
+}
 
-		for _, v := range value {
-			values = append(values, convertResponse(v, level+1))
+// handleResponse processes an HTTP response, evaluates its contents, and sets the sender's status and data accordingly.
+// It validates the response status code, error field, and value field based on the provided request parameters.
+// Returns an error if the response body cannot be read or unmarshalled into JSON.
+func (p *PolicyClient) handleResponse(resp *http.Response, request Request) error {
+	var responseData map[string]any
+
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.New("failed to read response body: " + err.Error())
+	}
+
+	if err = json.Unmarshal(bodyBytes, &responseData); err != nil {
+		return errors.New("failed to unmarshal JSON: " + err.Error())
+	}
+
+	if request.ErrorField != "" {
+		if rawValue, found := getNestedValue(responseData, request.ErrorField, 0); found {
+			value := convertResponse(rawValue, 0)
+			if value != "" && request.NoErrorValue != "" && value != request.NoErrorValue {
+				p.sender.SetStatus("DEFER")
+				p.sender.SetData(TempServerProblem)
+
+				return nil
+			}
+		}
+	}
+
+	if resp.StatusCode != request.StatusCode {
+		p.sender.SetStatus("DEFER")
+		p.sender.SetData(TempServerProblem)
+
+		return nil
+	}
+
+	if rawValue, found := getNestedValue(responseData, request.ValueField, 0); !found {
+		p.sender.SetStatus("DUNNO")
+		p.sender.SetData("")
+	} else {
+		value := convertResponse(rawValue, 0)
+		if value == "" {
+			p.sender.SetStatus("DUNNO")
+			p.sender.SetData("")
+
+			return nil
 		}
 
-		return strings.Join(values, ",")
-	default:
-		return ""
+		action, text := parsePolicyResult(value)
+
+		p.sender.SetStatus(action)
+		p.sender.SetData(text)
 	}
+
+	return nil
 }
 
-// NewBridgeClient creates and returns a new instance of BridgeClient configured using the provided Config object.
-func NewBridgeClient(cfg *Config) GenericClient {
-	return &BridgeClient{config: cfg}
+// NewPolicyClient creates and returns a new instance of PolicyClient initialized with the provided configuration.
+func NewPolicyClient(cfg *Config) GenericClient {
+	return &PolicyClient{config: cfg}
 }

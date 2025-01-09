@@ -4,9 +4,16 @@
 server:
 
   listen:
-    type: "tcp"
-    address: "0.0.0.0"
-    port: 23450
+    - kind: "socket_map"
+      type: "tcp"
+      address: "0.0.0.0"
+      port: 23450
+
+    - kind: "policy_service"
+      name: "default"
+      type: "tcp"
+      address: "0.0.0.0"
+      port: 23451
 
   logging:
     json: false
@@ -36,6 +43,19 @@ socket_maps:
       {
         "key": "{{ .Key }}"
       }
+    status_code: 200
+    value_field: "demo_value"
+    error_field: "error"
+    no_error_value: "none"
+
+policy_services:
+
+  default:
+    target: https://127.0.0.1:9443/api/v1/custom/demo_policy
+    custom_headers:
+      # User 'test', password 'test'
+      - "Authorization: Basic dGVzdDp0ZXN0"
+    payload: "{{ .Key }}"
     status_code: 200
     value_field: "demo_value"
     error_field: "error"

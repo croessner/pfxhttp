@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,18 +18,25 @@ import (
 // GenericServer defines an interface for managing a TCP server with methods to start and stop the server.
 type GenericServer interface {
 	// Start initializes and starts the server, enabling it to accept and process client connections.
-	Start() error
+	Start(instance Listen, handler func(conn net.Conn)) error
 
 	// Stop gracefully shuts down the server, ensuring all active connections are closed and all routines are completed.
 	Stop()
 
 	// GetContext returns the context used by the server to manage its lifecycle and handle cancellations or deadlines.
 	GetContext() context.Context
+
+	// HandleNetStringConnection processes an individual client connection by reading, interpreting, and responding in NetString format.
+	HandleNetStringConnection(conn net.Conn)
+
+	// HandlePolicyServiceConnection manages a client connection for the Postfix policy service, handling requests and responses.
+	HandlePolicyServiceConnection(conn net.Conn)
 }
 
-// NetStringServer represents a TCP server that processes requests encoded in NetString format.
+// MultiServer represents a TCP server that processes requests encoded in NetString format.
 // It manages connections, reads incoming NetStrings, and sends processed responses back to clients.
-type NetStringServer struct {
+type MultiServer struct {
+	name    string
 	address string
 
 	config   *Config
@@ -37,11 +46,11 @@ type NetStringServer struct {
 	wg       sync.WaitGroup
 }
 
-// NewNetStringServer creates and initializes a new NetStringServer instance with the provided context and config.
-func NewNetStringServer(ctx context.Context, config *Config) GenericServer {
+// NewServer creates and initializes a new MultiServer instance with the provided context and config.
+func NewServer(ctx *Context, config *Config) GenericServer {
 	childCtx, closer := context.WithCancel(ctx)
 
-	return &NetStringServer{
+	return &MultiServer{
 		config: config,
 		ctx:    childCtx,
 		closer: closer,
@@ -49,8 +58,8 @@ func NewNetStringServer(ctx context.Context, config *Config) GenericServer {
 	}
 }
 
-// Start initializes and starts the NetStringServer, accepting client connections and processing them.
-func (s *NetStringServer) Start() error {
+// Start initializes and starts the MultiServer, accepting client connections and processing them.
+func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error {
 	var (
 		mode int64
 		conn net.Conn
@@ -59,33 +68,37 @@ func (s *NetStringServer) Start() error {
 
 	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
 
-	if s.config.Server.Listen.Type == "unix" {
-		s.address = s.config.Server.Listen.Address
+	if instance.Type == "unix" {
+		s.address = instance.Address
 	} else {
-		s.address = fmt.Sprintf("%s:%d", s.config.Server.Listen.Address, s.config.Server.Listen.Port)
+		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
+	}
+
+	if instance.Name != "" {
+		s.name = instance.Name
 	}
 
 	logger.Info("Starting server...", slog.String("address", s.address), slog.String("version", version))
 
-	s.listener, err = net.Listen(s.config.Server.Listen.Type, s.address)
+	s.listener, err = net.Listen(instance.Type, s.address)
 	if err != nil {
 		logger.Error("Could not start server", slog.String("error", err.Error()))
 
 		return fmt.Errorf("could not start server: %w", err)
 	}
 
-	if s.config.Server.Listen.Type == "unix" && s.config.Server.Listen.Mode != "" {
-		mode, err = strconv.ParseInt(s.config.Server.Listen.Mode, 8, 64)
+	if instance.Type == "unix" && instance.Mode != "" {
+		mode, err = strconv.ParseInt(instance.Mode, 8, 64)
 		if err != nil {
 			logger.Error("Could not parse socket mode", slog.String("error", err.Error()))
 		}
 
-		if err = os.Chmod(s.config.Server.Listen.Address, os.FileMode(mode)); err != nil {
+		if err = os.Chmod(instance.Address, os.FileMode(mode)); err != nil {
 			logger.Error("Could not set permissions on socket", slog.String("error", err.Error()))
 		}
 	}
 
-	logger.Info("Server is listening...", slog.String("type", s.config.Server.Listen.Type), slog.String("address", s.address))
+	logger.Info("Server is listening...", slog.String("type", instance.Type), slog.String("address", s.address))
 
 	for {
 		conn, err = s.listener.Accept()
@@ -103,12 +116,12 @@ func (s *NetStringServer) Start() error {
 
 		s.wg.Add(1)
 
-		go s.handleConnection(conn)
+		go handler(conn)
 	}
 }
 
-// Stop gracefully shuts down the NetStringServer by stopping connections, waiting for all routines to complete, and closing the listener.
-func (s *NetStringServer) Stop() {
+// Stop gracefully shuts down the MultiServer by stopping connections, waiting for all routines to complete, and closing the listener.
+func (s *MultiServer) Stop() {
 	if s.closer != nil {
 		s.closer()
 	}
@@ -118,14 +131,14 @@ func (s *NetStringServer) Stop() {
 	_ = s.listener.Close()
 }
 
-func (s *NetStringServer) GetContext() context.Context {
+func (s *MultiServer) GetContext() context.Context {
 	return s.ctx
 }
 
-var _ GenericServer = (*NetStringServer)(nil)
+var _ GenericServer = (*MultiServer)(nil)
 
-// handleConnection manages an individual client connection, processing requests and sending responses in NetString format.
-func (s *NetStringServer) handleConnection(conn net.Conn) {
+// HandleNetStringConnection manages an individual client connection, processing requests and sending responses in NetString format.
+func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 
 	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
@@ -163,7 +176,7 @@ func (s *NetStringServer) handleConnection(conn net.Conn) {
 
 			logger.Debug("Received request", slog.String("client", clientAddr), slog.String("request", netString.String()))
 
-			received := NewPostfixReceiver()
+			received := NewPostfixMapReceiver()
 
 			err = received.ReadNetString(netString)
 			if err != nil {
@@ -172,7 +185,7 @@ func (s *NetStringServer) handleConnection(conn net.Conn) {
 				return
 			}
 
-			client := NewBridgeClient(s.config)
+			client := NewMapClient(s.config)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()
@@ -186,6 +199,65 @@ func (s *NetStringServer) handleConnection(conn net.Conn) {
 			response := NewNetStringFromString(responseData)
 
 			err = s.writeNetString(conn, response)
+			if err != nil {
+				logger.Error("Error writing response", slog.String("client", clientAddr), slog.String("error", err.Error()))
+
+				return
+			}
+
+			logger.Debug("Response sent", slog.String("client", clientAddr), slog.String("response", responseData))
+		}
+	}
+}
+
+// HandlePolicyServiceConnection manages a client connection for the Postfix policy service, handling requests and responses.
+func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
+	clientAddr := conn.RemoteAddr().String()
+
+	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+
+	logger.Info("New connection established", slog.String("client", clientAddr))
+
+	defer func() {
+		logger.Info("Connection closed", slog.String("client", clientAddr))
+
+		_ = conn.Close()
+
+		s.wg.Done()
+	}()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+			policy, err := s.readPolicy(conn)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+
+				logger.Error("Error reading policy", slog.String("client", clientAddr), slog.String("error", err.Error()))
+
+				return
+			}
+
+			received := NewPostfixPolicyReceiver(s.name)
+			_ = received.ReadPolcy(policy)
+
+			client := NewPolicyClient(s.config)
+			client.SetReceiver(received)
+
+			err = client.SendAndReceive()
+			if err != nil {
+				logger.Error("Error sending request", slog.String("client", clientAddr), slog.String("error", err.Error()))
+
+				return
+			}
+
+			responseData := client.GetSender().String() + "\n\n"
+
+			err = s.writePolicyResult(conn, responseData)
 			if err != nil {
 				logger.Error("Error writing response", slog.String("client", clientAddr), slog.String("error", err.Error()))
 
@@ -211,7 +283,7 @@ func isConnectionResetError(err error) bool {
 }
 
 // readNetString reads and parses a NetString from the specified network connection, returning the parsed NetString or an error.
-func (s *NetStringServer) readNetString(conn net.Conn) (*NetString, error) {
+func (s *MultiServer) readNetString(conn net.Conn) (*NetString, error) {
 	lengthBuf := make([]byte, 0, 10)
 
 	for {
@@ -286,7 +358,7 @@ func (s *NetStringServer) readNetString(conn net.Conn) (*NetString, error) {
 // writeNetString encodes the given NetString and writes it to the specified network connection.
 // It combines the NetString's length, data, and trailing comma into a single message and sends it via the connection.
 // Returns an error if the write operation fails.
-func (s *NetStringServer) writeNetString(conn net.Conn, netString NetData) error {
+func (s *MultiServer) writeNetString(conn net.Conn, netString NetData) error {
 	length := strconv.Itoa(int(netString.Length()))
 	payload := netString.Data()
 
@@ -300,4 +372,49 @@ func (s *NetStringServer) writeNetString(conn net.Conn, netString NetData) error
 	}
 
 	return nil
+}
+
+// writePolicyResult writes the specified policy result to the given network connection.
+// Returns an error if the write operation fails.
+func (s *MultiServer) writePolicyResult(conn net.Conn, result string) error {
+	_, err := conn.Write([]byte(result))
+	if err != nil {
+		return fmt.Errorf("could not write policy result: %w", err)
+	}
+
+	return nil
+}
+
+func (s *MultiServer) readPolicy(conn net.Conn) (Policy, error) {
+	policy := NewPostfixPolicy()
+	reader := bufio.NewReader(conn)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			return nil, fmt.Errorf("error while reading from the connection: %w", err)
+		}
+
+		line = strings.TrimSpace(line)
+
+		if line == "" {
+			break
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid format: '%s'", line)
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		policy.SetData(key, value)
+	}
+
+	return policy, nil
 }

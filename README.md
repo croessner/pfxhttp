@@ -42,18 +42,41 @@ The configuration file must have the name pfxhttp.yml.
 server:
 
   listen:
-    # 'tcp', 'tcp6' or 'unix'
-    # By using 'unix' the paramter 'mode' must also be specified
-    type: "tcp"
-    
-    # An IPv4 or IPv6 address (also 0.0.0.0 or [::]). For "unix" this is a path.
-    address: "[::]"
-    
-    # TCP port, if any.
-    port: 23450
-    
-    # Optional unix socket mode
-    mode: "0666"
+    # List of "socket_map" and "policy_service" listeners.
+
+    - kind: "socket_map"
+      
+      # 'tcp', 'tcp6' or 'unix'
+      # By using 'unix' the paramter 'mode' must also be specified
+      type: "tcp"
+       
+      # An IPv4 or IPv6 address (also 0.0.0.0 or [::]). For "unix" this is a path.
+      address: "[::]"
+       
+      # TCP port, if any.
+      port: 23450
+       
+      # Optional unix socket mode
+      mode: "0666"
+
+    - kind: "policy_service"
+
+      # The 'name' field is required, if 'kind' is "policy_service". It is an indicator under the 'policy_services'
+      # section to find a matching configuration for this policy.
+      name: "default"
+
+      # 'tcp', 'tcp6' or 'unix'
+      # By using 'unix' the paramter 'mode' must also be specified
+      type: "tcp"
+
+      # An IPv4 or IPv6 address (also 0.0.0.0 or [::]). For "unix" this is a path.
+      address: "[::]"
+
+      # TCP port, if any.
+      port: 23451
+
+      # Optional unix socket mode
+      mode: "0666"
 
   logging:
     # Optional flag to get logging JSON formatted
@@ -113,7 +136,36 @@ socket_maps:
     # If error_field is set, this field can always be returned. The optional no_error_value parameter then defines a 
     # value identical to a success message.
     no_error_value: "none"
-```
+
+policy_services:
+
+  # Blocks with policy service definitions. Each identifier should match a policy service name from the 'listen' section.
+  default:
+    # URL of this specific map
+    target: https://127.0.0.1:9443/api/v1/custom/anotherdemo
+  
+    # Optional HTTP request headers. For Basic auth and others...
+    custom_headers:
+     # User 'test', password 'test'
+     - "Authorization: Basic dGVzdDp0ZXN0"
+  
+    # The payload is a valid JSON string that encapsulates a Go template variable named .Key. This variable
+    # is replaced with the key from the Postfix request, which is the JSON-formatted string of the Postfix policy request.
+    payload: "{{ .Key }}"
+    
+    # This is the expected return HTTP status code.
+    status_code: 200
+  
+    # The JSON result must have this field to retrieve the value, which is then sent back to Postfix.
+    value_field: "demo_value"
+  
+    # The JSON result may contain an optional error message. This is the name of the field in the response.
+    error_field: "error"
+  
+    # If error_field is set, this field can always be returned. The optional no_error_value parameter then defines a 
+    # value identical to a success message.
+    no_error_value: "none"
+ ```
 
 As of writing this document, Postfix has a hard coded socket map reply size of 100000 (Postfix version <= 3.9.1).
 

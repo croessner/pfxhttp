@@ -7,12 +7,13 @@ import (
 )
 
 type Config struct {
-	Server     Server             `mapstructure:"server"`
-	SocketMaps map[string]Request `mapstructure:"socket_maps"`
+	Server         Server             `mapstructure:"server"`
+	SocketMaps     map[string]Request `mapstructure:"socket_maps"`
+	PolicyServices map[string]Request `mapstructure:"policy_services"`
 }
 
 type Server struct {
-	Listen              Listen     `mapstructure:"listen"`
+	Listen              []Listen   `mapstructure:"listen"`
 	Logging             Logging    `mapstructure:"logging"`
 	HTTPClient          HTTPClient `mapstructure:"http_client"`
 	TLS                 TLS        `mapstructure:"tls"`
@@ -20,6 +21,8 @@ type Server struct {
 }
 
 type Listen struct {
+	Kind    string `mapstructure:"kind"`
+	Name    string `mapstructure:"name"`
 	Type    string `mapstructure:"type"`
 	Address string `mapstructure:"address"`
 	Port    int    `mapstructure:"port"`

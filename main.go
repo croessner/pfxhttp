@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -79,17 +78,42 @@ func handleSignals(server GenericServer) {
 	}()
 }
 
-func runServer(ctx context.Context, cfg *Config) {
-	server := NewNetStringServer(ctx, cfg)
+func runServer(ctx *Context, cfg *Config) {
+	logger := ctx.Value(loggerKey).(*slog.Logger)
 
-	handleSignals(server)
+	for _, instance := range cfg.Server.Listen {
+		if instance.Kind == "socket_map" {
+			go func(instance Listen) {
+				server := NewServer(ctx, cfg)
 
-	err := server.Start()
-	if err != nil {
-		logger := server.GetContext().Value(loggerKey).(*slog.Logger)
+				handleSignals(server)
 
-		logger.Error("Server error", slog.String("error", err.Error()))
+				err := server.Start(instance, server.HandleNetStringConnection)
+				if err != nil {
+					logger.Error("Server error", slog.String("error", err.Error()))
+				}
+			}(instance)
+		} else if instance.Kind == "policy_service" {
+			go func(instance Listen) {
+				if instance.Name != "" {
+					server := NewServer(ctx, cfg)
+
+					handleSignals(server)
+
+					err := server.Start(instance, server.HandlePolicyServiceConnection)
+					if err != nil {
+						logger.Error("Server error", slog.String("error", err.Error()))
+					}
+				}
+			}(instance)
+		} else {
+			logger.Error("Invalid listen instance", slog.String("instance", instance.Kind))
+
+			return
+		}
 	}
+
+	select {}
 }
 
 func main() {
