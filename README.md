@@ -1,182 +1,186 @@
-# Postfix to HTTP
+# Pfxhttp – HTTP Proxy for Postfix
 
-This program serves as a kind of bridge between Postfix and HTTP. The Postfix socketmaps can be used to delegate table requests to HTTP servers.
+Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external HTTP APIs for **socket maps** and **policy services**. This enables dynamic and flexible email workflows by connecting Postfix to modern APIs.
 
-The current implementation assumes JSON requests and responses to the HTTP server. The POST method is used for this.
+## Overview
 
-The mapping between Postfix and HTTP takes place in a configuration file. Socketmaps send a **name** field in the request, which must be defined in the configuration
- and refers to an HTTP server. At the same time, a key to be searched for is transmitted, which must be referenced in a payload template.
-The payload itself is JSON. When a request is made, the key in the template is replaced by the search key from Postfix and sent to the HTTP server. This
-processes the request and sends back JSON.
+Pfxhttp allows you to:
 
-**pfxhttp** also supports policy services. Please look at the configuration example to get detailed information about the usage.
+- **Perform dynamic lookups** via socket maps, such as resolving virtual mailboxes or domains.
+- **Implement custom mail policy checks** through HTTP-based policy services.
 
-## Installation
+The application is configured using a YAML file, specifying HTTP endpoints, the format of requests, and field mappings. It supports key Postfix features like query lookups and policy service hooks.
 
-The program is written in Go and is compiled as follows:
+## Getting Started
 
-```shell
+### Installation
+
+Pfxhttp is written in **Go** and can be compiled with the following commands:
+
+```bash
 make
+make install
 ```
 
-> Note
-> 
-> This first implementation was tested with Go version 1.23
+By default, Pfxhttp and its associated man pages are installed in `/usr/local`.
 
-The configuration is located in one of the following directories:
+The configuration is located in one of the following directories, based on priority:
 
-1. /usr/local/etc/pfxhttp/
-2. /etc/pfxhttp/
-3. $HOME/.pfxhttp
-4. .
+1. `/usr/local/etc/pfxhttp/`
+2. `/etc/pfxhttp/`
+3. `$HOME/.pfxhttp/`
+4. Current directory (`.`)
 
-The configuration file must have the name pfxhttp.yml.
+The expected configuration file name is `pfxhttp.yml`.
+
+> **Note:** This first implementation was tested using Go version **1.23**.
+
+### Running as a System Service
+
+Pfxhttp is typically run as a **systemd** service. Below is an example unit file:
+
+```ini
+[Unit]
+Description=Postfix HTTP Proxy (pfxhttp)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/pfxhttp
+Restart=always
+User=postfix
+Group=postfix
+
+[Install]
+WantedBy=multi-user.target
+```
+
+To install and start the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable pfxhttp
+sudo systemctl start pfxhttp
+```
+
+---
 
 ## Configuration
 
-```yml
----
-# pfxhttp config file
+Pfxhttp is configured through a YAML file named `pfxhttp.yml`. The following are the main sections:
 
+### Server Settings
+
+The `server` section contains global options, including:
+
+- **Listeners**: Define socket map and policy service listeners for Postfix integration.
+- **Logging**: Enable JSON-formatted logs and set verbosity (`debug`, `info`, or `error`).
+- **HTTP Client Options**: Configure connection limits, timeouts, and optional TLS settings.
+
+Below is a detailed example configuration for `pfxhttp.yml`:
+
+```yaml
 server:
-
   listen:
-    # List of "socket_map" and "policy_service" listeners.
-
     - kind: "socket_map"
-      
-      # An optional name for this listener.
-      name: ""
-      
-      # 'tcp', 'tcp6' or 'unix'
-      # By using 'unix' the paramter 'mode' must also be specified
+      name: "demo_map"
       type: "tcp"
-       
-      # An IPv4 or IPv6 address (also 0.0.0.0 or [::]). For "unix" this is a path.
       address: "[::]"
-       
-      # TCP port, if any.
       port: 23450
-       
-      # Optional unix socket mode
-      mode: "0666"
 
     - kind: "policy_service"
-
-      # The 'name' field is required, if 'kind' is "policy_service". It is an indicator under the 'policy_services'
-      # section to find a matching configuration for this policy.
-      name: "default"
-
-      # 'tcp', 'tcp6' or 'unix'
-      # By using 'unix' the paramter 'mode' must also be specified
+      name: "example_policy"
       type: "tcp"
-
-      # An IPv4 or IPv6 address (also 0.0.0.0 or [::]). For "unix" this is a path.
       address: "[::]"
-
-      # TCP port, if any.
       port: 23451
 
-      # Optional unix socket mode
-      mode: "0666"
-
   logging:
-    # Optional flag to get logging JSON formatted
     json: true
-    
-    # Optional log level. Supported: debug, info, error. Unknown values result in info level.
     level: info
-    
-  http_client:
-    # These values tune the HTTP client inside pfxhttp. The names should be self-explaining. If unsure leave them unconfigured.
-    max_connections_per_host: 10
-    max_idle_connections: 4
-    max_idle_connections_per_host: 1
-    idle_connection_timeout: 10
-
-  tls:
-    # Use TLS for connections to the HTTP servers. This is a global setting for all servers.
-    enabled: true
-    
-    # For testing purposes only. This will ignore certificate validation.
-    http_client_skip_verify: true
-
-    # Optional: A client certificate and key
-    #cert:
-    #key:
   
-  # Default Postfix limit  
-  #socketmap_max_reply_size: 100000
+  tls:
+    enabled: true
+    http_client_skip_verify: true
   
 socket_maps:
-
-  # Blocks with socket map definitions. Each identifier should match a socketmap name.
-  demo:
-    # URL of this specific map
-    target: https://127.0.0.1:9443/api/v1/custom/demo
-    
-    # Optional HTTP request headers. For Basic auth and others...
+  demo_map:
+    target: "https://127.0.0.1:9443/api/v1/custom/map"
     custom_headers:
-      # User 'test', password 'test'
-      - "Authorization: Basic dGVzdDp0ZXN0"
-    
-    # The payload is a valid JSON string that encapsulates a Go template variable named .Key. This variable
-    # is replaced with the key from the Postfix request.
+      - "Authorization: Bearer <token>"
     payload: >
       {
         "key": "{{ .Key }}"
       }
-    # This is the expected return HTTP status code.
     status_code: 200
-    
-    # The JSON result must have this field to retrieve the value, which is then sent back to Postfix.
-    value_field: "demo_value"
-
-    # The JSON result may contain an optional error message. This is the name of the field in the response.
+    value_field: "data.result"
     error_field: "error"
-
-    # If error_field is set, this field can always be returned. The optional no_error_value parameter then defines a 
-    # value identical to a success message.
-    no_error_value: "none"
-
+    no_error_value: "not-found"
+    
 policy_services:
-
-  # Blocks with policy service definitions. Each identifier should match a policy service name from the 'listen' section.
-  default:
-    # URL of this specific map
-    target: https://127.0.0.1:9443/api/v1/custom/anotherdemo
-  
-    # Optional HTTP request headers. For Basic auth and others...
+  example_policy:
+    target: "https://127.0.0.1:9443/api/v1/custom/policy"
     custom_headers:
-     # User 'test', password 'test'
-     - "Authorization: Basic dGVzdDp0ZXN0"
-  
-    # The payload is a valid JSON string that encapsulates a Go template variable named .Key. This variable
-    # is replaced with the key from the Postfix request, which is the JSON-formatted string of the Postfix policy request.
+      - "Authorization: Bearer <token>"
     payload: "{{ .Key }}"
-    
-    # This is the expected return HTTP status code.
     status_code: 200
-  
-    # The JSON result must have this field to retrieve the value, which is then sent back to Postfix.
-    value_field: "demo_value"
-  
-    # The JSON result may contain an optional error message. This is the name of the field in the response.
-    error_field: "error"
-  
-    # If error_field is set, this field can always be returned. The optional no_error_value parameter then defines a 
-    # value identical to a success message.
-    no_error_value: "none"
- ```
+    value_field: "policy.result"
+    error_field: "policy.error"
+    no_error_value: "OK"
+```
 
-As of writing this document, Postfix has a hard coded socket map reply size of 100000 (Postfix version <= 3.9.1).
+**Important**: Postfix has a hardcoded socket map reply size limit of **100,000 bytes** (Postfix 3.9.1 or older).
 
-> Mote
->
-> You can use Nauthilus for example, to implement several socket map hooks. See https://github.com/croessner/nauthilus
+---
 
-## Contribute
+### Integrating with Postfix
 
-Feel free to improve it.
+#### Socket Maps
 
-MIT license
+To configure Postfix to use a socket map, simply add it to your `main.cf`:
+
+```plaintext
+# main.cf
+virtual_mailbox_domains = socketmap:tcp:127.0.0.1:23450:demo_map
+```
+
+Here, Postfix connects to the TCP socket map listener defined in `pfxhttp.yml` for `demo_map`.
+
+#### Policy Services
+
+To use a policy service, include it in your recipient restrictions list in `main.cf`:
+
+```plaintext
+# main.cf
+smtpd_recipient_restrictions =
+    permit_mynetworks,
+    reject_unauth_destination,
+    check_policy_service inet:127.0.0.1:23451
+```
+
+This setup enables Postfix to query the policy service defined in `pfxhttp.yml` for `example_policy`.
+
+---
+
+## Logging and Troubleshooting
+
+Logs are output to the console by default and should be captured by the service manager (e.g., **systemd**). Log verbosity is configurable in the `pfxhttp.yml` file.
+
+If Pfxhttp fails to start, verify the following:
+
+- Ensure the configuration file (`/etc/pfxhttp/pfxhttp.yml`) is valid and complete.
+- Ensure the service is running with the appropriate permissions for the configured resources.
+
+---
+
+## Contributing
+
+Contributions are welcome! Feel free to submit pull requests or issues to improve the project. The project is distributed under the **MIT License**.
+
+---
+
+## References
+
+- [Postfix Documentation](http://www.postfix.org/)
+- [Nauthilus](https://github.com/croessner/nauthilus)
+- Manpages:
+ - `pfxhttp(8)`: Overview and service management
+ - `pfxhttp.yml(5)`: Detailed configuration guide

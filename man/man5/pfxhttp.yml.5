@@ -1,0 +1,261 @@
+.TH PFXHTTP.YML 5 "January 2025" "pfxhttp 1.0" "Configuration Files"
+.SH NAME
+pfxhttp.yml \- Configuration file for pfxhttp, an HTTP Proxy for Postfix
+
+.SH DESCRIPTION
+The \fBpfxhttp.yml\fP file is a YAML-based configuration file that controls the behavior of \fBpfxhttp\fP. This tool enables Postfix to utilize HTTP-based services as socket maps or policy services, providing flexibility for custom integrations.
+
+A typical configuration consists of the following main sections:
+
+.IP
+* \fBserver\fP: Global server settings, including logging, communication settings, HTTP client behavior, and optional TLS configuration.
+.IP
+* \fBsocket_maps\fP: Definitions of socket maps that can be used by Postfix for dynamic lookups.
+.IP
+* \fBpolicy_services\fP: Definitions of policy services for validating or processing Postfix requests.
+
+.SH CONFIGURATION
+The configuration file uses the YAML format, containing key-value pairs organized hierarchically. Below are the main sections explained in detail:
+
+.SS SERVER
+The \fBserver\fP section provides global settings for how \fBpfxhttp\fP operates, including logging, communication settings, HTTP client behavior, and optional TLS configuration.
+
+.nf
+.EXAMPLE
+server:
+  listen:
+    - kind: "socket_map"
+      name: "map"
+      type: "tcp"
+      address: "0.0.0.0"
+      port: 23450
+  logging:
+    json: false
+    level: debug
+  http_client:
+    max_connections_per_host: 10
+    max_idle_connections: 4
+    max_idle_connections_per_host: 1
+    idle_connection_timeout: 30
+  tls:
+    enabled: true
+    cert: "/etc/pfxhttp/cert.pem"
+    key: "/etc/pfxhttp/key.pem"
+    skip_verify: true
+  socketmap_max_reply_size: 100000
+.fi
+.RE
+
+.TP
+.B listen
+Configures the connections \fBpfxhttp\fP listens to for requests.
+.RS
+.IP \[bu] 2
+.B kind:
+Specifies the type of service (\fBsocket_map\fP or \fBpolicy_service\fP).
+.IP \[bu] 2
+.B type:
+The connection type. Can be \fBunix\fP, \fBtcp\fP, or \fBtcp6\fP.
+.IP \[bu] 2
+.B name:
+Optional for \fBsocket_map\fP, but required for \fBpolicy_service\fP.
+.IP \[bu] 2
+.B address:
+The network address to bind to (e.g., \fB0.0.0.0\fP) for \fBtcp\fP or \fBtcp6\fP types. Ignored for \fBunix\fP sockets.
+.IP \[bu] 2
+.B port:
+The port used to listen for connections. Relevant only for \fBtcp\fP and \fBtcp6\fP types.
+.IP \[bu] 2
+.B mode:
+Applicable only for \fBunix\fP sockets. Sets the socket's access permissions as an octal value, such as \fB0666\fP.
+.RE
+
+.TP
+.B logging
+Specifies logging behavior.
+.RS
+.IP \[bu] 2
+.B json:
+Enables JSON format logging (\fBtrue\fP or \fBfalse\fP).
+.IP \[bu] 2
+.B level:
+Sets the verbosity of logs. Options are \fBerror\fP, \fBinfo\fP, or \fBdebug\fP.
+.RE
+
+.TP
+.B http_client
+Configures the behavior of the HTTP client used by \fBpfxhttp\fP.
+.RS
+.IP \[bu] 2
+.B max_connections_per_host:
+Maximum number of concurrent connections per host.
+.IP \[bu] 2
+.B max_idle_connections:
+Maximum number of idle connections allowed in total.
+.IP \[bu] 2
+.B max_idle_connections_per_host:
+Maximum idle connections per host.
+.IP \[bu] 2
+.B idle_connection_timeout:
+Timeout for idle connections, in seconds.
+.RE
+
+.TP
+.B tls
+TLS configuration for secure HTTP connections. All fields are optional.
+.RS
+.IP \[bu] 2
+.B enabled:
+Enables or disables TLS (\fBtrue\fP or \fBfalse\fP).
+.IP \[bu] 2
+.B cert:
+Path to the TLS certificate (optional).
+.IP \[bu] 2
+.B key:
+Path to the TLS private key (optional).
+.IP \[bu] 2
+.B skip_verify:
+If \fBtrue\fP, disables verification of peer certificates.
+.RE
+
+.TP
+.B socketmap_max_reply_size
+Specifies the maximum reply size for socket maps. Defaults to \fB100000\fP if not explicitly configured.
+
+.SS SOCKET_MAPS
+The \fBsocket_maps\fP section defines services used by Postfix to perform dynamic lookups. This functionality is commonly used for querying an external service to map a key (e.g., an email address or domain) to a value.
+
+.nf
+.EXAMPLE
+socket_maps:
+  demo_map:
+    target: "https://your-api.example.com/api/v1/map"
+    custom_headers:
+      - "Authorization: Bearer <token>"
+    payload: >
+      {
+        "key": "{{ .Key }}"
+      }
+    status_code: 200
+    value_field: "data.result"
+    error_field: "error"
+    no_error_value: "not-found"
+.fi
+.RE
+
+.TP
+.B payload
+Defines the HTTP request body for socket maps. The placeholder \fB{{ .Key }}\fP is required and represents the lookup key provided by Postfix.
+
+.SS POLICY_SERVICES
+The \fBpolicy_services\fP section defines external HTTP services used for Postfix policy decisions. Examples include sender authentication or access restriction checks.
+
+.nf
+.EXAMPLE
+policy_services:
+  example_policy:
+    target: "https://your-api.example.com/api/v1/policy/check"
+    custom_headers:
+      - "Authorization: Bearer <token>"
+    payload: "{{ .Key }}"
+    status_code: 200
+    value_field: "policy.result"
+    error_field: "policy.error"
+    no_error_value: "OK"
+.fi
+.RE
+
+.TP
+.B payload
+Defines the HTTP request body for policy services. The placeholder \fB{{ .Key }}\fP is required and is replaced with the JSON-encoded policy request provided by Postfix. This request contains all available policy attributes. The payload can also be passed as a nested JSON structure, for example:
+.nf
+
+Payload:
+{
+  "policy_request": {{ .Key }}
+}
+.fi
+
+.TP
+.B value_field
+The JSON field in the HTTP response containing the policy result to be returned to Postfix.
+
+.TP
+.B no_error_value
+A specific value that may be returned by the HTTP server to indicate no error occurred.
+
+.SH POSTFIX INTEGRATION
+Below are examples for incorporating the \fBsocket_map\fP and \fBpolicy_service\fP types in Postfix configurations. These examples assume a correctly configured pfxhttp server.
+
+.SS SOCKET_MAP INTEGRATION
+To use a \fBsocket_map\fP in your Postfix configuration, include it as a socket map in your `main.cf`:
+
+.nf
+# main.cf
+virtual_mailbox_domains = socketmap:tcp:127.0.0.1:23450:demo_map
+.fi
+
+This example assumes:
+- A listener in \fBpfxhttp.yml\fP is defined for \fBsocket_map\fP:
+.nf
+server:
+  listen:
+    - kind: "socket_map"
+      name: "demo_map"
+      type: "tcp"
+      address: "127.0.0.1"
+      port: 23450
+.fi
+
+Explanation:
+- Postfix connects to the \fBtcp\fP listener on `127.0.0.1:23450`.
+- The lookup key is provided from Postfix's requests (e.g., domain names).
+- The result is returned from the \fBpfxhttp\fP service.
+
+.SS POLICY_SERVICE INTEGRATION
+To implement a \fBpolicy_service\fP, add it to the appropriate Postfix \fBcheck_policy_service\fP configuration (commonly used in the `smtpd_recipient_restrictions`):
+
+.nf
+# main.cf
+smtpd_recipient_restrictions =
+    permit_mynetworks,
+    reject_unauth_destination,
+    check_policy_service inet:127.0.0.1:23451
+.fi
+
+This example assumes:
+- A listener for a \fBpolicy_service\fP is configured in \fBpfxhttp.yml\fP:
+.nf
+server:
+  listen:
+    - kind: "policy_service"
+      name: "example_policy"
+      type: "tcp"
+      address: "127.0.0.1"
+      port: 23451
+.fi
+
+Explanation:
+- The payload sent to the HTTP service uses the Postfix policy request converted to JSON, passed as \fB{{ .Key }}\fP.
+- Postfix queries the policy service for decisions based on this request.
+- The policy service responds with actions like `DUNNO`, `REJECT`, or other return codes to modify Postfix’s behavior.
+
+.SH FILE LOCATIONS
+Configuration files are searched in the following order:
+.RS
+.IP \[bu] 2
+.B /usr/local/etc/pfxhttp/pfxhttp.yml
+.IP \[bu] 2
+.B /etc/pfxhttp/pfxhttp.yml
+.IP \[bu] 2
+.B $HOME/.pfxhttp/pfxhttp.yml
+.IP \[bu] 2
+.B ./pfxhttp.yml
+.RE
+
+.SH SEE ALSO
+.BR postfix (1),
+.BR pfxhttp (8)
+
+.SH AUTHOR
+This manpage was written by the pfxhttp development team.

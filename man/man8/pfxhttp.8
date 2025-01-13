@@ -1,0 +1,77 @@
+.TH PFXHTTP 8 "January 2025" "pfxhttp 1.0" "System Administration Tools"
+.SH NAME
+pfxhttp \- HTTP-based proxy for Postfix socket maps and policy services
+
+.SH SYNOPSIS
+.B pfxhttp
+.SH DESCRIPTION
+.B pfxhttp
+is a lightweight HTTP proxy designed for integration with Postfix. It allows Postfix to communicate with external HTTP-based APIs for socket maps and policy services.
+
+The application is typically used to:
+.RS
+.IP \[bu] 2
+Query dynamic data using socket maps, such as mappings for virtual mailboxes or domains.
+.IP \[bu] 2
+Implement custom email policy checks via HTTP-based policy services.
+.RE
+
+Configuration is provided via a YAML file, which defines details such as HTTP endpoints, request formats, and field mappings.
+
+.SH CONFIGURATION
+By default, \fBpfxhttp\fP reads its configuration from
+.B /etc/pfxhttp/pfxhttp.yml.
+This file must be correctly set up for the application to function.
+
+For more information about the configuration format, refer to the separate \fBpfxhttp.yml(5)\fP manpage.
+
+.SH STARTING THE SERVICE
+\fBpfxhttp\fP does not accept any command-line arguments and must always be run with a valid configuration file. It is typically managed as a system service.
+
+The following example \fBsystemd\fP service definition can be used to run \fBpfxhttp\fP:
+
+.nf
+[Unit]
+Description=Postfix HTTP Proxy (pfxhttp)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/pfxhttp
+Restart=always
+User=postfix
+Group=postfix
+
+[Install]
+WantedBy=multi-user.target
+.fi
+
+To install it as a system service on a systemd-based Linux distribution, save the above file as
+\fI/etc/systemd/system/pfxhttp.service\fP,
+reload systemd, then enable and start the service:
+
+.nf
+  sudo systemctl daemon-reload
+  sudo systemctl enable pfxhttp
+  sudo systemctl start pfxhttp
+.fi
+
+.SH LOGGING
+Logs are printed to standard output by default and are typically captured by the service manager (e.g., \fBsystemd\fP). The verbosity of logs can be configured in the YAML file.
+
+.SH DIAGNOSTICS
+If \fBpfxhttp\fP fails to start, common sources of errors include:
+.RS
+.IP \[bu] 2
+Invalid or missing configuration file. Ensure \fB/etc/pfxhttp/pfxhttp.yml\fP is correct.
+.IP \[bu] 2
+Insufficient permissions. Ensure \fBpfxhttp\fP is running with appropriate privileges for the configured resources.
+.RE
+
+Refer to the logs for specific errors.
+
+.SH SEE ALSO
+.BR postfix (1),
+.BR pfxhttp.yml (5)
+
+.SH AUTHOR
+This manpage was written by the pfxhttp development team.
