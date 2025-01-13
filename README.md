@@ -2,6 +2,26 @@
 
 Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external HTTP APIs for **socket maps** and **policy services**. This enables dynamic and flexible email workflows by connecting Postfix to modern APIs.
 
+# Table of contents
+
+<!-- TOC -->
+* [Pfxhttp – HTTP Proxy for Postfix](#pfxhttp--http-proxy-for-postfix)
+* [Table of contents](#table-of-contents)
+  * [Overview](#overview)
+  * [Getting Started](#getting-started)
+    * [Installation](#installation)
+    * [Running as a System Service](#running-as-a-system-service)
+  * [Configuration](#configuration)
+    * [Server Settings](#server-settings)
+    * [Integrating with Postfix](#integrating-with-postfix)
+      * [Socket Maps](#socket-maps)
+      * [Policy Services](#policy-services)
+  * [Logging and Troubleshooting](#logging-and-troubleshooting)
+  * [Contributing](#contributing)
+  * [References](#references)
+<!-- TOC -->
+
+
 ## Overview
 
 Pfxhttp allows you to:
