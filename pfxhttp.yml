@@ -5,12 +5,13 @@ server:
 
   listen:
     - kind: "socket_map"
+      name: "map"
       type: "tcp"
       address: "0.0.0.0"
       port: 23450
 
     - kind: "policy_service"
-      name: "default"
+      name: "policy"
       type: "tcp"
       address: "0.0.0.0"
       port: 23451
@@ -50,7 +51,7 @@ socket_maps:
 
 policy_services:
 
-  default:
+  policy:
     target: https://127.0.0.1:9443/api/v1/custom/demo_policy
     custom_headers:
       # User 'test', password 'test'

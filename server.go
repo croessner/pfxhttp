@@ -61,15 +61,28 @@ func NewServer(ctx *Context, config *Config) GenericServer {
 // Start initializes and starts the MultiServer, accepting client connections and processing them.
 func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error {
 	var (
-		mode int64
-		conn net.Conn
-		err  error
+		mode     int64
+		conn     net.Conn
+		fileInfo os.FileInfo
+		err      error
 	)
 
 	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
 
+	conn, err = net.DialTimeout(instance.Type, s.address, 1*time.Second)
+	if err == nil {
+		_ = conn.Close()
+
+		return fmt.Errorf("address %s is already in use", s.address)
+	}
+
 	if instance.Type == "unix" {
 		s.address = instance.Address
+		if fileInfo, err = os.Stat(instance.Address); err == nil && fileInfo.Mode()&os.ModeSocket != 0 {
+			if err = os.Remove(instance.Address); err != nil {
+				return err
+			}
+		}
 	} else {
 		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
 	}
@@ -78,12 +91,8 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 		s.name = instance.Name
 	}
 
-	logger.Info("Starting server...", slog.String("address", s.address), slog.String("version", version))
-
 	s.listener, err = net.Listen(instance.Type, s.address)
 	if err != nil {
-		logger.Error("Could not start server", slog.String("error", err.Error()))
-
 		return fmt.Errorf("could not start server: %w", err)
 	}
 
@@ -98,12 +107,12 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 		}
 	}
 
-	logger.Info("Server is listening...", slog.String("type", instance.Type), slog.String("address", s.address))
+	logger.Info("Server is listening", slog.String("type", instance.Type), slog.String("address", s.address), slog.String("name", s.name), slog.String("kind", instance.Kind))
 
 	for {
 		conn, err = s.listener.Accept()
 		if errors.Is(err, net.ErrClosed) {
-			logger.Info("Server is shutting down...")
+			logger.Info("Server is shutting down", slog.String("address", s.address), slog.String("name", s.name))
 
 			return nil
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,6 +13,11 @@ var version = "dev"
 type ctxKey string
 
 const loggerKey ctxKey = "logging"
+
+const (
+	socketMapKind     = "socket_map"
+	policyServiceKind = "policy_service"
+)
 
 func loadConfig(ctx *Context) *Config {
 	cfg, err := NewConfigFile()
@@ -68,7 +74,7 @@ func handleSignals(server GenericServer) {
 
 	go func() {
 		sig := <-signalChan
-		logger.Info("Received signal", slog.String("signal", sig.String()))
+		logger.Debug("Received signal", slog.String("signal", sig.String()))
 
 		if server != nil {
 			server.Stop()
@@ -81,39 +87,40 @@ func handleSignals(server GenericServer) {
 func runServer(ctx *Context, cfg *Config) {
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 
-	for _, instance := range cfg.Server.Listen {
-		if instance.Kind == "socket_map" {
-			go func(instance Listen) {
-				server := NewServer(ctx, cfg)
+	logger.Info("Starting server", slog.String("version", version))
 
-				handleSignals(server)
+	startServer := func(listenConfig Listen, handler func(conn net.Conn)) {
+		server := NewServer(ctx, cfg)
 
-				err := server.Start(instance, server.HandleNetStringConnection)
-				if err != nil {
-					logger.Error("Server error", slog.String("error", err.Error()))
-				}
-			}(instance)
-		} else if instance.Kind == "policy_service" {
-			go func(instance Listen) {
-				if instance.Name != "" {
-					server := NewServer(ctx, cfg)
+		handleSignals(server)
 
-					handleSignals(server)
+		err := server.Start(listenConfig, handler)
 
-					err := server.Start(instance, server.HandlePolicyServiceConnection)
-					if err != nil {
-						logger.Error("Server error", slog.String("error", err.Error()))
-					}
-				}
-			}(instance)
-		} else {
-			logger.Error("Invalid listen instance", slog.String("instance", instance.Kind))
+		if err != nil {
+			logger.Error("Failed to start server", slog.String("kind", listenConfig.Kind), slog.String("error", err.Error()))
+		}
+	}
+
+	for _, listenConfig := range cfg.Server.Listen {
+		switch listenConfig.Kind {
+		case socketMapKind:
+			go startServer(listenConfig, NewServer(ctx, cfg).HandleNetStringConnection)
+		case policyServiceKind:
+			if listenConfig.Name == "" {
+				logger.Error("Policy service requires a valid name")
+
+				return
+			}
+
+			go startServer(listenConfig, NewServer(ctx, cfg).HandlePolicyServiceConnection)
+		default:
+			logger.Error("Unsupported listen kind", slog.String("kind", listenConfig.Kind))
 
 			return
 		}
 	}
 
-	select {}
+	select {} // Block indefinitely
 }
 
 func main() {
