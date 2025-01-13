@@ -1,34 +1,51 @@
-.TH PFXHTTP 8 "January 2025" "pfxhttp 1.0" "System Administration Tools"
+
+.TH PFXHTTP 8 "January 2025" "pfxhttp 1.0" "System Administration Utility"
 .SH NAME
-pfxhttp \- HTTP-based proxy for Postfix socket maps and policy services
+pfxhttp \- A lightweight HTTP proxy for Postfix socket maps and policy services
 
 .SH SYNOPSIS
-.B pfxhttp
+.B pfxhttp -h
 .SH DESCRIPTION
 .B pfxhttp
-is a lightweight HTTP proxy designed for integration with Postfix. It allows Postfix to communicate with external HTTP-based APIs for socket maps and policy services.
+is a lightweight HTTP proxy seamlessly integrated with Postfix, enabling communication with external HTTP-based APIs for socket maps and policy services.
 
-The application is typically used to:
+Common use cases for the application include:
 .RS
 .IP \[bu] 2
-Query dynamic data using socket maps, such as mappings for virtual mailboxes or domains.
+Retrieving dynamic data via socket maps, such as virtual mailbox or domain mappings.
 .IP \[bu] 2
-Implement custom email policy checks via HTTP-based policy services.
+Implementing custom email policy checks through HTTP-based policy services.
 .RE
 
-Configuration is provided via a YAML file, which defines details such as HTTP endpoints, request formats, and field mappings.
+The application configuration is typically managed through a YAML file (default) and may define HTTP endpoints, request formats, and field mappings.
+Environment variables take precedence over the configuration within the YAML file when both are specified.
 
 .SH CONFIGURATION
-By default, \fBpfxhttp\fP reads its configuration from
-.B /etc/pfxhttp/pfxhttp.yml.
-This file must be correctly set up for the application to function.
+By default, \fBpfxhttp\fP reads its YAML configuration file from one of the default paths listed under the section
+.B FILE LOCATIONS
 
-For more information about the configuration format, refer to the separate \fBpfxhttp.yml(5)\fP manpage.
+Alternative configuration formats are supported if explicitly specified.
+
+It is possible to start the service without a configuration file, if you have specified all settings as environment variables.
+
+Environment variables, when set, override the corresponding options in the configuration file.
+
+For detailed information on the YAML configuration format, refer to the \fBpfxhttp.yml(5)\fP manual page.
 
 .SH STARTING THE SERVICE
-\fBpfxhttp\fP does not accept any command-line arguments and must always be run with a valid configuration file. It is typically managed as a system service.
+\fBpfxhttp\fP supports optional command-line arguments and requires a valid configuration to run. It is usually managed as a system service.
 
-The following example \fBsystemd\fP service definition can be used to run \fBpfxhttp\fP:
+The command-line options are:
+.RS
+.IP \[bu] 2
+.B --config <path>
+Provides the path to the configuration file, overriding the default locations.
+.IP \[bu] 2
+.B --format <type>
+Specifies the output format for logs or diagnostics (e.g., json, toml). The default is yaml.
+.RE
+
+Here is an example of a \fBsystemd\fP service file that runs \fBpfxhttp\fP:
 
 .nf
 [Unit]
@@ -36,7 +53,7 @@ Description=Postfix HTTP Proxy (pfxhttp)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/pfxhttp
+ExecStart=/usr/local/sbin/pfxhttp
 Restart=always
 User=postfix
 Group=postfix
@@ -45,8 +62,8 @@ Group=postfix
 WantedBy=multi-user.target
 .fi
 
-To install it as a system service on a systemd-based Linux distribution, save the above file as
-\fI/etc/systemd/system/pfxhttp.service\fP,
+To set it up as a system service on a systemd-based Linux system, save the file above to
+\fI/etc/systemd/system/pfxhttp.service\fP.
 reload systemd, then enable and start the service:
 
 .nf
@@ -56,22 +73,34 @@ reload systemd, then enable and start the service:
 .fi
 
 .SH LOGGING
-Logs are printed to standard output by default and are typically captured by the service manager (e.g., \fBsystemd\fP). The verbosity of logs can be configured in the YAML file.
+By default, logs are output to standard output and usually captured by the service manager (e.g., \fBsystemd\fP). Logging verbosity can be adjusted through the configuration file or environment variables.
 
-.SH DIAGNOSTICS
 If \fBpfxhttp\fP fails to start, common sources of errors include:
 .RS
 .IP \[bu] 2
-Invalid or missing configuration file. Ensure \fB/etc/pfxhttp/pfxhttp.yml\fP is correct.
+An invalid or missing configuration (file or environment variables).
 .IP \[bu] 2
-Insufficient permissions. Ensure \fBpfxhttp\fP is running with appropriate privileges for the configured resources.
+Insufficient permissions. Ensure \fBpfxhttp\fP runs with the proper privileges for the defined resources.
 .RE
 
 Refer to the logs for specific errors.
 
+.SH FILE LOCATIONS
+Configuration files are searched in the following order:
+.RS
+.IP \[bu] 2
+.B /usr/local/etc/pfxhttp/pfxhttp.yml
+.IP \[bu] 2
+.B /etc/pfxhttp/pfxhttp.yml
+.IP \[bu] 2
+.B $HOME/.pfxhttp/pfxhttp.yml
+.IP \[bu] 2
+.B ./pfxhttp.yml
+.RE
+
 .SH SEE ALSO
-.BR postfix (1),
-.BR pfxhttp.yml (5)
+.BR postfix (1)
+.BR pfxhttp.yml (5),
 
 .SH AUTHOR
 This manpage was written by the pfxhttp development team.

@@ -11,6 +11,7 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
   * [Getting Started](#getting-started)
     * [Installation](#installation)
     * [Running as a System Service](#running-as-a-system-service)
+    * [Command-line Options](#command-line-options)
   * [Configuration](#configuration)
     * [Server Settings](#server-settings)
     * [Integrating with Postfix](#integrating-with-postfix)
@@ -82,11 +83,27 @@ sudo systemctl enable pfxhttp
 sudo systemctl start pfxhttp
 ```
 
+### Command-line Options
+
+Pfxhttp provides the following command-line flags:
+
+- **--config**: Specifies the path to the configuration file. Overrides the default configuration file location.
+  ```bash
+  ./pfxhttp --config=/path/to/config.yml
+  ```
+
+- **--format**: Sets the logging format. Available options are `yaml`, `toml` or `json`.
+  ```bash
+  ./pfxhttp --format=json
+  ```
+
+> Use these flags as needed to customize the behavior of the application during runtime.
+
 ---
 
 ## Configuration
 
-Pfxhttp is configured through a YAML file named `pfxhttp.yml`. The following are the main sections:
+Pfxhttp is configured through a YAML file named `pfxhttp.yml` (or a custom file specified with the `--config` and `--format` flags). The following are the main sections:
 
 ### Server Settings
 

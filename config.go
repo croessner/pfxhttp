@@ -1,8 +1,11 @@
 package main
 
 import (
+	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -70,20 +73,48 @@ func (cfg *Config) HandleConfig() error {
 func NewConfigFile() (cfg *Config, err error) {
 	cfg = &Config{}
 
-	viper.SetConfigName("pfxhttp")
+	// Define command-line flags for config file and format
+	pflag.String("config", "", "Path to the configuration file")
+	pflag.String("format", "yaml", "Format of the configuration file (e.g., yaml, json, toml)")
+	pflag.Parse()
 
-	viper.SetConfigType("yaml")
-
-	viper.AddConfigPath("/usr/local/etc/pfxhttp/")
-	viper.AddConfigPath("/etc/pfxhttp/")
-	viper.AddConfigPath("$HOME/.pfxhttp")
-	viper.AddConfigPath(".")
-
-	err = viper.ReadInConfig()
+	// Bind flags to Viper
+	err = viper.BindPFlags(pflag.CommandLine)
 	if err != nil {
 		return nil, err
 	}
 
+	// Read values from the flags
+	configPath := viper.GetString("config")
+	configFormat := viper.GetString("format")
+
+	// Use the passed --config and --format values
+	if configPath != "" {
+		viper.SetConfigFile(configPath)
+		viper.SetConfigType(configFormat)
+	} else {
+		// Default case: look up in standard paths
+		viper.SetConfigName("pfxhttp")
+		viper.SetConfigType(configFormat)
+
+		viper.AddConfigPath("/usr/local/etc/pfxhttp/")
+		viper.AddConfigPath("/etc/pfxhttp/")
+		viper.AddConfigPath("$HOME/.pfxhttp")
+		viper.AddConfigPath(".")
+	}
+
+	// Attempt to read configuration
+	err = viper.ReadInConfig()
+	if err != nil {
+		slog.Info("No configuration file found")
+	}
+
+	// Enable reading environment variables
+	viper.AutomaticEnv()
+	viper.SetEnvPrefix("PFXHTTP")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Parse the configuration into the struct
 	err = cfg.HandleConfig()
 
 	return cfg, err

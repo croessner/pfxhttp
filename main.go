@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 )
 
@@ -21,10 +22,7 @@ func loadConfig(ctx *Context) *Config {
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 
 	if err != nil {
-		logger.Error(
-			"Error loading config",
-			"error", err,
-		)
+		logger.Error("Error loading config", "error", err)
 
 		return nil
 	}
@@ -78,7 +76,9 @@ func handleSignals(server GenericServer) {
 	}()
 }
 
-func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config) {
+func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 	server := NewMultiServer(ctx, cfg)
 
@@ -92,7 +92,9 @@ func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config) {
 	}
 }
 
-func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config) {
+func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 	server := NewMultiServer(ctx, cfg)
 
@@ -107,16 +109,25 @@ func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config) {
 }
 
 func runServer(ctx *Context, cfg *Config) {
+	var wg sync.WaitGroup
+
+	taskCount := 0
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 
 	logger.Info("Starting server", slog.String("version", version))
 
 	for _, instance := range cfg.Server.Listen {
 		if instance.Kind == "socket_map" {
-			go newNetStringServerInstance(instance, ctx, cfg)
+			wg.Add(1)
+			taskCount++
+
+			go newNetStringServerInstance(instance, ctx, cfg, &wg)
 		} else if instance.Kind == "policy_service" {
 			if instance.Name != "" {
-				go newPolicyServiceInstance(instance, ctx, cfg)
+				wg.Add(1)
+				taskCount++
+
+				go newPolicyServiceInstance(instance, ctx, cfg, &wg)
 			} else {
 				logger.Error("Policy service requires a name")
 
@@ -129,7 +140,12 @@ func runServer(ctx *Context, cfg *Config) {
 		}
 	}
 
-	select {}
+	if taskCount > 0 {
+		wg.Wait()
+		logger.Info("Server stopped", slog.String("version", version))
+	} else {
+		logger.Error("No listen instances configured")
+	}
 }
 
 func main() {
