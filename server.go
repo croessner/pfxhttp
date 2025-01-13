@@ -264,7 +264,7 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 				return
 			}
 
-			responseData := fmt.Sprintf("action=%s\n\n", client.GetSender().String())
+			responseData := fmt.Sprintf("action=%s\n\n", strings.TrimSpace(client.GetSender().String()))
 
 			err = s.writePolicyResult(conn, responseData)
 			if err != nil {
