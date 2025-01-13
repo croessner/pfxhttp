@@ -46,8 +46,8 @@ type MultiServer struct {
 	wg       sync.WaitGroup
 }
 
-// NewServer creates and initializes a new MultiServer instance with the provided context and config.
-func NewServer(ctx *Context, config *Config) GenericServer {
+// NewMultiServer creates and initializes a new MultiServer instance with the provided context and config.
+func NewMultiServer(ctx *Context, config *Config) GenericServer {
 	childCtx, closer := context.WithCancel(ctx)
 
 	return &MultiServer{
@@ -264,7 +264,7 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 				return
 			}
 
-			responseData := client.GetSender().String() + "\n\n"
+			responseData := fmt.Sprintf("action=%s\n\n", client.GetSender().String())
 
 			err = s.writePolicyResult(conn, responseData)
 			if err != nil {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,11 +12,6 @@ var version = "dev"
 type ctxKey string
 
 const loggerKey ctxKey = "logging"
-
-const (
-	socketMapKind     = "socket_map"
-	policyServiceKind = "policy_service"
-)
 
 func loadConfig(ctx *Context) *Config {
 	cfg, err := NewConfigFile()
@@ -84,43 +78,58 @@ func handleSignals(server GenericServer) {
 	}()
 }
 
+func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config) {
+	logger := ctx.Value(loggerKey).(*slog.Logger)
+	server := NewMultiServer(ctx, cfg)
+
+	handleSignals(server)
+
+	err := server.Start(instance, server.HandleNetStringConnection)
+	if err != nil {
+		logger.Error("Server error", slog.String("error", err.Error()))
+
+		return
+	}
+}
+
+func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config) {
+	logger := ctx.Value(loggerKey).(*slog.Logger)
+	server := NewMultiServer(ctx, cfg)
+
+	handleSignals(server)
+
+	err := server.Start(instance, server.HandlePolicyServiceConnection)
+	if err != nil {
+		logger.Error("Server error", slog.String("error", err.Error()))
+
+		return
+	}
+}
+
 func runServer(ctx *Context, cfg *Config) {
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 
 	logger.Info("Starting server", slog.String("version", version))
 
-	startServer := func(listenConfig Listen, handler func(conn net.Conn)) {
-		server := NewServer(ctx, cfg)
-
-		handleSignals(server)
-
-		err := server.Start(listenConfig, handler)
-
-		if err != nil {
-			logger.Error("Failed to start server", slog.String("kind", listenConfig.Kind), slog.String("error", err.Error()))
-		}
-	}
-
-	for _, listenConfig := range cfg.Server.Listen {
-		switch listenConfig.Kind {
-		case socketMapKind:
-			go startServer(listenConfig, NewServer(ctx, cfg).HandleNetStringConnection)
-		case policyServiceKind:
-			if listenConfig.Name == "" {
-				logger.Error("Policy service requires a valid name")
+	for _, instance := range cfg.Server.Listen {
+		if instance.Kind == "socket_map" {
+			go newNetStringServerInstance(instance, ctx, cfg)
+		} else if instance.Kind == "policy_service" {
+			if instance.Name != "" {
+				go newPolicyServiceInstance(instance, ctx, cfg)
+			} else {
+				logger.Error("Policy service requires a name")
 
 				return
 			}
-
-			go startServer(listenConfig, NewServer(ctx, cfg).HandlePolicyServiceConnection)
-		default:
-			logger.Error("Unsupported listen kind", slog.String("kind", listenConfig.Kind))
+		} else {
+			logger.Error("Invalid listen instance", slog.String("instance", instance.Kind))
 
 			return
 		}
 	}
 
-	select {} // Block indefinitely
+	select {}
 }
 
 func main() {
