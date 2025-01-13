@@ -251,6 +251,8 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 				return
 			}
 
+			logger.Debug("Received request", slog.String("client", clientAddr), slog.String("request", policy.String()))
+
 			received := NewPostfixPolicyReceiver(s.name)
 			_ = received.ReadPolcy(policy)
 

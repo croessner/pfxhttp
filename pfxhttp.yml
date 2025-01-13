@@ -18,7 +18,7 @@ server:
 
   logging:
     json: false
-    level: info
+    level: debug
 
   http_client:
     max_connections_per_host: 10
@@ -36,7 +36,7 @@ server:
 socket_maps:
 
   demo:
-    target: https://127.0.0.1:9443/api/v1/custom/demo
+    target: https://127.0.0.1:9443/api/v1/custom/pfx
     custom_headers:
       # User 'test', password 'test'
       - "Authorization: Basic dGVzdDp0ZXN0"
@@ -52,12 +52,12 @@ socket_maps:
 policy_services:
 
   policy:
-    target: https://127.0.0.1:9443/api/v1/custom/demo_policy
+    target: https://127.0.0.1:9443/api/v1/custom/pfxpolicy
     custom_headers:
       # User 'test', password 'test'
       - "Authorization: Basic dGVzdDp0ZXN0"
     payload: "{{ .Key }}"
     status_code: 200
-    value_field: "demo_value"
+    value_field: "result"
     error_field: "error"
     no_error_value: "none"

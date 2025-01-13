@@ -87,7 +87,7 @@ func (r *PostfixPolicyReceiver) GetName() string {
 }
 
 func (r *PostfixPolicyReceiver) GetKey() string {
-	return r.data.String()
+	return r.data.ToJSON()
 }
 
 func (r *PostfixPolicyReceiver) ReadNetString(_ NetData) error {
@@ -151,6 +151,9 @@ type Policy interface {
 	// String returns the string representation of the implemented Policy, typically combining key-value pairs into a single string.
 	String() string
 
+	// ToJSON converts the implementing Policy's key-value data into a JSON-formatted string. Returns an empty string on error.
+	ToJSON() string
+
 	// SetData sets the given key-value pair into the policy's data storage, overwriting the value if the key already exists.
 	SetData(key, value string)
 
@@ -199,8 +202,19 @@ type PostfixPolicy struct {
 	data map[string]string
 }
 
-// String converts the PostfixPolicy data map into a JSON string. Returns an empty string if the receiver is nil or on error.
+// String converts the PostfixPolicy's key-value data into a single space-delimited string in the format `key=value`.
 func (p *PostfixPolicy) String() string {
+	var result []string
+
+	for k, v := range p.data {
+		result = append(result, k+"="+v)
+	}
+
+	return strings.Join(result, " ")
+}
+
+// ToJSON serializes the PostfixPolicy's data map into a JSON-formatted string. Returns an empty string if serialization fails.
+func (p *PostfixPolicy) ToJSON() string {
 	jsonData, err := json.Marshal(p.data)
 	if err != nil {
 		return ""

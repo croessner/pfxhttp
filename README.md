@@ -45,6 +45,9 @@ server:
 
     - kind: "socket_map"
       
+      # An optional name for this listener.
+      name: ""
+      
       # 'tcp', 'tcp6' or 'unix'
       # By using 'unix' the paramter 'mode' must also be specified
       type: "tcp"
