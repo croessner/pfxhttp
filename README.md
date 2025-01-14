@@ -62,18 +62,43 @@ Pfxhttp is typically run as a **systemd** service. Below is an example unit file
 
 ```ini
 [Unit]
-Description=Postfix HTTP Proxy (pfxhttp)
+Description=PfxHTTP Postfix-to-HTTP server
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/pfxhttp
+Type=simple
 Restart=always
-User=postfix
-Group=postfix
+User=pfxhttp
+Group=pfxhttp
+EnvironmentFile=-/etc/default/pfxhttp
+ExecStart=/usr/local/sbin/pfxhttp
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pfxhttp
+MemoryMax=50M
+CPUQuota=10%
+
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_CHOWN
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+ReadOnlyPaths=/etc
+ProtectKernelModules=true
+MemoryDenyWriteExecute=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+ProtectProc=invisible
+LimitNOFILE=1024
+#RestrictAddressFamilies=AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+You must create a user pfxhttp and a group pfxhttp before using this unit file!
 
 To install and start the service:
 
