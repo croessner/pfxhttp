@@ -1,73 +1,91 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	Server         Server             `mapstructure:"server"`
-	SocketMaps     map[string]Request `mapstructure:"socket_maps"`
-	PolicyServices map[string]Request `mapstructure:"policy_services"`
+	Server         Server             `mapstructure:"server" validate:"required"`
+	SocketMaps     map[string]Request `mapstructure:"socket_maps" validate:"omitempty,dive"`
+	PolicyServices map[string]Request `mapstructure:"policy_services" validate:"omitempty,dive"`
 }
 
 type Server struct {
-	Listen              []Listen   `mapstructure:"listen"`
-	Logging             Logging    `mapstructure:"logging"`
-	HTTPClient          HTTPClient `mapstructure:"http_client"`
-	TLS                 TLS        `mapstructure:"tls"`
-	SockmapMaxReplySize int        `mapstructure:"socketmap_max_reply_size"`
+	Listen              []Listen   `mapstructure:"listen" validate:"required,min=1,dive"`
+	Logging             Logging    `mapstructure:"logging" validate:"omitempty"`
+	HTTPClient          HTTPClient `mapstructure:"http_client" validate:"omitempty"`
+	TLS                 TLS        `mapstructure:"tls" validate:"omitempty"`
+	SockmapMaxReplySize int        `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
 }
 
 type Listen struct {
-	Kind    string `mapstructure:"kind"`
-	Name    string `mapstructure:"name"`
-	Type    string `mapstructure:"type"`
-	Address string `mapstructure:"address"`
-	Port    int    `mapstructure:"port"`
-	Mode    string `mapstructure:"mode"`
+	Kind    string `mapstructure:"kind" validate:"required,oneof=socket_map policy_service"`
+	Name    string `mapstructure:"name" validate:"omitempty,alphanumunicode,excludesall= "`
+	Type    string `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
+	Address string `mapstructure:"address" validate:"required,ip_addr|filepath"`
+	Port    int    `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
+	Mode    string `mapstructure:"mode" validate:"omitempty,min=4,max=5,alphanumunicode"`
 }
 
 type Logging struct {
 	JSON  bool   `mapstructure:"json"`
-	Level string `mapstructure:"level"`
+	Level string `mapstructure:"level" validate:"omitempty,oneof=none debug info error"`
 }
 
 type HTTPClient struct {
-	MaxConnsPerHost     int           `mapstructure:"max_connections_per_host"`
-	MaxIdleConns        int           `mapstructure:"max_idle_connections"`
-	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host"`
-	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout"`
-	Proxy               string        `mapstructure:"proxy"`
+	MaxConnsPerHost     int           `mapstructure:"max_connections_per_host" validate:"omitempty,min=1,max=16384"`
+	MaxIdleConns        int           `mapstructure:"max_idle_connections" validate:"omitempty,min=0,max=16384"`
+	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host" validate:"omitempty,min=0,max=16384"`
+	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout" validate:"omitempty,min=1ms,max=1h"`
+	Proxy               string        `mapstructure:"proxy" validate:"omitempty,http_url"`
 }
 
 type TLS struct {
 	Enabled    bool   `mapstructure:"enabled"`
-	Cert       string `mapstructure:"cert"`
-	Key        string `mapstructure:"key"`
+	Cert       string `mapstructure:"cert" validate:"omitempty,file"`
+	Key        string `mapstructure:"key" validate:"omitempty,file"`
 	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
 }
 
 type Request struct {
-	Target        string   `mapstructure:"target"`
-	CustomHeaders []string `mapstructure:"custom_headers"`
-	Payload       string   `mapstructure:"payload"`
-	StatusCode    int      `mapstructure:"status_code"`
-	ValueField    string   `mapstructure:"value_field"`
-	ErrorField    string   `mapstructure:"error_field"`
-	NoErrorValue  string   `mapstructure:"no_error_value"`
+	Target        string   `mapstructure:"target" validate:"required,http_url"`
+	CustomHeaders []string `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
+	Payload       string   `mapstructure:"payload" validate:"omitempty,ascii"`
+	StatusCode    int      `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
+	ValueField    string   `mapstructure:"value_field" validate:"omitempty,printascii"`
+	ErrorField    string   `mapstructure:"error_field" validate:"omitempty,printascii"`
+	NoErrorValue  string   `mapstructure:"no_error_value" validate:"omitempty,printascii"`
 }
 
 func (cfg *Config) HandleConfig() error {
-	if cfg.Server.SockmapMaxReplySize <= 0 {
-		cfg.Server.SockmapMaxReplySize = 100000
+	var validationErrors validator.ValidationErrors
+
+	err := viper.Unmarshal(cfg)
+	if err != nil {
+		return err
 	}
 
-	return viper.Unmarshal(cfg)
+	validate := validator.New(validator.WithRequiredStructEnabled())
+
+	err = validate.Struct(cfg)
+	if err == nil {
+		return nil
+	}
+
+	if errors.As(err, &validationErrors) {
+		return prettyFormatValidationErrors(validationErrors)
+	}
+
+	return err
 }
 
 func NewConfigFile() (cfg *Config, err error) {
@@ -118,4 +136,47 @@ func NewConfigFile() (cfg *Config, err error) {
 	err = cfg.HandleConfig()
 
 	return cfg, err
+}
+
+func toSnakeCase(fieldName string) string {
+	var result strings.Builder
+
+	previousWasUpper := false
+
+	for i, r := range fieldName {
+		if unicode.IsUpper(r) {
+			if i > 0 && !previousWasUpper {
+				result.WriteByte('_')
+			}
+
+			previousWasUpper = true
+		} else {
+			previousWasUpper = false
+		}
+
+		result.WriteRune(unicode.ToLower(r))
+	}
+
+	return result.String()
+}
+
+func prettyFormatValidationErrors(validationErrors validator.ValidationErrors) error {
+	var errorMessages []string
+
+	for _, fieldErr := range validationErrors {
+		message := fmt.Sprintf(
+			"field '%s' (struct field: '%s') failed on the '%s' validation rule",
+			toSnakeCase(fieldErr.Field()),
+			fieldErr.StructField(),
+			fieldErr.Tag(),
+		)
+
+		if fieldErr.Param() != "" {
+			message = fmt.Sprintf("%s. Rule parameter: %s", message, fieldErr.Param())
+		}
+
+		errorMessages = append(errorMessages, message)
+	}
+
+	return errors.New("validation errors: " + strings.Join(errorMessages, "; "))
 }

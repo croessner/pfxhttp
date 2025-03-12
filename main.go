@@ -38,13 +38,21 @@ func inititalizeLogger(ctx *Context, cfg *Config) {
 
 	if cfg != nil {
 		switch cfg.Server.Logging.Level {
+		case "none":
+			ctx.Set(loggerKey, slog.DiscardHandler)
+
+			return
 		case "debug":
 			handlerOpts.Level = slog.LevelDebug
 			handlerOpts.AddSource = true
+		case "info":
+			handlerOpts.Level = slog.LevelInfo
 		case "error":
 			handlerOpts.Level = slog.LevelError
 		default:
-			handlerOpts.Level = slog.LevelInfo
+			ctx.Set(loggerKey, slog.DiscardHandler)
+
+			return
 		}
 
 		if cfg.Server.Logging.JSON {

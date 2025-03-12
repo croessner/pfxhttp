@@ -24,7 +24,7 @@ server:
     max_connections_per_host: 10
     max_idle_connections: 4
     max_idle_connections_per_host: 1
-    idle_connection_timeout: 10
+    idle_connection_timeout: 10s
 
   tls:
     enabled: true
