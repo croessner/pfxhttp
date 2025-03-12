@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -33,7 +34,7 @@ type Listen struct {
 	Type    string `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
 	Address string `mapstructure:"address" validate:"required,ip_addr|filepath"`
 	Port    int    `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
-	Mode    string `mapstructure:"mode" validate:"omitempty,min=4,max=5,alphanumunicode"`
+	Mode    string `mapstructure:"mode" validate:"omitempty,octal_mode"`
 }
 
 type Logging struct {
@@ -75,6 +76,8 @@ func (cfg *Config) HandleConfig() error {
 	}
 
 	validate := validator.New(validator.WithRequiredStructEnabled())
+
+	_ = validate.RegisterValidation("octal_mode", isValidOctalMode)
 
 	err = validate.Struct(cfg)
 	if err == nil {
@@ -136,6 +139,18 @@ func NewConfigFile() (cfg *Config, err error) {
 	err = cfg.HandleConfig()
 
 	return cfg, err
+}
+
+func isValidOctalMode(fl validator.FieldLevel) bool {
+	mode := fl.Field().String()
+
+	if !strings.HasPrefix(mode, "0") {
+		return false
+	}
+
+	_, err := strconv.ParseUint(mode, 8, 32)
+
+	return err == nil
 }
 
 func toSnakeCase(fieldName string) string {
