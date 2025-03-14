@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const LogKeyClient = "client"
+
 // GenericServer defines an interface for managing a TCP server with methods to start and stop the server.
 type GenericServer interface {
 	// Start initializes and starts the server, enabling it to accept and process client connections.
@@ -152,10 +154,10 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 
 	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
 
-	logger.Info("New connection established", slog.String("client", clientAddr))
+	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
 	defer func() {
-		logger.Info("Connection closed", slog.String("client", clientAddr))
+		logger.Info("Connection closed", slog.String(LogKeyClient, clientAddr))
 
 		_ = conn.Close()
 
@@ -173,7 +175,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 					break
 				}
 
-				logger.Error("Error reading NetString", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error reading NetString", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -183,13 +185,13 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 				return
 			}
 
-			logger.Debug("Received request", slog.String("client", clientAddr), slog.String("request", netString.String()))
+			logger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", netString.String()))
 
 			received := NewPostfixMapReceiver()
 
 			err = received.ReadNetString(netString)
 			if err != nil {
-				logger.Error("Error reading request", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error reading request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -199,7 +201,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 
 			err = client.SendAndReceive()
 			if err != nil {
-				logger.Error("Error sending request", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -209,12 +211,12 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 
 			err = s.writeNetString(conn, response)
 			if err != nil {
-				logger.Error("Error writing response", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error writing response", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
 
-			logger.Debug("Response sent", slog.String("client", clientAddr), slog.String("response", responseData))
+			logger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
 		}
 	}
 }
@@ -225,10 +227,10 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 
 	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
 
-	logger.Info("New connection established", slog.String("client", clientAddr))
+	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
 	defer func() {
-		logger.Info("Connection closed", slog.String("client", clientAddr))
+		logger.Info("Connection closed", slog.String(LogKeyClient, clientAddr))
 
 		_ = conn.Close()
 
@@ -246,12 +248,12 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 					break
 				}
 
-				logger.Error("Error reading policy", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error reading policy", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
 
-			logger.Debug("Received request", slog.String("client", clientAddr), slog.String("request", policy.String()))
+			logger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", policy.String()))
 
 			received := NewPostfixPolicyReceiver(s.name)
 			_ = received.ReadPolcy(policy)
@@ -261,7 +263,7 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 
 			err = client.SendAndReceive()
 			if err != nil {
-				logger.Error("Error sending request", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				logger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -270,12 +272,18 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 
 			err = s.writePolicyResult(conn, responseData)
 			if err != nil {
-				logger.Error("Error writing response", slog.String("client", clientAddr), slog.String("error", err.Error()))
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					logger.Warn("Write deadline exceeded, closing connection", slog.String(LogKeyClient, conn.RemoteAddr().String()))
+				} else if strings.Contains(err.Error(), "broken pipe") {
+					logger.Info("Broken pipe detected, client likely disconnected", slog.String(LogKeyClient, conn.RemoteAddr().String()))
+				} else {
+					logger.Error("Error writing response", slog.String(LogKeyClient, conn.RemoteAddr().String()), slog.String("error", err.Error()))
+				}
 
 				return
 			}
 
-			logger.Debug("Response sent", slog.String("client", clientAddr), slog.String("response", responseData))
+			logger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
 		}
 	}
 }
@@ -388,9 +396,15 @@ func (s *MultiServer) writeNetString(conn net.Conn, netString NetData) error {
 // writePolicyResult writes the specified policy result to the given network connection.
 // Returns an error if the write operation fails.
 func (s *MultiServer) writePolicyResult(conn net.Conn, result string) error {
-	_, err := conn.Write([]byte(result))
+	// Set a write deadline to avoid long hangs
+	err := conn.SetWriteDeadline(time.Now().Add(300 * time.Second))
 	if err != nil {
-		return fmt.Errorf("could not write policy result: %w", err)
+		return err
+	}
+
+	_, err = conn.Write([]byte(result))
+	if err != nil {
+		return err
 	}
 
 	return nil
