@@ -87,7 +87,7 @@ func askPolicyFields() []string {
 
 	// Define fields to be collected (field name and its description)
 	fieldDescriptions := map[string]string{
-		"request":             "Request type (default: smtpd_access_policy):",
+		"request":             "Request type (usually: smtpd_access_policy):",
 		"protocol_state":      "Protocol state (e.g., RCPT):",
 		"protocol_name":       "Protocol name (e.g., ESMTP):",
 		"queue_id":            "Queue ID (in format e.g., ABC123DEF456):",
