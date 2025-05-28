@@ -26,6 +26,7 @@ type Server struct {
 	HTTPClient          HTTPClient `mapstructure:"http_client" validate:"omitempty"`
 	TLS                 TLS        `mapstructure:"tls" validate:"omitempty"`
 	SockmapMaxReplySize int        `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
+	JWTDBPath           string     `mapstructure:"jwt_db_path" validate:"omitempty,filepath"`
 }
 
 type Listen struct {
@@ -57,6 +58,13 @@ type TLS struct {
 	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
 }
 
+type JWTAuth struct {
+	Enabled       bool   `mapstructure:"enabled"`
+	TokenEndpoint string `mapstructure:"token_endpoint" validate:"required_if=Enabled true,http_url"`
+	Username      string `mapstructure:"username" validate:"required_if=Enabled true"`
+	Password      string `mapstructure:"password" validate:"required_if=Enabled true"`
+}
+
 type Request struct {
 	Target        string   `mapstructure:"target" validate:"required,http_url"`
 	CustomHeaders []string `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
@@ -65,6 +73,7 @@ type Request struct {
 	ValueField    string   `mapstructure:"value_field" validate:"omitempty,printascii"`
 	ErrorField    string   `mapstructure:"error_field" validate:"omitempty,printascii"`
 	NoErrorValue  string   `mapstructure:"no_error_value" validate:"omitempty,printascii"`
+	JWTAuth       JWTAuth  `mapstructure:"jwt_auth" validate:"omitempty"`
 }
 
 func (cfg *Config) HandleConfig() error {

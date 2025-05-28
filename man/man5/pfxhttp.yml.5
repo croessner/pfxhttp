@@ -43,6 +43,7 @@ server:
     key: "/etc/pfxhttp/key.pem"
     skip_verify: true
   socketmap_max_reply_size: 100000
+  jwt_db_path: "/var/lib/pfxhttp/jwt.db"
 .fi
 .RE
 
@@ -122,6 +123,10 @@ If \fBtrue\fP, disables verification of peer certificates.
 .B socketmap_max_reply_size
 Specifies the maximum reply size for socket maps. Defaults to \fB100000\fP if not explicitly configured.
 
+.TP
+.B jwt_db_path
+Path to the SQLite database file used for storing JWT tokens. This is required if JWT authentication is enabled for any socket map or policy service.
+
 .SS SOCKET_MAPS
 The \fBsocket_maps\fP section defines services used by Postfix to perform dynamic lookups. This functionality is commonly used for querying an external service to map a key (e.g., an email address or domain) to a value.
 
@@ -140,7 +145,41 @@ socket_maps:
     value_field: "data.result"
     error_field: "error"
     no_error_value: "not-found"
+
+  jwt_demo_map:
+    target: "https://your-api.example.com/api/v1/map"
+    jwt_auth:
+      enabled: true
+      token_endpoint: "https://your-auth.example.com/token"
+      username: "username"
+      password: "password"
+    payload: >
+      {
+        "key": "{{ .Key }}"
+      }
+    status_code: 200
+    value_field: "data.result"
+    error_field: "error"
+    no_error_value: "not-found"
 .fi
+.RE
+
+.TP
+.B jwt_auth
+Configures JWT authentication for the socket map. This is an alternative to using custom_headers for authentication.
+.RS
+.IP \[bu] 2
+.B enabled:
+Enables or disables JWT authentication (\fBtrue\fP or \fBfalse\fP).
+.IP \[bu] 2
+.B token_endpoint:
+The URL of the token endpoint that provides JWT tokens.
+.IP \[bu] 2
+.B username:
+The username for authentication at the token endpoint.
+.IP \[bu] 2
+.B password:
+The password for authentication at the token endpoint.
 .RE
 
 .TP
@@ -162,7 +201,38 @@ policy_services:
     value_field: "policy.result"
     error_field: "policy.error"
     no_error_value: "OK"
+
+  jwt_example_policy:
+    target: "https://your-api.example.com/api/v1/policy/check"
+    jwt_auth:
+      enabled: true
+      token_endpoint: "https://your-auth.example.com/token"
+      username: "username"
+      password: "password"
+    payload: "{{ .Key }}"
+    status_code: 200
+    value_field: "policy.result"
+    error_field: "policy.error"
+    no_error_value: "OK"
 .fi
+.RE
+
+.TP
+.B jwt_auth
+Configures JWT authentication for the policy service. This is an alternative to using custom_headers for authentication.
+.RS
+.IP \[bu] 2
+.B enabled:
+Enables or disables JWT authentication (\fBtrue\fP or \fBfalse\fP).
+.IP \[bu] 2
+.B token_endpoint:
+The URL of the token endpoint that provides JWT tokens.
+.IP \[bu] 2
+.B username:
+The username for authentication at the token endpoint.
+.IP \[bu] 2
+.B password:
+The password for authentication at the token endpoint.
 .RE
 
 .TP

@@ -33,6 +33,9 @@ server:
   # Default Postfix limit
   socketmap_max_reply_size: 100000
 
+  # Path to SQLite database for JWT token storage
+  jwt_db_path: "/var/lib/pfxhttp/jwt.db"
+
 socket_maps:
 
   demo:
@@ -49,6 +52,22 @@ socket_maps:
     error_field: "error"
     no_error_value: "none"
 
+  jwt_demo:
+    target: https://127.0.0.1:9443/api/v1/custom/pfx
+    jwt_auth:
+      enabled: true
+      token_endpoint: https://example.com/api/token
+      username: foobar
+      password: secret
+    payload: >
+      {
+        "key": "{{ .Key }}"
+      }
+    status_code: 200
+    value_field: "demo_value"
+    error_field: "error"
+    no_error_value: "none"
+
 policy_services:
 
   policy:
@@ -56,6 +75,19 @@ policy_services:
     custom_headers:
       # User 'test', password 'test'
       - "Authorization: Basic dGVzdDp0ZXN0"
+    payload: "{{ .Key }}"
+    status_code: 200
+    value_field: "result"
+    error_field: "error"
+    no_error_value: "none"
+
+  jwt_policy:
+    target: https://127.0.0.1:9443/api/v1/custom/pfxpolicy
+    jwt_auth:
+      enabled: true
+      token_endpoint: https://example.com/api/token
+      username: foobar
+      password: secret
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "result"

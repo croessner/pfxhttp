@@ -254,6 +254,21 @@ func (c *MapClient) SendAndReceive() error {
 		}
 	}
 
+	// Add JWT token if enabled
+	if settings.JWTAuth.Enabled {
+		token, err := GetJWTToken(c.receiver.GetName(), settings.JWTAuth)
+		if err != nil {
+			c.sender.SetStatus("TEMP")
+			c.sender.SetData("JWT authentication failed: " + err.Error())
+
+			return nil
+		}
+
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, http.ErrHandlerTimeout) {
@@ -411,6 +426,21 @@ func (p *PolicyClient) SendAndReceive() error {
 			if headerKey != "" && headerValue != "" {
 				req.Header.Set(headerKey, headerValue)
 			}
+		}
+	}
+
+	// Add JWT token if enabled
+	if settings.JWTAuth.Enabled {
+		token, err := GetJWTToken(p.receiver.GetName(), settings.JWTAuth)
+		if err != nil {
+			p.sender.SetStatus("DEFER")
+			p.sender.SetData(TempServerProblem)
+
+			return nil
+		}
+
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
 

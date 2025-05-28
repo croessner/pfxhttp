@@ -10,10 +10,14 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
   * [Overview](#overview)
   * [Getting Started](#getting-started)
     * [Installation](#installation)
+      * [Prerequisites](#prerequisites)
+      * [Customizing the Build](#customizing-the-build)
+      * [Verifying Your Configuration](#verifying-your-configuration)
     * [Running as a System Service](#running-as-a-system-service)
     * [Command-line Options](#command-line-options)
   * [Configuration](#configuration)
     * [Server Settings](#server-settings)
+    * [JWT Authentication](#jwt-authentication)
     * [Integrating with Postfix](#integrating-with-postfix)
       * [Socket Maps](#socket-maps)
       * [Policy Services](#policy-services)
@@ -36,12 +40,59 @@ The application is configured using a YAML file, specifying HTTP endpoints, the 
 
 ### Installation
 
-Pfxhttp is written in **Go** and can be compiled with the following commands:
+Pfxhttp is written in **Go** and requires SQLite development libraries to be installed on your system. It can be compiled with the following commands:
 
 ```bash
 make
 make install
 ```
+
+#### Prerequisites
+
+- Go 1.24 or later
+- SQLite development libraries (libsqlite3-dev on Debian/Ubuntu, sqlite-devel on RHEL/CentOS)
+- GCC or another C compiler for CGO
+
+#### Customizing the Build
+
+The Makefile supports customizing the SQLite library and include paths:
+
+```bash
+# For custom SQLite installation paths
+make SQLITE_LIB_PATH=/path/to/sqlite/lib SQLITE_INCLUDE_PATH=/path/to/sqlite/include
+
+# On macOS with Homebrew
+make SQLITE_LIB_PATH=/usr/local/opt/sqlite/lib SQLITE_INCLUDE_PATH=/usr/local/opt/sqlite/include
+```
+
+You can also set these as environment variables:
+
+```bash
+export CGO_LDFLAGS="-L/path/to/sqlite/lib -lsqlite3"
+export CGO_CFLAGS="-I/path/to/sqlite/include"
+make
+```
+
+#### Verifying Your Configuration
+
+You can check your SQLite configuration with:
+
+```bash
+make sqlite-config
+```
+
+And run the tests to ensure everything is working correctly:
+
+```bash
+# Run all tests
+make test
+
+# Run only the customsql package tests (SQLite-specific)
+# This is recommended for testing the SQLite functionality
+make test-customsql
+```
+
+> **Note:** When testing SQLite functionality, always use the `test-customsql` target rather than trying to test individual files, as this ensures all dependencies are properly included.
 
 By default, Pfxhttp and its associated man pages are installed in `/usr/local`.
 
@@ -53,8 +104,6 @@ The configuration is located in one of the following directories, based on prior
 4. Current directory (`.`)
 
 The expected configuration file name is `pfxhttp.yml`.
-
-> **Note:** This first implementation was tested using Go version **1.23**.
 
 ### Running as a System Service
 
@@ -137,6 +186,7 @@ The `server` section contains global options, including:
 - **Listeners**: Define socket map and policy service listeners for Postfix integration.
 - **Logging**: Enable JSON-formatted logs and set verbosity (`debug`, `info`, or `error`).
 - **HTTP Client Options**: Configure connection limits, timeouts, and optional TLS settings.
+- **JWT Authentication**: Configure JWT authentication for HTTP requests with automatic token management.
 
 Below is a detailed example configuration for `pfxhttp.yml`:
 
@@ -158,11 +208,14 @@ server:
   logging:
     json: true
     level: info
-  
+
   tls:
     enabled: true
     http_client_skip_verify: true
-  
+
+  # Path to SQLite database for JWT token storage
+  jwt_db_path: "/var/lib/pfxhttp/jwt.db"
+
 socket_maps:
   demo_map:
     target: "https://127.0.0.1:9443/api/v1/custom/map"
@@ -176,7 +229,23 @@ socket_maps:
     value_field: "data.result"
     error_field: "error"
     no_error_value: "not-found"
-    
+
+  jwt_demo_map:
+    target: "https://127.0.0.1:9443/api/v1/custom/map"
+    jwt_auth:
+      enabled: true
+      token_endpoint: "https://example.com/api/token"
+      username: "foobar"
+      password: "secret"
+    payload: >
+      {
+        "key": "{{ .Key }}"
+      }
+    status_code: 200
+    value_field: "data.result"
+    error_field: "error"
+    no_error_value: "not-found"
+
 policy_services:
   example_policy:
     target: "https://127.0.0.1:9443/api/v1/custom/policy"
@@ -187,9 +256,52 @@ policy_services:
     value_field: "policy.result"
     error_field: "policy.error"
     no_error_value: "OK"
+
+  jwt_example_policy:
+    target: "https://127.0.0.1:9443/api/v1/custom/policy"
+    jwt_auth:
+      enabled: true
+      token_endpoint: "https://example.com/api/token"
+      username: "foobar"
+      password: "secret"
+    payload: "{{ .Key }}"
+    status_code: 200
+    value_field: "policy.result"
+    error_field: "policy.error"
+    no_error_value: "OK"
 ```
 
 **Important**: Postfix has a hardcoded socket map reply size limit of **100,000 bytes** (Postfix 3.9.1 or older).
+
+### JWT Authentication
+
+Pfxhttp supports JWT authentication for HTTP requests to the target endpoints. This allows you to securely authenticate with APIs that require JWT tokens. The JWT authentication feature includes:
+
+- Automatic token fetching from a token endpoint
+- Token storage in a SQLite database
+- Automatic token refresh when tokens expire
+
+To configure JWT authentication:
+
+1. Set the `jwt_db_path` in the server section to specify where tokens will be stored:
+   ```yaml
+   server:
+     jwt_db_path: "/var/lib/pfxhttp/jwt.db"
+   ```
+
+2. Configure JWT authentication for each socket map or policy service that requires it:
+   ```yaml
+   socket_maps:
+     example:
+       target: "https://api.example.com/endpoint"
+       jwt_auth:
+         enabled: true
+         token_endpoint: "https://api.example.com/token"
+         username: "your_username"
+         password: "your_password"
+   ```
+
+The JWT token will be automatically fetched from the token endpoint and included in the Authorization header as a Bearer token for all requests to the target endpoint.
 
 ---
 
