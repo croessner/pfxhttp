@@ -40,7 +40,7 @@ The application is configured using a YAML file, specifying HTTP endpoints, the 
 
 ### Installation
 
-Pfxhttp is written in **Go** and requires SQLite development libraries to be installed on your system. It can be compiled with the following commands:
+Pfxhttp is written in **Go**. It can be compiled with the following commands:
 
 ```bash
 make
@@ -50,32 +50,49 @@ make install
 #### Prerequisites
 
 - Go 1.24 or later
-- SQLite development libraries (libsqlite3-dev on Debian/Ubuntu, sqlite-devel on RHEL/CentOS)
-- GCC or another C compiler for CGO
+- For JWT support only:
+  - SQLite development libraries (libsqlite3-dev on Debian/Ubuntu, sqlite-devel on RHEL/CentOS)
+  - GCC or another C compiler for CGO
 
 #### Customizing the Build
 
-The Makefile supports customizing the SQLite library and include paths:
+When building with JWT support, you may need to customize the SQLite library and include paths:
 
 ```bash
-# For custom SQLite installation paths
-make SQLITE_LIB_PATH=/path/to/sqlite/lib SQLITE_INCLUDE_PATH=/path/to/sqlite/include
+# For custom SQLite installation paths (only needed for JWT support)
+make TAGS=jwt SQLITE_LIB_PATH=/path/to/sqlite/lib SQLITE_INCLUDE_PATH=/path/to/sqlite/include
 
-# On macOS with Homebrew
-make SQLITE_LIB_PATH=/usr/local/opt/sqlite/lib SQLITE_INCLUDE_PATH=/usr/local/opt/sqlite/include
+# On macOS with Homebrew (only needed for JWT support)
+make TAGS=jwt SQLITE_LIB_PATH=/usr/local/opt/sqlite/lib SQLITE_INCLUDE_PATH=/usr/local/opt/sqlite/include
 ```
 
-You can also set these as environment variables:
+You can also set these as environment variables when building with JWT support:
 
 ```bash
 export CGO_LDFLAGS="-L/path/to/sqlite/lib -lsqlite3"
 export CGO_CFLAGS="-I/path/to/sqlite/include"
+make TAGS=jwt
+```
+
+##### Build Tags
+
+Pfxhttp supports optional features through build tags:
+
+- **jwt**: Enables JWT authentication support (requires SQLite)
+
+To build with JWT support:
+```bash
+make TAGS=jwt
+```
+
+To build without JWT support (no SQLite dependency):
+```bash
 make
 ```
 
 #### Verifying Your Configuration
 
-You can check your SQLite configuration with:
+If you're building with JWT support, you can check your SQLite configuration with:
 
 ```bash
 make sqlite-config
@@ -87,12 +104,12 @@ And run the tests to ensure everything is working correctly:
 # Run all tests
 make test
 
-# Run only the customsql package tests (SQLite-specific)
-# This is recommended for testing the SQLite functionality
+# For JWT builds only: Run the customsql package tests (SQLite-specific)
+# This is recommended for testing the SQLite functionality when using JWT
 make test-customsql
 ```
 
-> **Note:** When testing SQLite functionality, always use the `test-customsql` target rather than trying to test individual files, as this ensures all dependencies are properly included.
+> **Note:** When testing JWT functionality with SQLite, always use the `test-customsql` target rather than trying to test individual files, as this ensures all dependencies are properly included.
 
 By default, Pfxhttp and its associated man pages are installed in `/usr/local`.
 
@@ -275,7 +292,11 @@ policy_services:
 
 ### JWT Authentication
 
-Pfxhttp supports JWT authentication for HTTP requests to the target endpoints. This allows you to securely authenticate with APIs that require JWT tokens. The JWT authentication feature includes:
+Pfxhttp supports JWT authentication for HTTP requests to the target endpoints. This allows you to securely authenticate with APIs that require JWT tokens. 
+
+> **Note:** JWT support is optional and requires building Pfxhttp with the `jwt` build tag (`make TAGS=jwt`). This feature depends on SQLite for token storage.
+
+The JWT authentication feature includes:
 
 - Automatic token fetching from a token endpoint
 - Token storage in a SQLite database
@@ -283,13 +304,18 @@ Pfxhttp supports JWT authentication for HTTP requests to the target endpoints. T
 
 To configure JWT authentication:
 
-1. Set the `jwt_db_path` in the server section to specify where tokens will be stored:
+1. Make sure you've built Pfxhttp with JWT support:
+   ```bash
+   make TAGS=jwt
+   ```
+
+2. Set the `jwt_db_path` in the server section to specify where tokens will be stored:
    ```yaml
    server:
      jwt_db_path: "/var/lib/pfxhttp/jwt.db"
    ```
 
-2. Configure JWT authentication for each socket map or policy service that requires it:
+3. Configure JWT authentication for each socket map or policy service that requires it:
    ```yaml
    socket_maps:
      example:
@@ -302,6 +328,8 @@ To configure JWT authentication:
    ```
 
 The JWT token will be automatically fetched from the token endpoint and included in the Authorization header as a Bearer token for all requests to the target endpoint.
+
+If you build Pfxhttp without the `jwt` build tag, the JWT configuration in the YAML file will be ignored, and no JWT authentication will be performed.
 
 ---
 

@@ -163,16 +163,10 @@ func main() {
 	if cfg != nil {
 		InitializeHttpClient(cfg)
 
-		// Initialize JWT manager
-		err := InitJWTManager(cfg)
-		if err != nil {
-			logger := ctx.Value(loggerKey).(*slog.Logger)
-			logger.Error("Failed to initialize JWT manager", "error", err)
+		// Initialize JWT manager if JWT support is enabled
+		initJWT(ctx, cfg)
 
-			return
-		}
-
-		defer CloseJWTManager()
+		defer closeJWT()
 
 		runServer(ctx, cfg)
 	}

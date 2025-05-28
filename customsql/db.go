@@ -1,3 +1,6 @@
+//go:build jwt
+// +build jwt
+
 package customsql
 
 // #cgo LDFLAGS: -lsqlite3

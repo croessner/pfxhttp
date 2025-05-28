@@ -7,6 +7,10 @@ MAN5_DIR := $(PREFIX)/share/man/man5
 MAN8_DIR := $(PREFIX)/share/man/man8
 BIN_DIR := $(PREFIX)/sbin
 
+# Build tags
+TAGS ?=
+BUILD_TAGS := $(if $(TAGS),-tags $(TAGS),)
+
 # SQLite configuration
 SQLITE_LIB_PATH ?= $(PREFIX)/lib
 SQLITE_INCLUDE_PATH ?= $(PREFIX)/include
@@ -19,7 +23,7 @@ all: build
 
 # Build target
 build:
-	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go build $(LDFLAGS) -o $(APP_NAME)
+	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go build $(LDFLAGS) $(BUILD_TAGS) -o $(APP_NAME)
 
 # Install target
 install: build
@@ -42,11 +46,11 @@ clean:
 
 # Test targets
 test:
-	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go test -v ./...
+	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go test $(BUILD_TAGS) -v ./...
 
 # Test customsql package specifically
 test-customsql:
-	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go test -v ./customsql
+	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go test $(BUILD_TAGS) -v ./customsql
 
 
 # Print version
@@ -59,5 +63,6 @@ sqlite-config:
 	@echo "  CGO_ENABLED: $(CGO_ENABLED)"
 	@echo "  CGO_LDFLAGS: $(CGO_LDFLAGS)"
 	@echo "  CGO_CFLAGS: $(CGO_CFLAGS)"
+	@echo "  BUILD_TAGS: $(BUILD_TAGS)"
 
 .PHONY: all build clean version install uninstall test test-customsql sqlite-config

@@ -1,3 +1,6 @@
+//go:build jwt
+// +build jwt
+
 package main
 
 import (

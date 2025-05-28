@@ -255,18 +255,12 @@ func (c *MapClient) SendAndReceive() error {
 	}
 
 	// Add JWT token if enabled
-	if settings.JWTAuth.Enabled {
-		token, err := GetJWTToken(c.receiver.GetName(), settings.JWTAuth)
-		if err != nil {
-			c.sender.SetStatus("TEMP")
-			c.sender.SetData("JWT authentication failed: " + err.Error())
+	failed, errMsg, err := addJWTAuth(req, c.receiver.GetName(), settings.JWTAuth)
+	if failed {
+		c.sender.SetStatus("TEMP")
+		c.sender.SetData(errMsg)
 
-			return nil
-		}
-
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		return nil
 	}
 
 	resp, err := httpClient.Do(req)
@@ -430,18 +424,12 @@ func (p *PolicyClient) SendAndReceive() error {
 	}
 
 	// Add JWT token if enabled
-	if settings.JWTAuth.Enabled {
-		token, err := GetJWTToken(p.receiver.GetName(), settings.JWTAuth)
-		if err != nil {
-			p.sender.SetStatus("DEFER")
-			p.sender.SetData(TempServerProblem)
+	failed, _, _ := addJWTAuth(req, p.receiver.GetName(), settings.JWTAuth)
+	if failed {
+		p.sender.SetStatus("DEFER")
+		p.sender.SetData(TempServerProblem)
 
-			return nil
-		}
-
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		return nil
 	}
 
 	resp, err := httpClient.Do(req)
