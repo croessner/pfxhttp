@@ -16,6 +16,12 @@ server:
       address: "0.0.0.0"
       port: 23451
 
+    - kind: "policy_service"
+      name: "jwt_policy"
+      type: "tcp"
+      address: "0.0.0.0"
+      port: 23452
+
   logging:
     json: false
     level: debug
@@ -34,12 +40,13 @@ server:
   socketmap_max_reply_size: 100000
 
   # Path to SQLite database for JWT token storage
-  jwt_db_path: "/var/lib/pfxhttp/jwt.db"
+  # jwt_db_path: "/var/lib/pfxhttp/jwt.db"
+  jwt_db_path: ":memory:"
 
 socket_maps:
 
   demo:
-    target: https://127.0.0.1:9443/api/v1/custom/pfx
+    target: https://127.0.0.1:9443/api/v1/custom/postfix/socket_map
     custom_headers:
       # User 'test', password 'test'
       - "Authorization: Basic dGVzdDp0ZXN0"
@@ -53,12 +60,15 @@ socket_maps:
     no_error_value: "none"
 
   jwt_demo:
-    target: https://127.0.0.1:9443/api/v1/custom/pfx
+    target: https://127.0.0.1:9443/api/v1/custom/postfix/socket_map
     jwt_auth:
       enabled: true
-      token_endpoint: https://example.com/api/token
-      username: foobar
-      password: secret
+      token_endpoint: https://127.0.0.1:9443/api/v1/jwt/token
+      credentials:
+        username: admin
+        password: admin-password
+      # Specify the content type for token requests: application/x-www-form-urlencoded (default) or application/json
+      content_type: application/json
     payload: >
       {
         "key": "{{ .Key }}"
@@ -71,7 +81,7 @@ socket_maps:
 policy_services:
 
   policy:
-    target: https://127.0.0.1:9443/api/v1/custom/pfxpolicy
+    target: https://127.0.0.1:9443/api/v1/custom/postfix/policy_service
     custom_headers:
       # User 'test', password 'test'
       - "Authorization: Basic dGVzdDp0ZXN0"
@@ -82,12 +92,15 @@ policy_services:
     no_error_value: "none"
 
   jwt_policy:
-    target: https://127.0.0.1:9443/api/v1/custom/pfxpolicy
+    target: https://127.0.0.1:9443/api/v1/custom/postfix/policy_service
     jwt_auth:
       enabled: true
-      token_endpoint: https://example.com/api/token
-      username: foobar
-      password: secret
+      token_endpoint: https://127.0.0.1:9443/api/v1/jwt/token
+      credentials:
+        username: admin
+        password: admin-password
+      # Specify the content type for token requests: application/x-www-form-urlencoded (default) or application/json
+      content_type: application/json
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "result"

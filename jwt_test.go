@@ -81,12 +81,19 @@ func (f *MockTokenFetcher) FetchToken(jwtAuth JWTAuth) (*JWTToken, error) {
 		return nil, f.err
 	}
 
-	token, exists := f.tokens[jwtAuth.Username]
+	// Get the first credential value from the map for testing purposes
+	var username string
+	for _, value := range jwtAuth.Credentials {
+		username = value
+		break
+	}
+
+	token, exists := f.tokens[username]
 	if !exists {
 		// Create a default token if none is set for this username
 		token = &JWTToken{
-			Token:        "mock-token-" + jwtAuth.Username,
-			RefreshToken: "mock-refresh-" + jwtAuth.Username,
+			Token:        "mock-token-" + username,
+			RefreshToken: "mock-refresh-" + username,
 			ExpiresAt:    time.Now().Unix() + 3600, // Valid for 1 hour
 		}
 	}
@@ -122,7 +129,7 @@ func TestJWTManager_GetToken(t *testing.T) {
 		{
 			name:        "Token in storage",
 			requestName: "test",
-			jwtAuth:     JWTAuth{Enabled: true, Username: "user1", Password: "pass1"},
+			jwtAuth:     JWTAuth{Enabled: true, Credentials: map[string]string{"username": "user1", "password": "pass1"}},
 			setupFunc: func() {
 				// Store a valid token in storage
 				storage.StoreToken("test", &JWTToken{
@@ -137,7 +144,7 @@ func TestJWTManager_GetToken(t *testing.T) {
 		{
 			name:        "Expired token in storage",
 			requestName: "test-expired",
-			jwtAuth:     JWTAuth{Enabled: true, Username: "user2", Password: "pass2"},
+			jwtAuth:     JWTAuth{Enabled: true, Credentials: map[string]string{"username": "user2", "password": "pass2"}},
 			setupFunc: func() {
 				// Store an expired token in storage
 				storage.StoreToken("test-expired", &JWTToken{
@@ -159,7 +166,7 @@ func TestJWTManager_GetToken(t *testing.T) {
 		{
 			name:        "Fetch error",
 			requestName: "test-error",
-			jwtAuth:     JWTAuth{Enabled: true, Username: "user3", Password: "pass3"},
+			jwtAuth:     JWTAuth{Enabled: true, Credentials: map[string]string{"username": "user3", "password": "pass3"}},
 			setupFunc: func() {
 				// Set up the fetcher to return an error
 				fetcher.SetError(errors.New("fetch error"))
@@ -209,7 +216,7 @@ func TestGetJWTToken(t *testing.T) {
 	jwtManager = NewJWTManager(storage, fetcher)
 
 	// Test with JWT enabled
-	token, err := GetJWTToken("test", JWTAuth{Enabled: true, Username: "user", Password: "pass"})
+	token, err := GetJWTToken("test", JWTAuth{Enabled: true, Credentials: map[string]string{"username": "user", "password": "pass"}})
 	if err != nil {
 		t.Errorf("GetJWTToken() error = %v", err)
 	}
@@ -228,7 +235,7 @@ func TestGetJWTToken(t *testing.T) {
 
 	// Test with nil jwtManager
 	jwtManager = nil
-	token, err = GetJWTToken("test", JWTAuth{Enabled: true})
+	token, err = GetJWTToken("test", JWTAuth{Enabled: true, Credentials: map[string]string{}})
 	if err != nil {
 		t.Errorf("GetJWTToken() error = %v", err)
 	}

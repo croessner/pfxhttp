@@ -31,7 +31,7 @@ type Server struct {
 
 type Listen struct {
 	Kind    string `mapstructure:"kind" validate:"required,oneof=socket_map policy_service"`
-	Name    string `mapstructure:"name" validate:"omitempty,alphanumunicode,excludesall= "`
+	Name    string `mapstructure:"name" validate:"omitempty,alphanumunicode|alphanum_underscore,excludesall= "`
 	Type    string `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
 	Address string `mapstructure:"address" validate:"required,ip_addr|filepath"`
 	Port    int    `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
@@ -59,10 +59,10 @@ type TLS struct {
 }
 
 type JWTAuth struct {
-	Enabled       bool   `mapstructure:"enabled"`
-	TokenEndpoint string `mapstructure:"token_endpoint" validate:"required_if=Enabled true,http_url"`
-	Username      string `mapstructure:"username" validate:"required_if=Enabled true"`
-	Password      string `mapstructure:"password" validate:"required_if=Enabled true"`
+	Enabled       bool              `mapstructure:"enabled"`
+	TokenEndpoint string            `mapstructure:"token_endpoint" validate:"required_if=Enabled true,http_url"`
+	Credentials   map[string]string `mapstructure:"credentials" validate:"required_if=Enabled true"`
+	ContentType   string            `mapstructure:"content_type" validate:"omitempty,oneof=application/x-www-form-urlencoded application/json"`
 }
 
 type Request struct {
@@ -87,6 +87,7 @@ func (cfg *Config) HandleConfig() error {
 	validate := validator.New(validator.WithRequiredStructEnabled())
 
 	_ = validate.RegisterValidation("octal_mode", isValidOctalMode)
+	_ = validate.RegisterValidation("alphanum_underscore", isAlphanumUnderscore)
 
 	err = validate.Struct(cfg)
 	if err == nil {
@@ -160,6 +161,18 @@ func isValidOctalMode(fl validator.FieldLevel) bool {
 	_, err := strconv.ParseUint(mode, 8, 32)
 
 	return err == nil
+}
+
+func isAlphanumUnderscore(fl validator.FieldLevel) bool {
+	value := fl.Field().String()
+
+	for _, r := range value {
+		if !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' {
+			return false
+		}
+	}
+
+	return true
 }
 
 func toSnakeCase(fieldName string) string {

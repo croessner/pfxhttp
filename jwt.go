@@ -120,16 +120,43 @@ func NewHTTPTokenFetcher(client *http.Client) TokenFetcher {
 
 // FetchToken fetches a new JWT token from the token endpoint
 func (f *HTTPTokenFetcher) FetchToken(jwtAuth JWTAuth) (*JWTToken, error) {
-	data := url.Values{}
-	data.Set("username", jwtAuth.Username)
-	data.Set("password", jwtAuth.Password)
+	var reqBody string
+	var contentType string
 
-	req, err := http.NewRequest("POST", jwtAuth.TokenEndpoint, strings.NewReader(data.Encode()))
+	// Default to application/x-www-form-urlencoded if not specified
+	if jwtAuth.ContentType == "" || jwtAuth.ContentType == "application/x-www-form-urlencoded" {
+		data := url.Values{}
+
+		for key, value := range jwtAuth.Credentials {
+			data.Set(key, value)
+		}
+
+		reqBody = data.Encode()
+		contentType = "application/x-www-form-urlencoded"
+	} else if jwtAuth.ContentType == "application/json" {
+		// Create JSON payload
+		jsonData := make(map[string]string)
+
+		// Add credential fields
+		for key, value := range jwtAuth.Credentials {
+			jsonData[key] = value
+		}
+
+		jsonBytes, err := json.Marshal(jsonData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON payload: %w", err)
+		}
+
+		reqBody = string(jsonBytes)
+		contentType = "application/json"
+	}
+
+	req, err := http.NewRequest("POST", jwtAuth.TokenEndpoint, strings.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := f.client.Do(req)
 	if err != nil {

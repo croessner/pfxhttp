@@ -424,10 +424,10 @@ func (p *PolicyClient) SendAndReceive() error {
 	}
 
 	// Add JWT token if enabled
-	failed, _, _ := addJWTAuth(req, p.receiver.GetName(), settings.JWTAuth)
+	failed, errMsg, err := addJWTAuth(req, p.receiver.GetName(), settings.JWTAuth)
 	if failed {
 		p.sender.SetStatus("DEFER")
-		p.sender.SetData(TempServerProblem)
+		p.sender.SetData(errMsg)
 
 		return nil
 	}

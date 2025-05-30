@@ -151,8 +151,9 @@ socket_maps:
     jwt_auth:
       enabled: true
       token_endpoint: "https://your-auth.example.com/token"
-      username: "username"
-      password: "password"
+      credentials:
+        username: "username"
+        password: "password"
     payload: >
       {
         "key": "{{ .Key }}"
@@ -175,11 +176,11 @@ Enables or disables JWT authentication (\fBtrue\fP or \fBfalse\fP).
 .B token_endpoint:
 The URL of the token endpoint that provides JWT tokens.
 .IP \[bu] 2
-.B username:
-The username for authentication at the token endpoint.
+.B credentials:
+A map of key-value pairs where the keys are the field names to use in the request and the values are the credentials for authentication at the token endpoint.
 .IP \[bu] 2
-.B password:
-The password for authentication at the token endpoint.
+.B content_type:
+The content type to use for token requests. Can be \fBapplication/x-www-form-urlencoded\fP (default) or \fBapplication/json\fP.
 .RE
 
 .TP
@@ -207,8 +208,9 @@ policy_services:
     jwt_auth:
       enabled: true
       token_endpoint: "https://your-auth.example.com/token"
-      username: "username"
-      password: "password"
+      credentials:
+        username: "username"
+        password: "password"
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "policy.result"
@@ -228,11 +230,11 @@ Enables or disables JWT authentication (\fBtrue\fP or \fBfalse\fP).
 .B token_endpoint:
 The URL of the token endpoint that provides JWT tokens.
 .IP \[bu] 2
-.B username:
-The username for authentication at the token endpoint.
+.B credentials:
+A map of key-value pairs where the keys are the field names to use in the request and the values are the credentials for authentication at the token endpoint.
 .IP \[bu] 2
-.B password:
-The password for authentication at the token endpoint.
+.B content_type:
+The content type to use for token requests. Can be \fBapplication/x-www-form-urlencoded\fP (default) or \fBapplication/json\fP.
 .RE
 
 .TP

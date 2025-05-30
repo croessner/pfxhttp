@@ -12,6 +12,7 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
     * [Installation](#installation)
       * [Prerequisites](#prerequisites)
       * [Customizing the Build](#customizing-the-build)
+        * [Build Tags](#build-tags)
       * [Verifying Your Configuration](#verifying-your-configuration)
     * [Running as a System Service](#running-as-a-system-service)
     * [Command-line Options](#command-line-options)
@@ -252,8 +253,9 @@ socket_maps:
     jwt_auth:
       enabled: true
       token_endpoint: "https://example.com/api/token"
-      username: "foobar"
-      password: "secret"
+      credentials:
+        username: "foobar"
+        password: "secret"
     payload: >
       {
         "key": "{{ .Key }}"
@@ -279,8 +281,9 @@ policy_services:
     jwt_auth:
       enabled: true
       token_endpoint: "https://example.com/api/token"
-      username: "foobar"
-      password: "secret"
+      credentials:
+        username: "foobar"
+        password: "secret"
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "policy.result"
@@ -323,8 +326,10 @@ To configure JWT authentication:
        jwt_auth:
          enabled: true
          token_endpoint: "https://api.example.com/token"
-         username: "your_username"
-         password: "your_password"
+         credentials:
+           some_username_identifier: "your_username"
+           some_password_identifier: "your_password"
+         content_type: "application/json"  # Optional: "application/x-www-form-urlencoded" (default) or "application/json"
    ```
 
 The JWT token will be automatically fetched from the token endpoint and included in the Authorization header as a Bearer token for all requests to the target endpoint.
