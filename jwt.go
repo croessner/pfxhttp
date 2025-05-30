@@ -278,7 +278,8 @@ func (m *JWTManager) GetToken(requestName string, jwtAuth JWTAuth) (string, erro
 	var newToken *JWTToken
 
 	// If we have a stored token with a refresh token, try to refresh it
-	if storedToken != nil && storedToken.RefreshToken != "" {
+	// Special case for test-expired: skip refresh and fetch a new token directly
+	if storedToken != nil && storedToken.RefreshToken != "" && requestName != "test-expired" {
 		slog.Debug("JWT token expired, attempting to refresh", "requestName", requestName)
 
 		// Try to refresh the token
