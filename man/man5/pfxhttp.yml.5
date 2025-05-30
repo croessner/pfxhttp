@@ -325,6 +325,129 @@ Configuration files are searched in the following order:
 .B ./pfxhttp.yml
 .RE
 
+.SH JWT AUTHENTICATION
+The \fBpfxhttp\fP application supports JSON Web Token (JWT) authentication for secure communication with HTTP services. This section explains how JWT authentication works in the application.
+
+.SS OVERVIEW
+JWT authentication provides a secure way to authenticate requests to HTTP services. The application manages the entire token lifecycle, including:
+
+.IP \[bu] 2
+Fetching new tokens from an authentication server
+.IP \[bu] 2
+Storing tokens securely in a SQLite database
+.IP \[bu] 2
+Refreshing tokens when they expire
+.IP \[bu] 2
+Caching tokens in memory for improved performance
+
+.SS TOKEN ENDPOINT REQUIREMENTS
+To use JWT authentication, you need to configure a token endpoint that supports the following:
+
+.TP
+.B Token Request
+.RS
+.IP \[bu] 2
+.B Method:
+POST
+.IP \[bu] 2
+.B Content-Type:
+Either \fBapplication/x-www-form-urlencoded\fP (default) or \fBapplication/json\fP
+.IP \[bu] 2
+.B Body:
+Credentials as specified in the configuration (username, password, client_id, etc.)
+.IP \[bu] 2
+.B Response:
+JSON object containing \fBtoken\fP, \fBrefresh_token\fP, and \fBexpires_at\fP fields
+.RE
+
+.TP
+.B Example Request (application/x-www-form-urlencoded):
+.nf
+POST /token HTTP/1.1
+Host: auth.example.com
+Content-Type: application/x-www-form-urlencoded
+
+username=user&password=pass
+.fi
+
+.TP
+.B Example Response:
+.nf
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expires_at": 1672531200
+}
+.fi
+
+.SS TOKEN REFRESHING
+When a token expires, the application attempts to refresh it before fetching a new one. The refresh mechanism works as follows:
+
+.TP
+.B Refresh Request
+.RS
+.IP \[bu] 2
+.B Method:
+POST
+.IP \[bu] 2
+.B Header:
+X-Refresh-Token: <refresh_token>
+.IP \[bu] 2
+.B Response:
+Same format as the token request response
+.RE
+
+.TP
+.B Example Refresh Request:
+.nf
+POST /token HTTP/1.1
+Host: auth.example.com
+X-Refresh-Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+.fi
+
+.SS TOKEN MANAGEMENT
+The application uses a sophisticated token management system:
+
+.IP \[bu] 2
+Tokens are cached in memory to reduce database access
+.IP \[bu] 2
+Tokens are stored in a SQLite database for persistence across restarts
+.IP \[bu] 2
+Tokens are automatically refreshed when they expire
+.IP \[bu] 2
+A 30-second buffer is applied before expiration to avoid using tokens that are about to expire
+
+.SS CONFIGURATION
+To enable JWT authentication, you need to configure both the server and the individual requests:
+
+.TP
+.B Server Configuration:
+.nf
+server:
+  jwt_db_path: "/var/lib/pfxhttp/jwt.db"  # Path to the SQLite database for token storage
+.fi
+
+.TP
+.B Request Configuration:
+.nf
+socket_maps:
+  example_map:
+    target: "https://api.example.com/map"
+    jwt_auth:
+      enabled: true
+      token_endpoint: "https://auth.example.com/token"
+      credentials:
+        username: "user"
+        password: "pass"
+      content_type: "application/x-www-form-urlencoded"  # Optional, default value
+.fi
+
+.SS COMPATIBILITY
+JWT authentication in \fBpfxhttp\fP has been successfully tested with Nauthilus, an authentication and authorization server. The token refreshing mechanism is implemented according to the Nauthilus specification, using the X-Refresh-Token header.
+
 .SH SEE ALSO
 .BR postfix (1),
 .BR pfxhttp (8)

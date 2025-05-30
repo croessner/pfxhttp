@@ -1,3 +1,6 @@
+//go:build jwt
+// +build jwt
+
 package main
 
 import (
@@ -54,14 +57,17 @@ func (s *MockTokenStorage) Close() error {
 
 // MockTokenFetcher is a mock implementation of TokenFetcher for testing
 type MockTokenFetcher struct {
-	tokens map[string]*JWTToken
-	err    error
+	tokens        map[string]*JWTToken
+	refreshTokens map[string]*JWTToken
+	err           error
+	refreshErr    error
 }
 
 // NewMockTokenFetcher creates a new mock token fetcher
 func NewMockTokenFetcher() *MockTokenFetcher {
 	return &MockTokenFetcher{
-		tokens: make(map[string]*JWTToken),
+		tokens:        make(map[string]*JWTToken),
+		refreshTokens: make(map[string]*JWTToken),
 	}
 }
 
@@ -70,9 +76,19 @@ func (f *MockTokenFetcher) SetToken(username string, token *JWTToken) {
 	f.tokens[username] = token
 }
 
+// SetRefreshToken sets a token to be returned for a specific refresh token
+func (f *MockTokenFetcher) SetRefreshToken(refreshToken string, token *JWTToken) {
+	f.refreshTokens[refreshToken] = token
+}
+
 // SetError sets an error to be returned by the fetcher
 func (f *MockTokenFetcher) SetError(err error) {
 	f.err = err
+}
+
+// SetRefreshError sets an error to be returned by the refresh operation
+func (f *MockTokenFetcher) SetRefreshError(err error) {
+	f.refreshErr = err
 }
 
 // FetchToken returns a mock token or error
@@ -94,6 +110,25 @@ func (f *MockTokenFetcher) FetchToken(jwtAuth JWTAuth) (*JWTToken, error) {
 		token = &JWTToken{
 			Token:        "mock-token-" + username,
 			RefreshToken: "mock-refresh-" + username,
+			ExpiresAt:    time.Now().Unix() + 3600, // Valid for 1 hour
+		}
+	}
+
+	return token, nil
+}
+
+// RefreshToken returns a mock refreshed token or error
+func (f *MockTokenFetcher) RefreshToken(jwtAuth JWTAuth, refreshToken string) (*JWTToken, error) {
+	if f.refreshErr != nil {
+		return nil, f.refreshErr
+	}
+
+	token, exists := f.refreshTokens[refreshToken]
+	if !exists {
+		// Create a default refreshed token if none is set for this refresh token
+		token = &JWTToken{
+			Token:        "refreshed-token-" + refreshToken[len(refreshToken)-5:],
+			RefreshToken: "refreshed-refresh-" + refreshToken[len(refreshToken)-5:],
 			ExpiresAt:    time.Now().Unix() + 3600, // Valid for 1 hour
 		}
 	}
@@ -161,6 +196,53 @@ func TestJWTManager_GetToken(t *testing.T) {
 				})
 			},
 			wantToken: "new-token",
+			wantErr:   false,
+		},
+		{
+			name:        "Expired token with successful refresh",
+			requestName: "test-refresh",
+			jwtAuth:     JWTAuth{Enabled: true, Credentials: map[string]string{"username": "user4", "password": "pass4"}},
+			setupFunc: func() {
+				// Store an expired token with a valid refresh token in storage
+				storage.StoreToken("test-refresh", &JWTToken{
+					Token:        "expired-token",
+					RefreshToken: "valid-refresh-token",
+					ExpiresAt:    time.Now().Unix() - 3600, // Expired 1 hour ago
+				})
+
+				// Set up the fetcher to return a specific refreshed token
+				fetcher.SetRefreshToken("valid-refresh-token", &JWTToken{
+					Token:        "refreshed-token",
+					RefreshToken: "new-refresh-token",      // Rotating refresh token
+					ExpiresAt:    time.Now().Unix() + 3600, // Valid for 1 hour
+				})
+			},
+			wantToken: "refreshed-token",
+			wantErr:   false,
+		},
+		{
+			name:        "Expired token with failed refresh",
+			requestName: "test-refresh-fail",
+			jwtAuth:     JWTAuth{Enabled: true, Credentials: map[string]string{"username": "user5", "password": "pass5"}},
+			setupFunc: func() {
+				// Store an expired token with a refresh token in storage
+				storage.StoreToken("test-refresh-fail", &JWTToken{
+					Token:        "expired-token",
+					RefreshToken: "invalid-refresh-token",
+					ExpiresAt:    time.Now().Unix() - 3600, // Expired 1 hour ago
+				})
+
+				// Set up the fetcher to return an error for refresh
+				fetcher.SetRefreshError(errors.New("refresh token expired"))
+
+				// Set up the fetcher to return a specific new token (fallback)
+				fetcher.SetToken("user5", &JWTToken{
+					Token:        "fallback-token",
+					RefreshToken: "fallback-refresh",
+					ExpiresAt:    time.Now().Unix() + 3600, // Valid for 1 hour
+				})
+			},
+			wantToken: "fallback-token",
 			wantErr:   false,
 		},
 		{

@@ -39,6 +39,9 @@ type TokenStorage interface {
 type TokenFetcher interface {
 	// FetchToken fetches a new token using the provided authentication details
 	FetchToken(jwtAuth JWTAuth) (*JWTToken, error)
+
+	// RefreshToken refreshes an existing token using the refresh token
+	RefreshToken(jwtAuth JWTAuth, refreshToken string) (*JWTToken, error)
 }
 
 // TokenManager defines the interface for managing JWT tokens
@@ -179,6 +182,38 @@ func (f *HTTPTokenFetcher) FetchToken(jwtAuth JWTAuth) (*JWTToken, error) {
 	return &tokenResponse, nil
 }
 
+// RefreshToken refreshes an existing token using the refresh token
+func (f *HTTPTokenFetcher) RefreshToken(jwtAuth JWTAuth, refreshToken string) (*JWTToken, error) {
+	// Create a request with the X-Refresh-Token header (Nauthilus style)
+	req, err := http.NewRequest("POST", jwtAuth.TokenEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token refresh request: %w", err)
+	}
+
+	// Set the X-Refresh-Token header with the refresh token
+	req.Header.Set("X-Refresh-Token", refreshToken)
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token refresh endpoint returned non-200 status code: %d", resp.StatusCode)
+	}
+
+	var tokenResponse JWTToken
+
+	err = json.NewDecoder(resp.Body).Decode(&tokenResponse)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode token refresh response: %w", err)
+	}
+
+	return &tokenResponse, nil
+}
+
 // JWTManager handles JWT token fetching, storage, and retrieval
 // It uses an in-memory cache to improve performance by reducing database access
 // The cacheMutex is used for thread-safe access to the in-memory token cache
@@ -198,11 +233,17 @@ func NewJWTManager(storage TokenStorage, fetcher TokenFetcher) TokenManager {
 	}
 }
 
-// GetToken retrieves a JWT token for the given request configuration
-// It first checks the in-memory cache for a valid token to avoid storage access
-// If no valid token is found in the cache, it checks the storage
-// It will fetch a new token if one doesn't exist or if the existing token is expired
-// This approach significantly improves performance by reducing storage access
+// GetToken retrieves a JWT token for the given request configuration.
+//
+// The token retrieval process follows these steps:
+//  1. Check the in-memory cache for a valid token to avoid storage access
+//  2. If no valid token is found in the cache, check the storage
+//  3. If the token is expired but a refresh token is available, try to refresh the token
+//  4. Fetch a completely new token only if no refresh token is available or if refreshing fails
+//
+// This approach significantly improves performance by:
+//   - Reducing storage access
+//   - Minimizing authentication requests
 func (m *JWTManager) GetToken(requestName string, jwtAuth JWTAuth) (string, error) {
 	if !jwtAuth.Enabled {
 		return "", nil
@@ -233,15 +274,35 @@ func (m *JWTManager) GetToken(requestName string, jwtAuth JWTAuth) (string, erro
 		return storedToken.Token, nil
 	}
 
-	// Token is expired or doesn't exist, fetch a new one
-	if storedToken != nil {
-		slog.Debug("JWT token expired, refreshing", "requestName", requestName)
+	// Token is expired or doesn't exist
+	var newToken *JWTToken
+
+	// If we have a stored token with a refresh token, try to refresh it
+	if storedToken != nil && storedToken.RefreshToken != "" {
+		slog.Debug("JWT token expired, attempting to refresh", "requestName", requestName)
+
+		// Try to refresh the token
+		refreshedToken, refreshErr := m.fetcher.RefreshToken(jwtAuth, storedToken.RefreshToken)
+		if refreshErr == nil {
+			slog.Debug("JWT token successfully refreshed", "requestName", requestName)
+
+			newToken = refreshedToken
+		} else {
+			slog.Debug("JWT token refresh failed, falling back to new token", "requestName", requestName, "error", refreshErr)
+			// Refresh failed, we'll fall back to fetching a new token
+		}
+	} else if storedToken != nil {
+		slog.Debug("JWT token expired but no refresh token available, fetching new token", "requestName", requestName)
 	}
 
-	// Fetch a new token
-	newToken, err := m.fetcher.FetchToken(jwtAuth)
-	if err != nil {
-		return "", err
+	// If refresh failed or wasn't possible, fetch a completely new token
+	if newToken == nil {
+		var fetchErr error
+
+		newToken, fetchErr = m.fetcher.FetchToken(jwtAuth)
+		if fetchErr != nil {
+			return "", fetchErr
+		}
 	}
 
 	// Update the cache with the new token
