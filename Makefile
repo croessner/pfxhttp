@@ -23,7 +23,7 @@ all: build
 
 # Build target
 build:
-	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go build $(LDFLAGS) $(BUILD_TAGS) -o $(APP_NAME)
+	CGO_ENABLED=$(CGO_ENABLED) CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go build -mod=vendor -trimpath $(LDFLAGS) $(BUILD_TAGS) -o $(APP_NAME)
 
 # Install target
 install: build
