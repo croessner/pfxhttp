@@ -163,6 +163,11 @@ func main() {
 	if cfg != nil {
 		InitializeHttpClient(cfg)
 
+		// Initialize response cache if enabled
+		if cfg.Server.ResponseCache.Enabled && cfg.Server.ResponseCache.TTL > 0 {
+			respCache = NewInMemoryResponseCache(cfg.Server.ResponseCache.TTL)
+		}
+
 		// Initialize JWT manager if JWT support is enabled
 		initJWT(ctx, cfg)
 

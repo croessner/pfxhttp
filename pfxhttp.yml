@@ -43,6 +43,10 @@ server:
   # jwt_db_path: "/var/lib/pfxhttp/jwt.db"
   jwt_db_path: ":memory:"
 
+  response_cache:
+    enabled: true
+    ttl: 1m
+
 socket_maps:
 
   demo:

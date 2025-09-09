@@ -196,7 +196,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 				return
 			}
 
-			client := NewMapClient(s.config)
+			client := NewMapClient(s.ctx, s.config)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()
@@ -258,7 +258,7 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 			received := NewPostfixPolicyReceiver(s.name)
 			_ = received.ReadPolcy(policy)
 
-			client := NewPolicyClient(s.config)
+			client := NewPolicyClient(s.ctx, s.config)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()

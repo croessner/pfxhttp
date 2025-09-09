@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -180,6 +182,7 @@ type GenericClient interface {
 // Receives data via a Receiver, processes it using defined logic, and sends results through a Sender.
 type MapClient struct {
 	config   *Config
+	ctx      context.Context
 	receiver Receiver
 	sender   Sender
 }
@@ -265,6 +268,36 @@ func (c *MapClient) SendAndReceive() error {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		// On backend errors, try cache first if available
+		if respCache != nil {
+			if entry, ok := respCache.Get(c.receiver.GetName(), c.receiver.GetKey()); ok {
+				if c.ctx != nil {
+					if logger, ok := c.ctx.Value(loggerKey).(*slog.Logger); ok && logger != nil {
+						logger.Error("Backend request failed, serving cached response",
+							"component", "socket_map",
+							"name", c.receiver.GetName(),
+							"key", c.receiver.GetKey(),
+							"error", err.Error())
+					}
+				}
+
+				c.sender.SetStatus(entry.Status)
+				c.sender.SetData(entry.Data)
+
+				return nil
+			}
+		}
+
+		if c.ctx != nil {
+			if logger, ok := c.ctx.Value(loggerKey).(*slog.Logger); ok && logger != nil {
+				logger.Error("Backend request failed, no cache entry",
+					"component", "socket_map",
+					"name", c.receiver.GetName(),
+					"key", c.receiver.GetKey(),
+					"error", err.Error())
+			}
+		}
+
 		if errors.Is(err, http.ErrHandlerTimeout) {
 			c.sender.SetStatus("TIMEOUT")
 			c.sender.SetData("request timed out")
@@ -278,7 +311,18 @@ func (c *MapClient) SendAndReceive() error {
 		}
 	}
 
-	return c.handleResponse(resp, settings)
+	err = c.handleResponse(resp, settings)
+
+	// Cache only on successful definitive result
+	if err == nil && respCache != nil {
+		if ps, ok := c.sender.(*PostfixSender); ok && ps.status == "OK" {
+			respEntry := CachedResponse{Status: ps.status, Data: ps.data}
+
+			respCache.Set(c.receiver.GetName(), c.receiver.GetKey(), respEntry)
+		}
+	}
+
+	return err
 }
 
 var _ GenericClient = (*MapClient)(nil)
@@ -344,13 +388,14 @@ func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 }
 
 // NewMapClient creates and returns a new instance of MapClient configured using the provided Config object.
-func NewMapClient(cfg *Config) GenericClient {
-	return &MapClient{config: cfg}
+func NewMapClient(ctx context.Context, cfg *Config) GenericClient {
+	return &MapClient{config: cfg, ctx: ctx}
 }
 
 // PolicyClient is a client structure for managing communication processes between senders and receivers.
 type PolicyClient struct {
 	config   *Config
+	ctx      context.Context
 	receiver Receiver
 	sender   Sender
 }
@@ -434,13 +479,54 @@ func (p *PolicyClient) SendAndReceive() error {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		// Try cache on backend failure
+		if respCache != nil {
+			if entry, ok := respCache.Get(p.receiver.GetName(), p.receiver.GetKey()); ok {
+				if p.ctx != nil {
+					if logger, ok := p.ctx.Value(loggerKey).(*slog.Logger); ok && logger != nil {
+						logger.Error("Backend request failed, serving cached response",
+							"component", "policy_service",
+							"name", p.receiver.GetName(),
+							"key", p.receiver.GetKey(),
+							"error", err.Error())
+					}
+				}
+
+				p.sender.SetStatus(entry.Status)
+				p.sender.SetData(entry.Data)
+
+				return nil
+			}
+		}
+
+		if p.ctx != nil {
+			if logger, ok := p.ctx.Value(loggerKey).(*slog.Logger); ok && logger != nil {
+				logger.Error("Backend request failed, no cache entry",
+					"component", "policy_service",
+					"name", p.receiver.GetName(),
+					"key", p.receiver.GetKey(),
+					"error", err.Error())
+			}
+		}
+
 		p.sender.SetStatus("DEFER")
 		p.sender.SetData(TempServerProblem)
 
 		return nil
 	}
 
-	return p.handleResponse(resp, settings)
+	err = p.handleResponse(resp, settings)
+
+	// Cache only on successful definitive policy action
+	if err == nil && respCache != nil {
+		if ps, ok := p.sender.(*PostfixSender); ok && ps.status != "" {
+			respEntry := CachedResponse{Status: ps.status, Data: ps.data}
+
+			respCache.Set(p.receiver.GetName(), p.receiver.GetKey(), respEntry)
+		}
+	}
+
+	return err
 }
 
 // handleResponse processes an HTTP response, evaluates its contents, and sets the sender's status and data accordingly.
@@ -503,6 +589,6 @@ func (p *PolicyClient) handleResponse(resp *http.Response, request Request) erro
 }
 
 // NewPolicyClient creates and returns a new instance of PolicyClient initialized with the provided configuration.
-func NewPolicyClient(cfg *Config) GenericClient {
-	return &PolicyClient{config: cfg}
+func NewPolicyClient(ctx context.Context, cfg *Config) GenericClient {
+	return &PolicyClient{config: cfg, ctx: ctx}
 }

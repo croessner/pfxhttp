@@ -21,12 +21,13 @@ type Config struct {
 }
 
 type Server struct {
-	Listen              []Listen   `mapstructure:"listen" validate:"required,min=1,dive"`
-	Logging             Logging    `mapstructure:"logging" validate:"omitempty"`
-	HTTPClient          HTTPClient `mapstructure:"http_client" validate:"omitempty"`
-	TLS                 TLS        `mapstructure:"tls" validate:"omitempty"`
-	SockmapMaxReplySize int        `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
-	JWTDBPath           string     `mapstructure:"jwt_db_path" validate:"omitempty,filepath"`
+	Listen              []Listen            `mapstructure:"listen" validate:"required,min=1,dive"`
+	Logging             Logging             `mapstructure:"logging" validate:"omitempty"`
+	HTTPClient          HTTPClient          `mapstructure:"http_client" validate:"omitempty"`
+	TLS                 TLS                 `mapstructure:"tls" validate:"omitempty"`
+	SockmapMaxReplySize int                 `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
+	JWTDBPath           string              `mapstructure:"jwt_db_path" validate:"omitempty,filepath"`
+	ResponseCache       ResponseCacheConfig `mapstructure:"response_cache" validate:"omitempty"`
 }
 
 type Listen struct {
@@ -41,6 +42,11 @@ type Listen struct {
 type Logging struct {
 	JSON  bool   `mapstructure:"json"`
 	Level string `mapstructure:"level" validate:"omitempty,oneof=none debug info error"`
+}
+
+type ResponseCacheConfig struct {
+	Enabled bool          `mapstructure:"enabled"`
+	TTL     time.Duration `mapstructure:"ttl" validate:"omitempty,min=1s,max=168h"`
 }
 
 type HTTPClient struct {

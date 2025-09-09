@@ -18,6 +18,7 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
     * [Command-line Options](#command-line-options)
   * [Configuration](#configuration)
     * [Server Settings](#server-settings)
+    * [Response Cache](#response-cache)
     * [JWT Authentication](#jwt-authentication)
     * [Integrating with Postfix](#integrating-with-postfix)
       * [Socket Maps](#socket-maps)
@@ -205,6 +206,7 @@ The `server` section contains global options, including:
 - **Logging**: Enable JSON-formatted logs and set verbosity (`debug`, `info`, or `error`).
 - **HTTP Client Options**: Configure connection limits, timeouts, and optional TLS settings.
 - **JWT Authentication**: Configure JWT authentication for HTTP requests with automatic token management.
+- **Response Cache**: Optional in-memory cache to serve responses when the backend is unavailable.
 
 Below is a detailed example configuration for `pfxhttp.yml`:
 
@@ -233,6 +235,11 @@ server:
 
   # Path to SQLite database for JWT token storage
   jwt_db_path: "/var/lib/pfxhttp/jwt.db"
+
+  # Optional response cache to serve data during backend outages
+  response_cache:
+    enabled: true
+    ttl: 5m  # cache lifetime per entry
 
 socket_maps:
   demo_map:
@@ -292,6 +299,30 @@ policy_services:
 ```
 
 **Important**: Postfix has a hardcoded socket map reply size limit of **100,000 bytes** (Postfix 3.9.1 or older).
+
+### Response Cache
+
+Pfxhttp includes an optional in-memory response cache. It always forwards responses from your backend, but if the backend becomes unavailable, it can serve a previously cached response for a configurable time (TTL).
+
+Behavior:
+- On backend failure: if a valid cache entry exists for the same map/policy name and key, it is returned.
+- Cache population:
+  - Socket maps: cache only definitive successes (status "OK").
+  - Policy services: cache only definitive actions (anything other than empty).
+- Expiration: entries expire after the TTL.
+
+Configuration (server section):
+```yaml
+server:
+  response_cache:
+    enabled: true
+    ttl: 5m
+```
+
+Notes:
+- TTL must be between 1s and 168h (7 days).
+- Cache is in-memory and per-process; it is cleared on restart.
+- Keys are derived from the tuple (name, key). For policy services, the key is the JSON of the policy payload.
 
 ### JWT Authentication
 
