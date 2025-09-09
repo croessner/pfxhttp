@@ -51,6 +51,8 @@ socket_maps:
 
   demo:
     target: https://127.0.0.1:9443/api/v1/custom/postfix/socket_map
+    http_request_compression: true
+    http_response_compression: true
     custom_headers:
       # User 'test', password 'test'
       - "Authorization: Basic dGVzdDp0ZXN0"
@@ -86,6 +88,8 @@ policy_services:
 
   policy:
     target: https://127.0.0.1:9443/api/v1/custom/postfix/policy_service
+    http_request_compression: false
+    http_response_compression: true
     custom_headers:
       # User 'test', password 'test'
       - "Authorization: Basic dGVzdDp0ZXN0"

@@ -72,14 +72,16 @@ type JWTAuth struct {
 }
 
 type Request struct {
-	Target        string   `mapstructure:"target" validate:"required,http_url"`
-	CustomHeaders []string `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
-	Payload       string   `mapstructure:"payload" validate:"omitempty,ascii"`
-	StatusCode    int      `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
-	ValueField    string   `mapstructure:"value_field" validate:"omitempty,printascii"`
-	ErrorField    string   `mapstructure:"error_field" validate:"omitempty,printascii"`
-	NoErrorValue  string   `mapstructure:"no_error_value" validate:"omitempty,printascii"`
-	JWTAuth       JWTAuth  `mapstructure:"jwt_auth" validate:"omitempty"`
+	Target                  string   `mapstructure:"target" validate:"required,http_url"`
+	CustomHeaders           []string `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
+	Payload                 string   `mapstructure:"payload" validate:"omitempty,ascii"`
+	StatusCode              int      `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
+	ValueField              string   `mapstructure:"value_field" validate:"omitempty,printascii"`
+	ErrorField              string   `mapstructure:"error_field" validate:"omitempty,printascii"`
+	NoErrorValue            string   `mapstructure:"no_error_value" validate:"omitempty,printascii"`
+	JWTAuth                 JWTAuth  `mapstructure:"jwt_auth" validate:"omitempty"`
+	HTTPRequestCompression  bool     `mapstructure:"http_request_compression"`
+	HTTPResponseCompression bool     `mapstructure:"http_response_compression"`
 }
 
 func (cfg *Config) HandleConfig() error {

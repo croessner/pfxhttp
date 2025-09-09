@@ -50,6 +50,8 @@ func InitializeHttpClient(cfg *Config) {
 		MaxIdleConns:        cfg.Server.HTTPClient.MaxIdleConns,
 		MaxIdleConnsPerHost: cfg.Server.HTTPClient.MaxIdleConnsPerHost,
 		IdleConnTimeout:     cfg.Server.HTTPClient.IdleConnTimeout,
+		// Disable automatic gzip so we can control it per-target
+		DisableCompression: true,
 	}
 
 	if cfg.Server.TLS.Enabled {
@@ -241,12 +243,32 @@ func (c *MapClient) SendAndReceive() error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", settings.Target, bytes.NewBuffer([]byte(renderedPayload)))
+	var bodyReader io.Reader
+
+	if settings.HTTPRequestCompression {
+		compressed, err := gzipCompressor.Compress([]byte(renderedPayload))
+		if err != nil {
+			return err
+		}
+
+		bodyReader = bytes.NewBuffer(compressed)
+	} else {
+		bodyReader = bytes.NewBuffer([]byte(renderedPayload))
+	}
+
+	req, err := http.NewRequest("POST", settings.Target, bodyReader)
 	if err != nil {
 		return err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if settings.HTTPRequestCompression {
+		req.Header.Set("Content-Encoding", gzipCompressor.Name())
+	}
+
+	if settings.HTTPResponseCompression {
+		req.Header.Set("Accept-Encoding", gzipCompressor.Name())
+	}
 
 	if len(settings.CustomHeaders) != 0 {
 		for _, header := range settings.CustomHeaders {
@@ -335,7 +357,22 @@ func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 		_ = Body.Close()
 	}(resp.Body)
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+
+	if request.HTTPResponseCompression && strings.EqualFold(resp.Header.Get("Content-Encoding"), gzipCompressor.Name()) {
+		zr, err := gzipCompressor.Decompress(resp.Body)
+		if err != nil {
+			return errors.New("failed to init gzip reader: " + err.Error())
+		}
+
+		defer func(zr io.ReadCloser) {
+			_ = zr.Close()
+		}(zr)
+
+		reader = zr
+	}
+
+	bodyBytes, err := io.ReadAll(reader)
 	if err != nil {
 		return errors.New("failed to read response body: " + err.Error())
 	}
@@ -452,12 +489,32 @@ func (p *PolicyClient) SendAndReceive() error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", settings.Target, bytes.NewBuffer([]byte(renderedPayload)))
+	var bodyReader io.Reader
+
+	if settings.HTTPRequestCompression {
+		compressed, err := gzipCompressor.Compress([]byte(renderedPayload))
+		if err != nil {
+			return err
+		}
+
+		bodyReader = bytes.NewBuffer(compressed)
+	} else {
+		bodyReader = bytes.NewBuffer([]byte(renderedPayload))
+	}
+
+	req, err := http.NewRequest("POST", settings.Target, bodyReader)
 	if err != nil {
 		return err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if settings.HTTPRequestCompression {
+		req.Header.Set("Content-Encoding", gzipCompressor.Name())
+	}
+
+	if settings.HTTPResponseCompression {
+		req.Header.Set("Accept-Encoding", gzipCompressor.Name())
+	}
 
 	if len(settings.CustomHeaders) != 0 {
 		for _, header := range settings.CustomHeaders {
@@ -539,7 +596,22 @@ func (p *PolicyClient) handleResponse(resp *http.Response, request Request) erro
 		_ = Body.Close()
 	}(resp.Body)
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+
+	if request.HTTPResponseCompression && strings.EqualFold(resp.Header.Get("Content-Encoding"), gzipCompressor.Name()) {
+		zr, err := gzipCompressor.Decompress(resp.Body)
+		if err != nil {
+			return errors.New("failed to init gzip reader: " + err.Error())
+		}
+
+		defer func(zr io.ReadCloser) {
+			_ = zr.Close()
+		}(zr)
+
+		reader = zr
+	}
+
+	bodyBytes, err := io.ReadAll(reader)
 	if err != nil {
 		return errors.New("failed to read response body: " + err.Error())
 	}

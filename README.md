@@ -20,6 +20,7 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
     * [Server Settings](#server-settings)
     * [Response Cache](#response-cache)
     * [JWT Authentication](#jwt-authentication)
+    * [HTTP Request/Response Compression](#http-requestresponse-compression)
     * [Integrating with Postfix](#integrating-with-postfix)
       * [Socket Maps](#socket-maps)
       * [Policy Services](#policy-services)
@@ -368,6 +369,41 @@ The JWT token will be automatically fetched from the token endpoint and included
 If you build Pfxhttp without the `jwt` build tag, the JWT configuration in the YAML file will be ignored, and no JWT authentication will be performed.
 
 ---
+
+### HTTP Request/Response Compression
+
+Pfxhttp allows you to control HTTP compression per target (socket map or policy service). This is useful when your backend supports gzip and you want to reduce bandwidth or comply with specific API requirements. Nauthilus backends support gzip exclusively.
+
+- http_request_compression: When true, Pfxhttp gzips the request body and sets Content-Encoding: gzip. Disabled by default.
+- http_response_compression: When true, Pfxhttp advertises Accept-Encoding: gzip and will transparently decompress gzip responses if the server replies with Content-Encoding: gzip. Disabled by default.
+
+Notes:
+- Compression settings are defined per target, not globally.
+- The HTTP client's automatic gzip handling is disabled to ensure per-target control.
+- Only gzip is supported currently.
+
+Example:
+
+socket_maps:
+  demo:
+    target: https://127.0.0.1:9443/api/v1/custom/postfix/socket_map
+    http_request_compression: true
+    http_response_compression: true
+    payload: >
+      {
+        "key": "{{ .Key }}"
+      }
+    status_code: 200
+    value_field: "demo_value"
+
+policy_services:
+  policy:
+    target: https://127.0.0.1:9443/api/v1/custom/postfix/policy_service
+    http_request_compression: false
+    http_response_compression: true
+    payload: "{{ .Key }}"
+    status_code: 200
+    value_field: "result"
 
 ### Integrating with Postfix
 
