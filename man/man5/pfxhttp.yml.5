@@ -36,14 +36,18 @@ server:
     max_connections_per_host: 10
     max_idle_connections: 4
     max_idle_connections_per_host: 1
-    idle_connection_timeout: 30
+    idle_connection_timeout: 10s
+    proxy: "http://proxy.example.com:3128"
   tls:
     enabled: true
     cert: "/etc/pfxhttp/cert.pem"
     key: "/etc/pfxhttp/key.pem"
-    skip_verify: true
+    http_client_skip_verify: true
   socketmap_max_reply_size: 100000
   jwt_db_path: "/var/lib/pfxhttp/jwt.db"
+  response_cache:
+    enabled: true
+    ttl: 1m
 .fi
 .RE
 
@@ -62,7 +66,7 @@ The connection type. Can be \fBunix\fP, \fBtcp\fP, or \fBtcp6\fP.
 Optional for \fBsocket_map\fP, but required for \fBpolicy_service\fP.
 .IP \[bu] 2
 .B address:
-The network address to bind to (e.g., \fB0.0.0.0\fP) for \fBtcp\fP or \fBtcp6\fP types. Ignored for \fBunix\fP sockets.
+For \fBtcp\fP or \fBtcp6\fP, the network address to bind to (e.g., \fB0.0.0.0\fP). For \fBunix\fP, the filesystem path to the Unix domain socket.
 .IP \[bu] 2
 .B port:
 The port used to listen for connections. Relevant only for \fBtcp\fP and \fBtcp6\fP types.
@@ -80,7 +84,7 @@ Specifies logging behavior.
 Enables JSON format logging (\fBtrue\fP or \fBfalse\fP).
 .IP \[bu] 2
 .B level:
-Sets the verbosity of logs. Options are \fBerror\fP, \fBinfo\fP, or \fBdebug\fP.
+Sets the verbosity of logs. Options are \fBnone\fP, \fBerror\fP, \fBinfo\fP, or \fBdebug\fP.
 .RE
 
 .TP
@@ -98,7 +102,10 @@ Maximum number of idle connections allowed in total.
 Maximum idle connections per host.
 .IP \[bu] 2
 .B idle_connection_timeout:
-Timeout for idle connections, in seconds.
+Timeout for idle connections. This is a Go duration string (e.g., \fB500ms\fP, \fB10s\fP, \fB1m\fP). Range: 1ms to 1h.
+.IP \[bu] 2
+.B proxy:
+HTTP proxy URL to use for outbound requests (e.g., \fBhttp://proxy.example.com:3128\fP).
 .RE
 
 .TP
@@ -115,8 +122,8 @@ Path to the TLS certificate (optional).
 .B key:
 Path to the TLS private key (optional).
 .IP \[bu] 2
-.B skip_verify:
-If \fBtrue\fP, disables verification of peer certificates.
+.B http_client_skip_verify:
+If \fBtrue\fP, disables verification of peer certificates by the HTTP client.
 .RE
 
 .TP
@@ -126,6 +133,18 @@ Specifies the maximum reply size for socket maps. Defaults to \fB100000\fP if no
 .TP
 .B jwt_db_path
 Path to the SQLite database file used for storing JWT tokens. This is required if JWT authentication is enabled for any socket map or policy service.
+
+.TP
+.B response_cache
+Configures caching of HTTP responses.
+.RS
+.IP \[bu] 2
+.B enabled:
+Enable or disable the in-memory response cache (true/false).
+.IP \[bu] 2
+.B ttl:
+Time-to-live for cached responses as a Go duration string (e.g., 30s, 1m, 10m). Range: 1s to 168h.
+.RE
 
 .SS SOCKET_MAPS
 The \fBsocket_maps\fP section defines services used by Postfix to perform dynamic lookups. This functionality is commonly used for querying an external service to map a key (e.g., an email address or domain) to a value.
@@ -164,6 +183,14 @@ socket_maps:
     no_error_value: "not-found"
 .fi
 .RE
+
+.TP
+.B http_request_compression
+If true, compresses HTTP request bodies with gzip.
+
+.TP
+.B http_response_compression
+If true, sends an Accept-Encoding header to request gzip-compressed responses.
 
 .TP
 .B jwt_auth
@@ -218,6 +245,14 @@ policy_services:
     no_error_value: "OK"
 .fi
 .RE
+
+.TP
+.B http_request_compression
+If true, compresses HTTP request bodies with gzip.
+
+.TP
+.B http_response_compression
+If true, sends an Accept-Encoding header to request gzip-compressed responses.
 
 .TP
 .B jwt_auth
