@@ -133,6 +133,5 @@ dovecot_sasl:
     # Note: For dovecot_sasl, the payload is generated internally according to Nauthilus
     # /api/v1/auth/json; a payload entry has no effect here.
     status_code: 200
-    # Optional: Read username from the JSON response (Nauthilus: account_field)
-    value_field: "account_field"
+    # Username is returned via HTTP response header "Auth-User" by the backend.
     # Errors are signaled via HTTP status and the "Auth-Status" header.

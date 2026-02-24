@@ -496,6 +496,7 @@ func TestNauthilusSASLAuthenticatorPassword(t *testing.T) {
 		}
 
 		if payload["username"] == "gooduser" && payload["password"] == "goodpass" {
+			w.Header().Set("Auth-User", "gooduser")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]any{
 				"username": "gooduser",

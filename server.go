@@ -491,7 +491,8 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				return
 			}
 
-			logger.Debug("Incoming Dovecot SASL request", slog.String(LogKeyClient, clientAddr), slog.String("request", strings.TrimSpace(line)))
+			redacted := redactDovecotLine(strings.TrimSpace(line))
+			logger.Debug("Incoming Dovecot SASL request", slog.String(LogKeyClient, clientAddr), slog.String("request", redacted))
 
 			cmd, args := decoder.ParseLine(line)
 			if cmd == "" {
@@ -550,6 +551,42 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// redactDovecotLine removes or masks sensitive parts from a raw Dovecot SASL protocol line for safe logging.
+func redactDovecotLine(line string) string {
+	// Mask AUTH resp=... parameter which can carry base64 credentials
+	if strings.HasPrefix(line, string(DovecotCmdAuth)+" ") {
+		// replace resp=<...> (until space or end) with resp=<redacted>
+		// also handle resp= without value gracefully
+		fields := strings.Fields(line)
+		var b strings.Builder
+		for i, p := range fields {
+			if strings.HasPrefix(p, "resp=") {
+				if i > 0 {
+					b.WriteByte(' ')
+				}
+				b.WriteString("resp=<redacted>")
+				continue
+			}
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(p)
+		}
+		return b.String()
+	}
+
+	// Mask CONT <id> <base64data>
+	if strings.HasPrefix(line, string(DovecotCmdCont)+" ") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 {
+			fields[2] = "<redacted>"
+			return strings.Join(fields, " ")
+		}
+		return line
+	}
+	return line
 }
 
 // handleSASLResult processes the result of a SASL mechanism step and sends the appropriate protocol response.

@@ -13,6 +13,55 @@ import (
 	"strings"
 )
 
+// Helpers to ensure we never log secrets like passwords, tokens or Authorization headers.
+func redactHeadersForLog(h http.Header) map[string][]string {
+	redacted := make(map[string][]string, len(h))
+	for k, vs := range h {
+		low := strings.ToLower(k)
+		copyVals := make([]string, len(vs))
+		copy(copyVals, vs)
+		if low == "authorization" || low == "proxy-authorization" {
+			for i := range copyVals {
+				copyVals[i] = "<redacted>"
+			}
+		}
+		redacted[k] = copyVals
+	}
+	return redacted
+}
+
+func redactJSONForLog(m map[string]string) string {
+	if m == nil {
+		return "{}"
+	}
+	c := make(map[string]string, len(m))
+	for k, v := range m {
+		if strings.EqualFold(k, "password") || strings.Contains(strings.ToLower(k), "secret") || strings.Contains(strings.ToLower(k), "token") {
+			c[k] = "<redacted>"
+			continue
+		}
+		c[k] = v
+	}
+	b, _ := json.Marshal(c)
+	return string(b)
+}
+
+func redactFormForLog(vals url.Values) string {
+	if vals == nil {
+		return ""
+	}
+	c := url.Values{}
+	for k, v := range vals {
+		low := strings.ToLower(k)
+		if low == "token" || low == "client_secret" || low == "client_assertion" {
+			c[k] = []string{"<redacted>"}
+			continue
+		}
+		c[k] = append([]string(nil), v...)
+	}
+	return c.Encode()
+}
+
 // SASLAuthResult represents the outcome of a SASL authentication attempt.
 type SASLAuthResult struct {
 	// Success indicates if authentication was successful.
@@ -484,8 +533,8 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 		logger.Debug("Outgoing Nauthilus request",
 			slog.String("method", httpReq.Method),
 			slog.String("url", httpReq.URL.String()),
-			slog.Any("headers", httpReq.Header),
-			slog.String("payload", string(jsonPayload)))
+			slog.Any("headers", redactHeadersForLog(httpReq.Header)),
+			slog.String("payload", redactJSONForLog(payload)))
 	}
 
 	resp, err := httpClient.Do(httpReq)
@@ -519,47 +568,8 @@ func (a *NauthilusSASLAuthenticator) handlePasswordResponse(resp *http.Response,
 		}, nil
 	}
 
-	// 2) On success, optionally read JSON to extract account name.
-	var reader io.Reader = resp.Body
-	if settings.HTTPResponseCompression && strings.EqualFold(resp.Header.Get("Content-Encoding"), gzipCompressor.Name()) {
-		zr, err := gzipCompressor.Decompress(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decompress response: %w", err)
-		}
-		defer func(zr io.ReadCloser) { _ = zr.Close() }(zr)
-		reader = zr
-	}
-
-	bodyBytes, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	logger, _ := resp.Request.Context().Value(loggerKey).(*slog.Logger)
-	if logger != nil {
-		logger.Debug("Nauthilus response received",
-			slog.Int("status", resp.StatusCode),
-			slog.Any("headers", resp.Header),
-			slog.String("body", string(bodyBytes)))
-	}
-
-	var responseData map[string]any
-	if len(bodyBytes) > 0 {
-		_ = json.Unmarshal(bodyBytes, &responseData) // best-effort; empty/null is valid
-	}
-
-	username := ""
-	// Prefer configured value_field when present, otherwise fall back to common Nauthilus field.
-	if settings.ValueField != "" {
-		if rawValue, found := getNestedValue(responseData, settings.ValueField, 0); found {
-			username = convertResponse(rawValue, 0)
-		}
-	} else {
-		if rawValue, found := responseData["account_field"]; found {
-			username = convertResponse(rawValue, 0)
-		}
-	}
-
+	// 2) On success, derive the username exclusively from the HTTP response header "Auth-User".
+	username := resp.Header.Get("Auth-User")
 	return &SASLAuthResult{Success: true, Username: username}, nil
 }
 
@@ -728,8 +738,8 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		logger.Debug("Outgoing Nauthilus introspection request",
 			slog.String("method", httpReq.Method),
 			slog.String("url", httpReq.URL.String()),
-			slog.Any("headers", httpReq.Header),
-			slog.String("payload", data.Encode()))
+			slog.Any("headers", redactHeadersForLog(httpReq.Header)),
+			slog.String("payload", redactFormForLog(data)))
 	}
 
 	resp, err := httpClient.Do(httpReq)

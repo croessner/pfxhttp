@@ -459,5 +459,6 @@ client_id
 .B Response handling
 Pfxhttp evaluates the HTTP status code as the primary success indicator. On failures, the optional
 \fBAuth-Status\fP HTTP response header (set by Nauthilus) is used as the human-readable reason. On success,
-Pfxhttp may read the optional JSON field \fBaccount_field\fP to obtain the resolved username; this can be overridden
-via \fBvalue_field\fP in the configuration. The \fBpayload\fP key is ignored for \fBdovecot_sasl\fP blocks and should not be configured.
+Pfxhttp derives the resolved username exclusively from the HTTP response header \fBAuth-User\fP.
+JSON fields such as \fBaccount_field\fP are not consulted and \fBvalue_field\fP has no effect for \fBdovecot_sasl\fP.
+The \fBpayload\fP key is ignored for \fBdovecot_sasl\fP blocks and should not be configured.
