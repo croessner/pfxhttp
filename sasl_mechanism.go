@@ -562,6 +562,40 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 
 	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
 
+	// Optional JWKS local validation before introspection
+	switch settings.OIDCAuth.Validation {
+	case "jwks", "auto":
+		if oidcManager == nil {
+			return &SASLAuthResult{Success: false, Reason: "OIDC manager not initialized"}, nil
+		}
+		// Try local verification when token looks like JWT
+		if strings.Count(token, ".") == 2 {
+			claims, err := oidcManager.VerifyJWTWithJWKS(ctx, settings.OIDCAuth.ConfigurationURI, token, settings.OIDCAuth.JWKSCacheTTL)
+			if err == nil {
+				// Success via JWKS
+				resolved := username
+				if sub, ok := claims["sub"].(string); ok && sub != "" {
+					resolved = sub
+				}
+				if un, ok := claims["preferred_username"].(string); ok && un != "" {
+					resolved = un
+				}
+				if un, ok := claims["username"].(string); ok && un != "" {
+					resolved = un
+				}
+				return &SASLAuthResult{Success: true, Username: resolved}, nil
+			}
+			// In auto mode, fall back to introspection on non-signature related issues
+			if settings.OIDCAuth.Validation == "jwks" {
+				// Hard fail for explicit jwks mode
+				if logger != nil {
+					logger.Info("JWKS validation failed", "error", err)
+				}
+				return &SASLAuthResult{Success: false, Username: username, Reason: "invalid token"}, nil
+			}
+		}
+	}
+
 	introspectionEndpoint, err := getIntrospectionEndpoint(ctx, settings.OIDCAuth.ConfigurationURI)
 	if err != nil {
 		if logger != nil {
@@ -627,19 +661,50 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		data.Set("client_id", req.ClientID)
 	}
 
+	// Decide authentication method
+	authMethod := settings.OIDCAuth.AuthMethod
+	switch authMethod {
+	case "private_key_jwt":
+		assertion, err := oidcManager.createAssertion(settings.OIDCAuth.ClientID, introspectionEndpoint, settings.OIDCAuth.PrivateKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create client assertion: %w", err)
+		}
+		data.Set("client_id", settings.OIDCAuth.ClientID)
+		data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+		data.Set("client_assertion", assertion)
+	case "client_secret_post":
+		data.Set("client_id", settings.OIDCAuth.ClientID)
+		data.Set("client_secret", settings.OIDCAuth.ClientSecret)
+	case "client_secret_basic":
+		// handled after request creation via SetBasicAuth
+	case "none":
+		if settings.OIDCAuth.ClientID != "" {
+			data.Set("client_id", settings.OIDCAuth.ClientID)
+		}
+	default:
+		if settings.OIDCAuth.PrivateKeyFile != "" {
+			assertion, err := oidcManager.createAssertion(settings.OIDCAuth.ClientID, introspectionEndpoint, settings.OIDCAuth.PrivateKeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create client assertion: %w", err)
+			}
+			data.Set("client_id", settings.OIDCAuth.ClientID)
+			data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+			data.Set("client_assertion", assertion)
+		} else if settings.OIDCAuth.ClientSecret != "" {
+			authMethod = "client_secret_basic"
+		} else if settings.OIDCAuth.ClientID != "" {
+			data.Set("client_id", settings.OIDCAuth.ClientID)
+		}
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, introspectionEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create introspection request: %w", err)
 	}
-
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	// Authenticate to the introspection endpoint using client credentials
-	if settings.OIDCAuth.ClientSecret != "" {
+	httpReq.Header.Set("Accept", "application/json")
+	if authMethod == "client_secret_basic" {
 		httpReq.SetBasicAuth(settings.OIDCAuth.ClientID, settings.OIDCAuth.ClientSecret)
-	} else {
-		data.Set("client_id", settings.OIDCAuth.ClientID)
-		httpReq.Body = io.NopCloser(strings.NewReader(data.Encode()))
 	}
 
 	resp, err := httpClient.Do(httpReq)

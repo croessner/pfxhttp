@@ -413,3 +413,51 @@ Contributions are welcome! Feel free to submit pull requests or issues to improv
 - Manpages:
  - `pfxhttp(8)`: Overview and service management
  - `pfxhttp.yml(5)`: Detailed configuration guide
+
+
+### Advanced OIDC options
+
+The following optional fields fine-tune OIDC behavior. Defaults are chosen for maximum interoperability and security.
+
+- `auth_method`: How the client authenticates to the token and introspection endpoints. Values:
+  - `auto` (defaulting is resolved during config load)
+  - `client_secret_basic` (default)
+  - `client_secret_post`
+  - `private_key_jwt`
+  - `none`
+
+  If `auth_method` is omitted or set to `auto`, the following preference is applied:
+  - Use `private_key_jwt` when `private_key_file` is set
+  - Else use `client_secret_basic` when `client_secret` is set
+  - Else fall back to `none` (send only `client_id`)
+
+- `validation`: How SASL OAuth tokens are validated.
+  - `introspection` (default): Always call the provider’s introspection endpoint (RFC 7662). Supports opaque tokens and immediate revocation checks.
+  - `jwks`: Validate tokens locally using the provider’s `jwks_uri`. Lowest latency for JWTs, but revocations may take effect only after key/claim changes.
+  - `auto`: Try JWKS first for JWTs; fall back to introspection for opaque tokens or transient JWKS issues.
+
+- `jwks_cache_ttl`: Duration for caching the JWKS document. Default: `5m`.
+
+Example with advanced settings:
+
+```yaml
+socket_maps:
+  example:
+    target: "https://api.example.com/endpoint"
+    oidc_auth:
+      enabled: true
+      configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
+      client_id: "your-client-id"
+      client_secret: "your-client-secret"
+      # Use POST body instead of Basic Auth:
+      auth_method: client_secret_post
+      # SASL token validation strategy:
+      validation: auto  # or: introspection | jwks
+      jwks_cache_ttl: 5m
+```
+
+Notes:
+- HTTP requests to the token and introspection endpoints now include `Accept: application/json`.
+- Request bodies are built once and never rewritten after `http.NewRequest`, ensuring correct `Content-Length` handling.
+- Introspection authentication supports `private_key_jwt`, `client_secret_basic`, and `client_secret_post`, aligned with token fetching.
+- JWKS-based validation supports RSA, EC (P-256/384/521), and Ed25519 keys from the provider’s `jwks_uri`.

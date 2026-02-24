@@ -81,6 +81,13 @@ type OIDCAuth struct {
 	ClientSecret     string   `mapstructure:"client_secret"`
 	PrivateKeyFile   string   `mapstructure:"private_key_file" validate:"omitempty,file"`
 	Scopes           []string `mapstructure:"scopes"`
+	// AuthMethod controls how the client authenticates to token/introspection endpoints.
+	// Values: auto, client_secret_basic, client_secret_post, private_key_jwt, none
+	AuthMethod string `mapstructure:"auth_method" validate:"omitempty,oneof=auto client_secret_basic client_secret_post private_key_jwt none"`
+	// Validation controls how incoming OAuth tokens are validated for SASL.
+	// Values: introspection, jwks, auto
+	Validation   string        `mapstructure:"validation" validate:"omitempty,oneof=introspection jwks auto"`
+	JWKSCacheTTL time.Duration `mapstructure:"jwks_cache_ttl" validate:"omitempty,min=1m,max=168h"`
 }
 
 type Request struct {
@@ -121,6 +128,47 @@ func (cfg *Config) HandleConfig() error {
 		} else if cfg.Server.Listen[i].WorkerPool.MaxQueue == 0 {
 			cfg.Server.Listen[i].WorkerPool.MaxQueue = cfg.Server.Listen[i].WorkerPool.MaxWorkers * 10
 		}
+	}
+
+	// Provide sensible defaults for OIDC across all request maps
+	setOIDCDefaults := func(r *Request) {
+		if !r.OIDCAuth.Enabled {
+			return
+		}
+		// auth_method defaulting
+		if r.OIDCAuth.AuthMethod == "" || r.OIDCAuth.AuthMethod == "auto" {
+			if r.OIDCAuth.PrivateKeyFile != "" {
+				r.OIDCAuth.AuthMethod = "private_key_jwt"
+			} else if r.OIDCAuth.ClientSecret != "" {
+				r.OIDCAuth.AuthMethod = "client_secret_basic"
+			} else {
+				r.OIDCAuth.AuthMethod = "none"
+			}
+		}
+		// validation defaulting
+		if r.OIDCAuth.Validation == "" {
+			r.OIDCAuth.Validation = "introspection"
+		}
+		// JWKS cache TTL default
+		if r.OIDCAuth.JWKSCacheTTL == 0 {
+			r.OIDCAuth.JWKSCacheTTL = 5 * time.Minute
+		}
+	}
+
+	for k := range cfg.SocketMaps {
+		v := cfg.SocketMaps[k]
+		setOIDCDefaults(&v)
+		cfg.SocketMaps[k] = v
+	}
+	for k := range cfg.PolicyServices {
+		v := cfg.PolicyServices[k]
+		setOIDCDefaults(&v)
+		cfg.PolicyServices[k] = v
+	}
+	for k := range cfg.DovecotSASL {
+		v := cfg.DovecotSASL[k]
+		setOIDCDefaults(&v)
+		cfg.DovecotSASL[k] = v
 	}
 
 	validate := validator.New(validator.WithRequiredStructEnabled())

@@ -2,11 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // --- PLAIN mechanism tests ---
@@ -733,5 +740,138 @@ func TestNauthilusSASLAuthenticatorOAuthNotConfigured(t *testing.T) {
 	}
 	if result.Reason != "OAuth not configured" {
 		t.Errorf("Reason = %q, want 'OAuth not configured'", result.Reason)
+	}
+}
+
+func TestNauthilusSASLAuthenticatorTokenJWKS(t *testing.T) {
+	// Generate RSA key and JWT
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	claims := jwt.MapClaims{
+		"sub":                "jwks-sub",
+		"preferred_username": "jwks-user",
+		"exp":                time.Now().Add(1 * time.Hour).Unix(),
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = "test-key"
+	signed, err := tok.SignedString(priv)
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+
+	// Build JWKS
+	n := base64.RawURLEncoding.EncodeToString(priv.N.Bytes())
+	eBytes := big.NewInt(int64(priv.E)).Bytes()
+	e := base64.RawURLEncoding.EncodeToString(eBytes)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(map[string]any{
+				"issuer":         "http://" + r.Host,
+				"jwks_uri":       "http://" + r.Host + "/jwks",
+				"token_endpoint": "http://" + r.Host + "/token",
+			})
+		case "/jwks":
+			json.NewEncoder(w).Encode(map[string]any{
+				"keys": []map[string]string{{
+					"kty": "RSA", "kid": "test-key", "use": "sig", "alg": "RS256",
+					"n": n, "e": e,
+				}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	// Override clients
+	oldClient := httpClient
+	httpClient = server.Client()
+	defer func() { httpClient = oldClient }()
+	InitOIDCManager()
+	oidcManager.httpClient = server.Client()
+
+	cfg := &Config{DovecotSASL: map[string]Request{
+		"jwks": {
+			Target:     server.URL,
+			StatusCode: 200,
+			OIDCAuth: OIDCAuth{
+				Enabled:          true,
+				ConfigurationURI: server.URL + "/.well-known/openid-configuration",
+				ClientID:         "client-id",
+				Validation:       "jwks",
+			},
+		},
+	}}
+
+	ctx := context.WithValue(context.Background(), loggerKey, slog.New(slog.DiscardHandler))
+	auth := NewNauthilusSASLAuthenticator(cfg, "jwks")
+	res, err := auth.AuthenticateToken(ctx, "ignored", signed, &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"})
+	if err != nil {
+		t.Fatalf("AuthenticateToken: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got failure: %v", res.Reason)
+	}
+	if res.Username != "jwks-user" {
+		t.Fatalf("username = %q, want jwks-user", res.Username)
+	}
+}
+
+func TestNauthilusSASLAuthenticatorTokenAutoFallbackToIntrospection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(map[string]any{
+				"issuer":                 "http://" + r.Host,
+				"introspection_endpoint": "http://" + r.Host + "/introspect",
+				"jwks_uri":               "http://" + r.Host + "/jwks",
+			})
+		case "/introspect":
+			_ = r.ParseForm()
+			if r.FormValue("token") == "opaque" {
+				json.NewEncoder(w).Encode(map[string]any{"active": true, "username": "opaque-user"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"active": false})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	oldClient := httpClient
+	httpClient = server.Client()
+	defer func() { httpClient = oldClient }()
+	InitOIDCManager()
+	oidcManager.httpClient = server.Client()
+
+	cfg := &Config{DovecotSASL: map[string]Request{
+		"auto": {
+			Target:     server.URL,
+			StatusCode: 200,
+			OIDCAuth: OIDCAuth{
+				Enabled:          true,
+				ConfigurationURI: server.URL + "/.well-known/openid-configuration",
+				ClientID:         "client-id",
+				Validation:       "auto",
+			},
+		},
+	}}
+	ctx := context.WithValue(context.Background(), loggerKey, slog.New(slog.DiscardHandler))
+	auth := NewNauthilusSASLAuthenticator(cfg, "auto")
+	res, err := auth.AuthenticateToken(ctx, "ignored", "opaque", &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"})
+	if err != nil {
+		t.Fatalf("AuthenticateToken: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got failure: %v", res.Reason)
+	}
+	if res.Username != "opaque-user" {
+		t.Fatalf("username = %q, want opaque-user", res.Username)
 	}
 }
