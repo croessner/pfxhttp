@@ -479,6 +479,15 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 		}, nil
 	}
 
+	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
+	if logger != nil {
+		logger.Debug("Outgoing Nauthilus request",
+			slog.String("method", httpReq.Method),
+			slog.String("url", httpReq.URL.String()),
+			slog.Any("headers", httpReq.Header),
+			slog.String("payload", string(jsonPayload)))
+	}
+
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return &SASLAuthResult{
@@ -524,6 +533,14 @@ func (a *NauthilusSASLAuthenticator) handlePasswordResponse(resp *http.Response,
 	bodyBytes, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	logger, _ := resp.Request.Context().Value(loggerKey).(*slog.Logger)
+	if logger != nil {
+		logger.Debug("Nauthilus response received",
+			slog.Int("status", resp.StatusCode),
+			slog.Any("headers", resp.Header),
+			slog.String("body", string(bodyBytes)))
 	}
 
 	var responseData map[string]any
@@ -707,6 +724,14 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		httpReq.SetBasicAuth(settings.OIDCAuth.ClientID, settings.OIDCAuth.ClientSecret)
 	}
 
+	if logger != nil {
+		logger.Debug("Outgoing Nauthilus introspection request",
+			slog.String("method", httpReq.Method),
+			slog.String("url", httpReq.URL.String()),
+			slog.Any("headers", httpReq.Header),
+			slog.String("payload", data.Encode()))
+	}
+
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return &SASLAuthResult{
@@ -723,6 +748,13 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read introspection response: %w", err)
+	}
+
+	if logger != nil {
+		logger.Debug("Nauthilus introspection response received",
+			slog.Int("status", resp.StatusCode),
+			slog.Any("headers", resp.Header),
+			slog.String("body", string(bodyBytes)))
 	}
 
 	if resp.StatusCode != http.StatusOK {

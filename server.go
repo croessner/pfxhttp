@@ -491,6 +491,8 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				return
 			}
 
+			logger.Debug("Incoming Dovecot SASL request", slog.String(LogKeyClient, clientAddr), slog.String("request", strings.TrimSpace(line)))
+
 			cmd, args := decoder.ParseLine(line)
 			if cmd == "" {
 				continue
@@ -569,7 +571,10 @@ func (s *MultiServer) handleSASLResult(
 		activeMechanisms[authReq.ID] = mech
 		activeAuthRequests[authReq.ID] = authReq
 
-		if _, err := conn.Write([]byte(encoder.EncodeCont(authReq.ID, result.ContinuationChallenge))); err != nil {
+		resp := encoder.EncodeCont(authReq.ID, result.ContinuationChallenge)
+		logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", strings.TrimSpace(resp)))
+
+		if _, err := conn.Write([]byte(resp)); err != nil {
 			logger.Error("Error writing CONT", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 		}
 
@@ -581,7 +586,10 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeMechanisms, authReq.ID)
 		delete(activeAuthRequests, authReq.ID)
 
-		if _, err := conn.Write([]byte(encoder.EncodeFail(authReq.ID, result.Reason, result.Username, result.Temporary))); err != nil {
+		resp := encoder.EncodeFail(authReq.ID, result.Reason, result.Username, result.Temporary)
+		logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", strings.TrimSpace(resp)))
+
+		if _, err := conn.Write([]byte(resp)); err != nil {
 			logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 		}
 
@@ -608,7 +616,10 @@ func (s *MultiServer) handleSASLResult(
 				slog.String("username", creds.Username),
 				slog.String("error", err.Error()))
 
-			if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, "internal error", creds.Username, true))); wErr != nil {
+			resp := encoder.EncodeFail(authReq.ID, "internal error", creds.Username, true)
+			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", strings.TrimSpace(resp)))
+
+			if _, wErr := conn.Write([]byte(resp)); wErr != nil {
 				logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
 			}
 
@@ -626,7 +637,10 @@ func (s *MultiServer) handleSASLResult(
 				slog.String("username", username),
 				slog.String("mechanism", authReq.Mechanism))
 
-			if _, wErr := conn.Write([]byte(encoder.EncodeOK(authReq.ID, username))); wErr != nil {
+			resp := encoder.EncodeOK(authReq.ID, username)
+			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", strings.TrimSpace(resp)))
+
+			if _, wErr := conn.Write([]byte(resp)); wErr != nil {
 				logger.Error("Error writing OK", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
 			}
 		} else {
@@ -636,7 +650,10 @@ func (s *MultiServer) handleSASLResult(
 				slog.String("mechanism", authReq.Mechanism),
 				slog.String("reason", authResult.Reason))
 
-			if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, authResult.Reason, creds.Username, authResult.Temporary))); wErr != nil {
+			resp := encoder.EncodeFail(authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
+			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", strings.TrimSpace(resp)))
+
+			if _, wErr := conn.Write([]byte(resp)); wErr != nil {
 				logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
 			}
 		}
