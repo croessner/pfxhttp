@@ -11,15 +11,12 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
   * [Getting Started](#getting-started)
     * [Installation](#installation)
       * [Prerequisites](#prerequisites)
-      * [Customizing the Build](#customizing-the-build)
-        * [Build Tags](#build-tags)
-      * [Verifying Your Configuration](#verifying-your-configuration)
     * [Running as a System Service](#running-as-a-system-service)
     * [Command-line Options](#command-line-options)
   * [Configuration](#configuration)
     * [Server Settings](#server-settings)
     * [Response Cache](#response-cache)
-    * [JWT Authentication](#jwt-authentication)
+    * [OIDC Authentication](#oidc-authentication)
     * [HTTP Request/Response Compression](#http-requestresponse-compression)
     * [Integrating with Postfix](#integrating-with-postfix)
       * [Socket Maps](#socket-maps)
@@ -52,78 +49,7 @@ make install
 
 #### Prerequisites
 
-- Go 1.24 or later
-- For JWT support only:
-  - SQLite development libraries (libsqlite3-dev on Debian/Ubuntu, sqlite-devel on RHEL/CentOS)
-  - GCC or another C compiler for CGO
-
-#### Customizing the Build
-
-When building with JWT support, you may need to customize the SQLite library and include paths:
-
-```bash
-# For custom SQLite installation paths (only needed for JWT support)
-make TAGS=jwt SQLITE_LIB_PATH=/path/to/sqlite/lib SQLITE_INCLUDE_PATH=/path/to/sqlite/include
-
-# On macOS with Homebrew (only needed for JWT support)
-make TAGS=jwt SQLITE_LIB_PATH=/usr/local/opt/sqlite/lib SQLITE_INCLUDE_PATH=/usr/local/opt/sqlite/include
-```
-
-You can also set these as environment variables when building with JWT support:
-
-```bash
-export CGO_LDFLAGS="-L/path/to/sqlite/lib -lsqlite3"
-export CGO_CFLAGS="-I/path/to/sqlite/include"
-make TAGS=jwt
-```
-
-##### Build Tags
-
-Pfxhttp supports optional features through build tags:
-
-- **jwt**: Enables JWT authentication support (requires SQLite)
-
-To build with JWT support:
-```bash
-make TAGS=jwt
-```
-
-To build without JWT support (no SQLite dependency):
-```bash
-make
-```
-
-#### Verifying Your Configuration
-
-If you're building with JWT support, you can check your SQLite configuration with:
-
-```bash
-make sqlite-config
-```
-
-And run the tests to ensure everything is working correctly:
-
-```bash
-# Run all tests
-make test
-
-# For JWT builds only: Run the customsql package tests (SQLite-specific)
-# This is recommended for testing the SQLite functionality when using JWT
-make test-customsql
-```
-
-> **Note:** When testing JWT functionality with SQLite, always use the `test-customsql` target rather than trying to test individual files, as this ensures all dependencies are properly included.
-
-By default, Pfxhttp and its associated man pages are installed in `/usr/local`.
-
-The configuration is located in one of the following directories, based on priority:
-
-1. `/usr/local/etc/pfxhttp/`
-2. `/etc/pfxhttp/`
-3. `$HOME/.pfxhttp/`
-4. Current directory (`.`)
-
-The expected configuration file name is `pfxhttp.yml`.
+- Go 1.26 or later
 
 ### Running as a System Service
 
@@ -206,7 +132,7 @@ The `server` section contains global options, including:
 - **Listeners**: Define socket map and policy service listeners for Postfix integration.
 - **Logging**: Enable JSON-formatted logs and set verbosity (`debug`, `info`, or `error`).
 - **HTTP Client Options**: Configure connection limits, timeouts, and optional TLS settings.
-- **JWT Authentication**: Configure JWT authentication for HTTP requests with automatic token management.
+- **OIDC Authentication**: Configure OIDC authentication (Client Credentials Flow) for HTTP requests with automatic token management.
 - **Response Cache**: Optional in-memory cache to serve responses when the backend is unavailable.
 
 Below is a detailed example configuration for `pfxhttp.yml`:
@@ -234,9 +160,6 @@ server:
     enabled: true
     http_client_skip_verify: true
 
-  # Path to SQLite database for JWT token storage
-  jwt_db_path: "/var/lib/pfxhttp/jwt.db"
-
   # Optional response cache to serve data during backend outages
   response_cache:
     enabled: true
@@ -256,14 +179,13 @@ socket_maps:
     error_field: "error"
     no_error_value: "not-found"
 
-  jwt_demo_map:
+  oidc_demo_map:
     target: "https://127.0.0.1:9443/api/v1/custom/map"
-    jwt_auth:
+    oidc_auth:
       enabled: true
-      token_endpoint: "https://example.com/api/token"
-      credentials:
-        username: "foobar"
-        password: "secret"
+      configuration_uri: "https://example.com/.well-known/openid-configuration"
+      client_id: "foobar"
+      client_secret: "secret"
     payload: >
       {
         "key": "{{ .Key }}"
@@ -284,14 +206,13 @@ policy_services:
     error_field: "policy.error"
     no_error_value: "OK"
 
-  jwt_example_policy:
+  oidc_example_policy:
     target: "https://127.0.0.1:9443/api/v1/custom/policy"
-    jwt_auth:
+    oidc_auth:
       enabled: true
-      token_endpoint: "https://example.com/api/token"
-      credentials:
-        username: "foobar"
-        password: "secret"
+      configuration_uri: "https://example.com/.well-known/openid-configuration"
+      client_id: "foobar"
+      client_secret: "secret"
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "policy.result"
@@ -325,48 +246,39 @@ Notes:
 - Cache is in-memory and per-process; it is cleared on restart.
 - Keys are derived from the tuple (name, key). For policy services, the key is the JSON of the policy payload.
 
-### JWT Authentication
+### OIDC Authentication
 
-Pfxhttp supports JWT authentication for HTTP requests to the target endpoints. This allows you to securely authenticate with APIs that require JWT tokens. 
+Pfxhttp supports OIDC Client Credentials Flow for HTTP requests to the target endpoints. This allows you to securely authenticate with APIs that require OIDC tokens.
 
-> **Note:** JWT support is optional and requires building Pfxhttp with the `jwt` build tag (`make TAGS=jwt`). This feature depends on SQLite for token storage.
+The OIDC authentication feature includes:
 
-The JWT authentication feature includes:
+- Automatic discovery of OIDC endpoints via the OpenID configuration URI
+- Automatic token fetching using the `client_credentials` grant type
+- Support for `client_secret` (Basic Authentication)
+- Support for `private_key_jwt` (RSA, ECDSA, or Ed25519)
+- Automatic token caching and refresh before expiration
 
-- Automatic token fetching from a token endpoint
-- Token storage in a SQLite database
-- Automatic token refresh when tokens expire
+To configure OIDC authentication for a socket map or policy service:
 
-To configure JWT authentication:
+```yaml
+socket_maps:
+  example:
+    target: "https://api.example.com/endpoint"
+    oidc_auth:
+      enabled: true
+      configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
+      client_id: "your-client-id"
+      # Use either client_secret:
+      client_secret: "your-client-secret"
+      # OR private_key_file for private_key_jwt:
+      # private_key_file: "/path/to/private-key.pem"
+      # Optional: list of scopes
+      scopes:
+        - "api.read"
+        - "api.write"
+```
 
-1. Make sure you've built Pfxhttp with JWT support:
-   ```bash
-   make TAGS=jwt
-   ```
-
-2. Set the `jwt_db_path` in the server section to specify where tokens will be stored:
-   ```yaml
-   server:
-     jwt_db_path: "/var/lib/pfxhttp/jwt.db"
-   ```
-
-3. Configure JWT authentication for each socket map or policy service that requires it:
-   ```yaml
-   socket_maps:
-     example:
-       target: "https://api.example.com/endpoint"
-       jwt_auth:
-         enabled: true
-         token_endpoint: "https://api.example.com/token"
-         credentials:
-           some_username_identifier: "your_username"
-           some_password_identifier: "your_password"
-         content_type: "application/json"  # Optional: "application/x-www-form-urlencoded" (default) or "application/json"
-   ```
-
-The JWT token will be automatically fetched from the token endpoint and included in the Authorization header as a Bearer token for all requests to the target endpoint.
-
-If you build Pfxhttp without the `jwt` build tag, the JWT configuration in the YAML file will be ignored, and no JWT authentication will be performed.
+The OIDC access token will be automatically fetched and included in the `Authorization` header as a `Bearer` token for all requests to the target endpoint.
 
 ---
 

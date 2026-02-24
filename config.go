@@ -26,7 +26,6 @@ type Server struct {
 	HTTPClient          HTTPClient          `mapstructure:"http_client" validate:"omitempty"`
 	TLS                 TLS                 `mapstructure:"tls" validate:"omitempty"`
 	SockmapMaxReplySize int                 `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
-	JWTDBPath           string              `mapstructure:"jwt_db_path" validate:"omitempty,filepath"`
 	ResponseCache       ResponseCacheConfig `mapstructure:"response_cache" validate:"omitempty"`
 }
 
@@ -64,11 +63,13 @@ type TLS struct {
 	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
 }
 
-type JWTAuth struct {
-	Enabled       bool              `mapstructure:"enabled"`
-	TokenEndpoint string            `mapstructure:"token_endpoint" validate:"required_if=Enabled true,http_url"`
-	Credentials   map[string]string `mapstructure:"credentials" validate:"required_if=Enabled true"`
-	ContentType   string            `mapstructure:"content_type" validate:"omitempty,oneof=application/x-www-form-urlencoded application/json"`
+type OIDCAuth struct {
+	Enabled          bool     `mapstructure:"enabled"`
+	ConfigurationURI string   `mapstructure:"configuration_uri" validate:"required_if=Enabled true,http_url"`
+	ClientID         string   `mapstructure:"client_id" validate:"required_if=Enabled true"`
+	ClientSecret     string   `mapstructure:"client_secret"`
+	PrivateKeyFile   string   `mapstructure:"private_key_file" validate:"omitempty,file"`
+	Scopes           []string `mapstructure:"scopes"`
 }
 
 type Request struct {
@@ -79,13 +80,12 @@ type Request struct {
 	ValueField              string   `mapstructure:"value_field" validate:"omitempty,printascii"`
 	ErrorField              string   `mapstructure:"error_field" validate:"omitempty,printascii"`
 	NoErrorValue            string   `mapstructure:"no_error_value" validate:"omitempty,printascii"`
-	JWTAuth                 JWTAuth  `mapstructure:"jwt_auth" validate:"omitempty"`
+	OIDCAuth                OIDCAuth `mapstructure:"oidc_auth" validate:"omitempty"`
 	HTTPRequestCompression  bool     `mapstructure:"http_request_compression"`
 	HTTPResponseCompression bool     `mapstructure:"http_response_compression"`
 }
 
 func (cfg *Config) HandleConfig() error {
-	var validationErrors validator.ValidationErrors
 
 	err := viper.Unmarshal(cfg)
 	if err != nil {
@@ -102,8 +102,8 @@ func (cfg *Config) HandleConfig() error {
 		return nil
 	}
 
-	if errors.As(err, &validationErrors) {
-		return prettyFormatValidationErrors(validationErrors)
+	if ve, ok := errors.AsType[validator.ValidationErrors](err); ok {
+		return prettyFormatValidationErrors(ve)
 	}
 
 	return err

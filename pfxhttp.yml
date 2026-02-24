@@ -17,7 +17,7 @@ server:
       port: 23451
 
     - kind: "policy_service"
-      name: "jwt_policy"
+      name: "oidc_policy"
       type: "tcp"
       address: "0.0.0.0"
       port: 23452
@@ -38,10 +38,6 @@ server:
 
   # Default Postfix limit
   socketmap_max_reply_size: 100000
-
-  # Path to SQLite database for JWT token storage
-  # jwt_db_path: "/var/lib/pfxhttp/jwt.db"
-  jwt_db_path: ":memory:"
 
   response_cache:
     enabled: true
@@ -65,16 +61,13 @@ socket_maps:
     error_field: "error"
     no_error_value: "none"
 
-  jwt_demo:
+  oidc_demo:
     target: https://127.0.0.1:9443/api/v1/custom/postfix/socket_map
-    jwt_auth:
+    oidc_auth:
       enabled: true
-      token_endpoint: https://127.0.0.1:9443/api/v1/jwt/token
-      credentials:
-        username: admin
-        password: admin-password
-      # Specify the content type for token requests: application/x-www-form-urlencoded (default) or application/json
-      content_type: application/json
+      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
+      client_id: admin
+      client_secret: admin-password
     payload: >
       {
         "key": "{{ .Key }}"
@@ -99,16 +92,13 @@ policy_services:
     error_field: "error"
     no_error_value: "none"
 
-  jwt_policy:
+  oidc_policy:
     target: https://127.0.0.1:9443/api/v1/custom/postfix/policy_service
-    jwt_auth:
+    oidc_auth:
       enabled: true
-      token_endpoint: https://127.0.0.1:9443/api/v1/jwt/token
-      credentials:
-        username: admin
-        password: admin-password
-      # Specify the content type for token requests: application/x-www-form-urlencoded (default) or application/json
-      content_type: application/json
+      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
+      client_id: admin
+      client_secret: admin-password
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "result"

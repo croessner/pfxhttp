@@ -171,7 +171,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 		default:
 			netString, err := s.readNetString(conn)
 			if err != nil {
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 
@@ -244,7 +244,7 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 		default:
 			policy, err := s.readPolicy(conn)
 			if err != nil {
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 
@@ -290,9 +290,7 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 
 // isConnectionResetError checks if the given error is a "connection reset by peer" error in a network operation.
 func isConnectionResetError(err error) bool {
-	var netOpErr *net.OpError
-
-	if errors.As(err, &netOpErr) {
+	if netOpErr, ok := errors.AsType[*net.OpError](err); ok {
 		if netOpErr.Err.Error() == "read: connection reset by peer" {
 			return true
 		}
@@ -321,9 +319,7 @@ func (s *MultiServer) readNetString(conn net.Conn) (*NetString, error) {
 
 			_, err = conn.Read(singleByte)
 			if err != nil {
-				var netErr net.Error
-
-				if errors.As(err, &netErr) && netErr.Timeout() {
+				if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 					continue
 				}
 

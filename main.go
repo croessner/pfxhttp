@@ -168,10 +168,8 @@ func main() {
 			respCache = NewInMemoryResponseCache(cfg.Server.ResponseCache.TTL)
 		}
 
-		// Initialize JWT manager if JWT support is enabled
-		initJWT(ctx, cfg)
-
-		defer closeJWT()
+		// Initialize OIDC manager
+		InitOIDCManager()
 
 		runServer(ctx, cfg)
 	}

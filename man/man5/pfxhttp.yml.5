@@ -44,7 +44,6 @@ server:
     key: "/etc/pfxhttp/key.pem"
     http_client_skip_verify: true
   socketmap_max_reply_size: 100000
-  jwt_db_path: "/var/lib/pfxhttp/jwt.db"
   response_cache:
     enabled: true
     ttl: 1m
@@ -131,10 +130,6 @@ If \fBtrue\fP, disables verification of peer certificates by the HTTP client.
 Specifies the maximum reply size for socket maps. Defaults to \fB100000\fP if not explicitly configured.
 
 .TP
-.B jwt_db_path
-Path to the SQLite database file used for storing JWT tokens. This is required if JWT authentication is enabled for any socket map or policy service.
-
-.TP
 .B response_cache
 Configures caching of HTTP responses.
 .RS
@@ -165,14 +160,13 @@ socket_maps:
     error_field: "error"
     no_error_value: "not-found"
 
-  jwt_demo_map:
+  oidc_demo_map:
     target: "https://your-api.example.com/api/v1/map"
-    jwt_auth:
+    oidc_auth:
       enabled: true
-      token_endpoint: "https://your-auth.example.com/token"
-      credentials:
-        username: "username"
-        password: "password"
+      configuration_uri: "https://your-auth.example.com/.well-known/openid-configuration"
+      client_id: "your-client-id"
+      client_secret: "your-client-secret"
     payload: >
       {
         "key": "{{ .Key }}"
@@ -193,21 +187,27 @@ If true, compresses HTTP request bodies with gzip.
 If true, sends an Accept-Encoding header to request gzip-compressed responses.
 
 .TP
-.B jwt_auth
-Configures JWT authentication for the socket map. This is an alternative to using custom_headers for authentication.
+.B oidc_auth
+Configures OIDC authentication for the socket map.
 .RS
 .IP \[bu] 2
 .B enabled:
-Enables or disables JWT authentication (\fBtrue\fP or \fBfalse\fP).
+Enables or disables OIDC authentication (\fBtrue\fP or \fBfalse\fP).
 .IP \[bu] 2
-.B token_endpoint:
-The URL of the token endpoint that provides JWT tokens.
+.B configuration_uri:
+The URL of the OpenID configuration endpoint (e.g., \fBhttps://auth.example.com/.well-known/openid-configuration\fP).
 .IP \[bu] 2
-.B credentials:
-A map of key-value pairs where the keys are the field names to use in the request and the values are the credentials for authentication at the token endpoint.
+.B client_id:
+The client identifier.
 .IP \[bu] 2
-.B content_type:
-The content type to use for token requests. Can be \fBapplication/x-www-form-urlencoded\fP (default) or \fBapplication/json\fP.
+.B client_secret:
+The client secret (for client_secret_basic authentication).
+.IP \[bu] 2
+.B private_key_file:
+Path to the PEM-encoded private key (for private_key_jwt authentication).
+.IP \[bu] 2
+.B scopes:
+A list of scopes to request.
 .RE
 
 .TP
@@ -230,14 +230,13 @@ policy_services:
     error_field: "policy.error"
     no_error_value: "OK"
 
-  jwt_example_policy:
+  oidc_example_policy:
     target: "https://your-api.example.com/api/v1/policy/check"
-    jwt_auth:
+    oidc_auth:
       enabled: true
-      token_endpoint: "https://your-auth.example.com/token"
-      credentials:
-        username: "username"
-        password: "password"
+      configuration_uri: "https://your-auth.example.com/.well-known/openid-configuration"
+      client_id: "your-client-id"
+      client_secret: "your-client-secret"
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "policy.result"
@@ -255,21 +254,27 @@ If true, compresses HTTP request bodies with gzip.
 If true, sends an Accept-Encoding header to request gzip-compressed responses.
 
 .TP
-.B jwt_auth
-Configures JWT authentication for the policy service. This is an alternative to using custom_headers for authentication.
+.B oidc_auth
+Configures OIDC authentication for the policy service.
 .RS
 .IP \[bu] 2
 .B enabled:
-Enables or disables JWT authentication (\fBtrue\fP or \fBfalse\fP).
+Enables or disables OIDC authentication (\fBtrue\fP or \fBfalse\fP).
 .IP \[bu] 2
-.B token_endpoint:
-The URL of the token endpoint that provides JWT tokens.
+.B configuration_uri:
+The URL of the OpenID configuration endpoint.
 .IP \[bu] 2
-.B credentials:
-A map of key-value pairs where the keys are the field names to use in the request and the values are the credentials for authentication at the token endpoint.
+.B client_id:
+The client identifier.
 .IP \[bu] 2
-.B content_type:
-The content type to use for token requests. Can be \fBapplication/x-www-form-urlencoded\fP (default) or \fBapplication/json\fP.
+.B client_secret:
+The client secret.
+.IP \[bu] 2
+.B private_key_file:
+Path to the PEM-encoded private key.
+.IP \[bu] 2
+.B scopes:
+A list of scopes to request.
 .RE
 
 .TP
@@ -360,128 +365,34 @@ Configuration files are searched in the following order:
 .B ./pfxhttp.yml
 .RE
 
-.SH JWT AUTHENTICATION
-The \fBpfxhttp\fP application supports JSON Web Token (JWT) authentication for secure communication with HTTP services. This section explains how JWT authentication works in the application.
+.SH OIDC AUTHENTICATION
+The \fBpfxhttp\fP application supports OpenID Connect (OIDC) Client Credentials Flow for secure communication with HTTP services.
 
 .SS OVERVIEW
-JWT authentication provides a secure way to authenticate requests to HTTP services. The application manages the entire token lifecycle, including:
+OIDC authentication provides a standardized way to authenticate requests using access tokens. The application manages the token lifecycle, including:
 
 .IP \[bu] 2
-Fetching new tokens from an authentication server
+Discovery of OIDC endpoints via the OpenID configuration URI
 .IP \[bu] 2
-Storing tokens securely in a SQLite database
+Fetching access tokens using the \fBclient_credentials\fP grant type
 .IP \[bu] 2
-Refreshing tokens when they expire
+Support for \fBclient_secret\fP and \fBprivate_key_jwt\fP authentication
 .IP \[bu] 2
-Caching tokens in memory for improved performance
-
-.SS TOKEN ENDPOINT REQUIREMENTS
-To use JWT authentication, you need to configure a token endpoint that supports the following:
-
-.TP
-.B Token Request
-.RS
-.IP \[bu] 2
-.B Method:
-POST
-.IP \[bu] 2
-.B Content-Type:
-Either \fBapplication/x-www-form-urlencoded\fP (default) or \fBapplication/json\fP
-.IP \[bu] 2
-.B Body:
-Credentials as specified in the configuration (username, password, client_id, etc.)
-.IP \[bu] 2
-.B Response:
-JSON object containing \fBtoken\fP, \fBrefresh_token\fP, and \fBexpires_at\fP fields
-.RE
-
-.TP
-.B Example Request (application/x-www-form-urlencoded):
-.nf
-POST /token HTTP/1.1
-Host: auth.example.com
-Content-Type: application/x-www-form-urlencoded
-
-username=user&password=pass
-.fi
-
-.TP
-.B Example Response:
-.nf
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_at": 1672531200
-}
-.fi
-
-.SS TOKEN REFRESHING
-When a token expires, the application attempts to refresh it before fetching a new one. The refresh mechanism works as follows:
-
-.TP
-.B Refresh Request
-.RS
-.IP \[bu] 2
-.B Method:
-POST
-.IP \[bu] 2
-.B Header:
-X-Refresh-Token: <refresh_token>
-.IP \[bu] 2
-.B Response:
-Same format as the token request response
-.RE
-
-.TP
-.B Example Refresh Request:
-.nf
-POST /token HTTP/1.1
-Host: auth.example.com
-X-Refresh-Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-.fi
-
-.SS TOKEN MANAGEMENT
-The application uses a sophisticated token management system:
-
-.IP \[bu] 2
-Tokens are cached in memory to reduce database access
-.IP \[bu] 2
-Tokens are stored in a SQLite database for persistence across restarts
-.IP \[bu] 2
-Tokens are automatically refreshed when they expire
-.IP \[bu] 2
-A 30-second buffer is applied before expiration to avoid using tokens that are about to expire
+In-memory caching of tokens to improve performance
 
 .SS CONFIGURATION
-To enable JWT authentication, you need to configure both the server and the individual requests:
+To enable OIDC authentication, configure the \fBoidc_auth\fP section for a socket map or policy service:
 
-.TP
-.B Server Configuration:
-.nf
-server:
-  jwt_db_path: "/var/lib/pfxhttp/jwt.db"  # Path to the SQLite database for token storage
-.fi
-
-.TP
-.B Request Configuration:
 .nf
 socket_maps:
   example_map:
     target: "https://api.example.com/map"
-    jwt_auth:
+    oidc_auth:
       enabled: true
-      token_endpoint: "https://auth.example.com/token"
-      credentials:
-        username: "user"
-        password: "pass"
-      content_type: "application/x-www-form-urlencoded"  # Optional, default value
+      configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
+      client_id: "your-client-id"
+      client_secret: "your-client-secret"
 .fi
-
-.SS COMPATIBILITY
-JWT authentication in \fBpfxhttp\fP has been successfully tested with Nauthilus, an authentication and authorization server. The token refreshing mechanism is implemented according to the Nauthilus specification, using the X-Refresh-Token header.
 
 .SH SEE ALSO
 .BR postfix (1),

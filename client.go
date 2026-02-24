@@ -279,8 +279,8 @@ func (c *MapClient) SendAndReceive() error {
 		}
 	}
 
-	// Add JWT token if enabled
-	failed, errMsg, err := addJWTAuth(req, c.receiver.GetName(), settings.JWTAuth)
+	// Add OIDC token if enabled
+	failed, errMsg, err := addOIDCAuth(req, c.receiver.GetName(), settings.OIDCAuth)
 	if failed {
 		c.sender.SetStatus("TEMP")
 		c.sender.SetData(errMsg)
@@ -525,8 +525,8 @@ func (p *PolicyClient) SendAndReceive() error {
 		}
 	}
 
-	// Add JWT token if enabled
-	failed, errMsg, err := addJWTAuth(req, p.receiver.GetName(), settings.JWTAuth)
+	// Add OIDC token if enabled
+	failed, errMsg, err := addOIDCAuth(req, p.receiver.GetName(), settings.OIDCAuth)
 	if failed {
 		p.sender.SetStatus("DEFER")
 		p.sender.SetData(errMsg)
