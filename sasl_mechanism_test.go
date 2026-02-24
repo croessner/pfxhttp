@@ -631,7 +631,7 @@ func TestNauthilusSASLAuthenticatorTokenIntrospection(t *testing.T) {
 			"test_oauth": {
 				Target:     server.URL,
 				StatusCode: 200,
-				OIDCAuth: OIDCAuth{
+				SASLOIDCAuth: SASLOIDCAuth{
 					Enabled:          true,
 					ConfigurationURI: server.URL + "/.well-known/openid-configuration",
 					ClientID:         "client-id",
@@ -719,7 +719,7 @@ func TestNauthilusSASLAuthenticatorOAuthNotConfigured(t *testing.T) {
 			"no_oauth": {
 				Target:     "http://localhost",
 				StatusCode: 200,
-				OIDCAuth: OIDCAuth{
+				SASLOIDCAuth: SASLOIDCAuth{
 					Enabled: false,
 				},
 			},
@@ -800,7 +800,7 @@ func TestNauthilusSASLAuthenticatorTokenJWKS(t *testing.T) {
 		"jwks": {
 			Target:     server.URL,
 			StatusCode: 200,
-			OIDCAuth: OIDCAuth{
+			SASLOIDCAuth: SASLOIDCAuth{
 				Enabled:          true,
 				ConfigurationURI: server.URL + "/.well-known/openid-configuration",
 				ClientID:         "client-id",
@@ -855,7 +855,7 @@ func TestNauthilusSASLAuthenticatorTokenAutoFallbackToIntrospection(t *testing.T
 		"auto": {
 			Target:     server.URL,
 			StatusCode: 200,
-			OIDCAuth: OIDCAuth{
+			SASLOIDCAuth: SASLOIDCAuth{
 				Enabled:          true,
 				ConfigurationURI: server.URL + "/.well-known/openid-configuration",
 				ClientID:         "client-id",

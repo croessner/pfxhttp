@@ -56,7 +56,7 @@ func TestOIDCManager(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	ctx := context.WithValue(context.Background(), loggerKey, logger)
 
-	auth := OIDCAuth{
+	auth := BackendOIDCAuth{
 		Enabled:          true,
 		ConfigurationURI: server.URL + "/.well-known/openid-configuration",
 		ClientID:         "client-id",
@@ -120,7 +120,7 @@ func TestOIDCManagerExpiration(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	ctx := context.WithValue(context.Background(), loggerKey, logger)
 
-	auth := OIDCAuth{
+	auth := BackendOIDCAuth{
 		Enabled:          true,
 		ConfigurationURI: server.URL + "/.well-known/openid-configuration",
 		ClientID:         "client-id",

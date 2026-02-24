@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -461,9 +462,12 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 	if req.RemotePort != "" {
 		payload["client_port"] = req.RemotePort
 	}
-	if req.LocalPort != "" {
-		payload["local_port"] = req.LocalPort
+
+	localPort := cmp.Or(req.LocalPort, settings.DefaultLocalPort)
+	if localPort != "" {
+		payload["local_port"] = localPort
 	}
+
 	if req.Secured {
 		// Map Dovecot's secured-flag to Nauthilus JSON "ssl" indicator
 		payload["ssl"] = "on"
@@ -519,7 +523,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 	}
 
 	// Add OIDC auth for backend communication
-	failed, errMsg, _ := addOIDCAuth(httpReq, a.name, settings.OIDCAuth)
+	failed, errMsg, _ := addOIDCAuth(httpReq, a.name, settings.BackendOIDCAuth)
 	if failed {
 		return &SASLAuthResult{
 			Success:   false,
@@ -580,7 +584,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		return nil, fmt.Errorf("dovecot_sasl settings not found for '%s'", a.name)
 	}
 
-	if !settings.OIDCAuth.Enabled {
+	if !settings.SASLOIDCAuth.Enabled {
 		return &SASLAuthResult{
 			Success: false,
 			Reason:  "OAuth not configured",
@@ -590,14 +594,14 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
 
 	// Optional JWKS local validation before introspection
-	switch settings.OIDCAuth.Validation {
+	switch settings.SASLOIDCAuth.Validation {
 	case "jwks", "auto":
 		if oidcManager == nil {
 			return &SASLAuthResult{Success: false, Reason: "OIDC manager not initialized"}, nil
 		}
 		// Try local verification when token looks like JWT
 		if strings.Count(token, ".") == 2 {
-			claims, err := oidcManager.VerifyJWTWithJWKS(ctx, settings.OIDCAuth.ConfigurationURI, token, settings.OIDCAuth.JWKSCacheTTL)
+			claims, err := oidcManager.VerifyJWTWithJWKS(ctx, settings.SASLOIDCAuth.ConfigurationURI, token, settings.SASLOIDCAuth.JWKSCacheTTL)
 			if err == nil {
 				// Success via JWKS
 				resolved := username
@@ -613,7 +617,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 				return &SASLAuthResult{Success: true, Username: resolved}, nil
 			}
 			// In auto mode, fall back to introspection on non-signature related issues
-			if settings.OIDCAuth.Validation == "jwks" {
+			if settings.SASLOIDCAuth.Validation == "jwks" {
 				// Hard fail for explicit jwks mode
 				if logger != nil {
 					logger.Info("JWKS validation failed", "error", err)
@@ -623,7 +627,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		}
 	}
 
-	introspectionEndpoint, err := getIntrospectionEndpoint(ctx, settings.OIDCAuth.ConfigurationURI)
+	introspectionEndpoint, err := getIntrospectionEndpoint(ctx, settings.SASLOIDCAuth.ConfigurationURI)
 	if err != nil {
 		if logger != nil {
 			logger.Error("Failed to get introspection endpoint", "error", err)
@@ -640,6 +644,10 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	data := url.Values{}
 	data.Set("token", token)
 	data.Set("token_type_hint", "access_token")
+	// Optional provider-specific extension: send scope if configured
+	if len(settings.SASLOIDCAuth.Scopes) > 0 {
+		data.Set("scope", strings.Join(settings.SASLOIDCAuth.Scopes, " "))
+	}
 
 	// Pass context information from Dovecot
 	if req.Service != "" {
@@ -654,8 +662,9 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	if req.RemotePort != "" {
 		data.Set("client_port", req.RemotePort)
 	}
-	if req.LocalPort != "" {
-		data.Set("local_port", req.LocalPort)
+	localPort := cmp.Or(req.LocalPort, settings.DefaultLocalPort)
+	if localPort != "" {
+		data.Set("local_port", localPort)
 	}
 	if req.Secured {
 		data.Set("secured", "true")
@@ -689,38 +698,22 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	}
 
 	// Decide authentication method
-	authMethod := settings.OIDCAuth.AuthMethod
+	authMethod := settings.SASLOIDCAuth.AuthMethod
 	switch authMethod {
-	case "private_key_jwt":
-		assertion, err := oidcManager.createAssertion(settings.OIDCAuth.ClientID, introspectionEndpoint, settings.OIDCAuth.PrivateKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create client assertion: %w", err)
-		}
-		data.Set("client_id", settings.OIDCAuth.ClientID)
-		data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
-		data.Set("client_assertion", assertion)
 	case "client_secret_post":
-		data.Set("client_id", settings.OIDCAuth.ClientID)
-		data.Set("client_secret", settings.OIDCAuth.ClientSecret)
+		data.Set("client_id", settings.SASLOIDCAuth.ClientID)
+		data.Set("client_secret", settings.SASLOIDCAuth.ClientSecret)
 	case "client_secret_basic":
 		// handled after request creation via SetBasicAuth
 	case "none":
-		if settings.OIDCAuth.ClientID != "" {
-			data.Set("client_id", settings.OIDCAuth.ClientID)
+		if settings.SASLOIDCAuth.ClientID != "" {
+			data.Set("client_id", settings.SASLOIDCAuth.ClientID)
 		}
 	default:
-		if settings.OIDCAuth.PrivateKeyFile != "" {
-			assertion, err := oidcManager.createAssertion(settings.OIDCAuth.ClientID, introspectionEndpoint, settings.OIDCAuth.PrivateKeyFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create client assertion: %w", err)
-			}
-			data.Set("client_id", settings.OIDCAuth.ClientID)
-			data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
-			data.Set("client_assertion", assertion)
-		} else if settings.OIDCAuth.ClientSecret != "" {
+		if settings.SASLOIDCAuth.ClientSecret != "" {
 			authMethod = "client_secret_basic"
-		} else if settings.OIDCAuth.ClientID != "" {
-			data.Set("client_id", settings.OIDCAuth.ClientID)
+		} else if settings.SASLOIDCAuth.ClientID != "" {
+			data.Set("client_id", settings.SASLOIDCAuth.ClientID)
 		}
 	}
 
@@ -730,8 +723,10 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	}
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Accept", "application/json")
+	// Ensure no conflicting Authorization header is present
+	httpReq.Header.Del("Authorization")
 	if authMethod == "client_secret_basic" {
-		httpReq.SetBasicAuth(settings.OIDCAuth.ClientID, settings.OIDCAuth.ClientSecret)
+		httpReq.SetBasicAuth(settings.SASLOIDCAuth.ClientID, settings.SASLOIDCAuth.ClientSecret)
 	}
 
 	if logger != nil {

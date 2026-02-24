@@ -70,7 +70,7 @@ func InitOIDCManager() {
 }
 
 // GetToken returns a valid OIDC token for the given configuration
-func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth OIDCAuth) (string, error) {
+func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth BackendOIDCAuth) (string, error) {
 	cacheKey := fmt.Sprintf("%s|%s", auth.ConfigurationURI, auth.ClientID)
 
 	// Check cache
@@ -151,7 +151,7 @@ func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (*OIDCDiscov
 	return &d, nil
 }
 
-func (m *OIDCManager) fetchToken(ctx context.Context, logger *slog.Logger, auth OIDCAuth) (*OIDCToken, error) {
+func (m *OIDCManager) fetchToken(ctx context.Context, logger *slog.Logger, auth BackendOIDCAuth) (*OIDCToken, error) {
 	disc, err := m.getDiscovery(ctx, auth.ConfigurationURI)
 	if err != nil {
 		return nil, err
@@ -209,6 +209,8 @@ func (m *OIDCManager) fetchToken(ctx context.Context, logger *slog.Logger, auth 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	// Ensure no conflicting Authorization header is present
+	req.Header.Del("Authorization")
 	if authMethod == "client_secret_basic" {
 		req.SetBasicAuth(auth.ClientID, auth.ClientSecret)
 	}
@@ -507,7 +509,7 @@ func (m *OIDCManager) getIntrospectionDiscovery(ctx context.Context, configurati
 }
 
 // addOIDCAuth adds the OIDC Authorization header to the request if OIDC is enabled
-func addOIDCAuth(req *http.Request, requestName string, auth OIDCAuth) (bool, string, error) {
+func addOIDCAuth(req *http.Request, requestName string, auth BackendOIDCAuth) (bool, string, error) {
 	if !auth.Enabled {
 		return false, "", nil
 	}
@@ -524,6 +526,8 @@ func addOIDCAuth(req *http.Request, requestName string, auth OIDCAuth) (bool, st
 		return false, "", fmt.Errorf("failed to get OIDC token for %s: %w", requestName, err)
 	}
 
+	// Ensure no conflicting Authorization header is present
+	req.Header.Del("Authorization")
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	return true, token, nil

@@ -14,16 +14,20 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
     * [Running as a System Service](#running-as-a-system-service)
     * [Command-line Options](#command-line-options)
   * [Configuration](#configuration)
+    * [HTTP Client User-Agent](#http-client-user-agent)
     * [Server Settings](#server-settings)
     * [Response Cache](#response-cache)
+    * [Worker Pool](#worker-pool)
     * [OIDC Authentication](#oidc-authentication)
     * [HTTP Request/Response Compression](#http-requestresponse-compression)
     * [Integrating with Postfix](#integrating-with-postfix)
       * [Socket Maps](#socket-maps)
       * [Policy Services](#policy-services)
+      * [Dovecot SASL](#dovecot-sasl)
   * [Logging and Troubleshooting](#logging-and-troubleshooting)
   * [Contributing](#contributing)
   * [References](#references)
+    * [Advanced OIDC options](#advanced-oidc-options)
 <!-- TOC -->
 
 
@@ -123,6 +127,10 @@ Pfxhttp provides the following command-line flags:
 
 ## Configuration
 
+### HTTP Client User-Agent
+
+All outbound HTTP requests use a default `User-Agent` header of `PostfixToHTTP/` followed by the build version (Git tag). If the `User-Agent` header is already set via custom headers in a request configuration, it will not be overridden.
+
 Pfxhttp is configured through a YAML file named `pfxhttp.yml` (or a custom file specified with the `--config` and `--format` flags). The following are the main sections:
 
 ### Server Settings
@@ -152,6 +160,12 @@ server:
       type: "tcp"
       address: "[::]"
       port: 23451
+
+    - kind: "dovecot_sasl"
+      name: "dovecot_sasl"
+      type: "tcp"
+      address: "0.0.0.0"
+      port: 23453
 
   logging:
     json: true
@@ -191,7 +205,7 @@ socket_maps:
 
   oidc_demo_map:
     target: "https://127.0.0.1:9443/api/v1/custom/map"
-    oidc_auth:
+    backend_oidc_auth:
       enabled: true
       configuration_uri: "https://example.com/.well-known/openid-configuration"
       client_id: "foobar"
@@ -218,7 +232,7 @@ policy_services:
 
   oidc_example_policy:
     target: "https://127.0.0.1:9443/api/v1/custom/policy"
-    oidc_auth:
+    backend_oidc_auth:
       enabled: true
       configuration_uri: "https://example.com/.well-known/openid-configuration"
       client_id: "foobar"
@@ -228,6 +242,31 @@ policy_services:
     value_field: "policy.result"
     error_field: "policy.error"
     no_error_value: "OK"
+
+dovecot_sasl:
+  dovecot_sasl:
+    target: https://127.0.0.1:9443/api/v1/auth/json
+    # Bearer to backend (Nauthilus) via Client-Credentials-Flow (optional)
+    backend_oidc_auth:
+      enabled: true
+      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
+      client_id: pfxhttp
+      client_secret: backend-secret
+    # Validation of incoming XOAUTH2/OAUTHBEARER tokens
+    sasl_oidc_auth:
+      enabled: true
+      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
+      client_id: roundcube
+      client_secret: introspection-secret
+      scopes:
+        - "introspect"
+      validation: introspection
+    # Note: For dovecot_sasl, the payload is generated internally according to Nauthilus
+    # /api/v1/auth/json; a payload entry has no effect here.
+    status_code: 200
+    # Username is returned via HTTP response header "Auth-User" by the backend.
+    # Errors are signaled via HTTP status and the "Auth-Status" header.
+
 ```
 
 **Important**: Postfix has a hardcoded socket map reply size limit of **100,000 bytes** (Postfix 3.9.1 or older).
@@ -307,7 +346,7 @@ To configure OIDC authentication for a socket map or policy service:
 socket_maps:
   example:
     target: "https://api.example.com/endpoint"
-    oidc_auth:
+    backend_oidc_auth:
       enabled: true
       configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
       client_id: "your-client-id"
@@ -387,6 +426,29 @@ smtpd_recipient_restrictions =
 
 This setup enables Postfix to query the policy service defined in `pfxhttp.yml` for `example_policy`.
 
+#### Dovecot SASL
+
+Pfxhttp can act as a Dovecot-compatible SASL server for Postfix. When Postfix does not provide a `local_port`, administrators may configure a fallback in the corresponding `dovecot_sasl` target via `default_local_port`.
+
+Example configuration:
+
+```yaml
+dovecot_sasl:
+  login_smtp:
+    target: "https://nauthilus.example.org/api/v1/sasl/auth"
+    # Optional fallback when Postfix does not provide the local port
+    default_local_port: "587"
+    # Optional: enable OIDC-based token validation for XOAUTH2/OAUTHBEARER
+    sasl_oidc_auth:
+      enabled: true
+      configuration_uri: "https://auth.example.org/.well-known/openid-configuration"
+```
+
+Behavior:
+- If Dovecot provides `local_port`, it is forwarded.
+- Else, if `default_local_port` is set, it is sent as `local_port` to the backend.
+- Applies to both password-based and OAuth-based SASL flows.
+
 ---
 
 ## Logging and Troubleshooting
@@ -431,12 +493,14 @@ The following optional fields fine-tune OIDC behavior. Defaults are chosen for m
   - Else use `client_secret_basic` when `client_secret` is set
   - Else fall back to `none` (send only `client_id`)
 
-- `validation`: How SASL OAuth tokens are validated.
+- `sasl_oidc_auth.scopes`: Optional list of scopes to send as a space-separated `scope` parameter to the introspection endpoint. Only needed if your provider requires it for introspection access.
+
+- `sasl_oidc_auth.validation`: How SASL OAuth tokens are validated.
   - `introspection` (default): Always call the provider’s introspection endpoint (RFC 7662). Supports opaque tokens and immediate revocation checks.
   - `jwks`: Validate tokens locally using the provider’s `jwks_uri`. Lowest latency for JWTs, but revocations may take effect only after key/claim changes.
   - `auto`: Try JWKS first for JWTs; fall back to introspection for opaque tokens or transient JWKS issues.
 
-- `jwks_cache_ttl`: Duration for caching the JWKS document. Default: `5m`.
+- `sasl_oidc_auth.jwks_cache_ttl`: Duration for caching the JWKS document. Default: `5m`.
 
 Example with advanced settings:
 
@@ -444,14 +508,19 @@ Example with advanced settings:
 socket_maps:
   example:
     target: "https://api.example.com/endpoint"
-    oidc_auth:
+    backend_oidc_auth:
       enabled: true
       configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
       client_id: "your-client-id"
       client_secret: "your-client-secret"
       # Use POST body instead of Basic Auth:
       auth_method: client_secret_post
-      # SASL token validation strategy:
+    # SASL token validation strategy (for dovecot_sasl only):
+    sasl_oidc_auth:
+      enabled: true
+      configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
+      client_id: "roundcube"
+      client_secret: "introspection-secret"
       validation: auto  # or: introspection | jwks
       jwks_cache_ttl: 5m
 ```
@@ -459,5 +528,6 @@ socket_maps:
 Notes:
 - HTTP requests to the token and introspection endpoints now include `Accept: application/json`.
 - Request bodies are built once and never rewritten after `http.NewRequest`, ensuring correct `Content-Length` handling.
-- Introspection authentication supports `private_key_jwt`, `client_secret_basic`, and `client_secret_post`, aligned with token fetching.
+- For target requests with `backend_oidc_auth`, any pre-existing `Authorization` header (e.g., set via `custom_headers`) is explicitly removed and replaced with `Authorization: Bearer <token>`.
+- For introspection requests with `sasl_oidc_auth`, any `Authorization` header is explicitly cleared before applying the selected client authentication (`client_secret_basic` or `client_secret_post`).
 - JWKS-based validation supports RSA, EC (P-256/384/521), and Ed25519 keys from the provider’s `jwks_uri`.

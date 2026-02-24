@@ -401,8 +401,8 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 		{Name: "LOGIN", PlainText: true, Dictionary: true, Active: true},
 	}
 
-	// Add OAuth mechanisms if OIDC is configured for this service
-	if settings, ok := s.config.DovecotSASL[s.name]; ok && settings.OIDCAuth.Enabled {
+	// Add OAuth mechanisms if SASL OIDC validation is configured for this service
+	if settings, ok := s.config.DovecotSASL[s.name]; ok && settings.SASLOIDCAuth.Enabled {
 		mechanisms = append(mechanisms,
 			DovecotMechanism{Name: "XOAUTH2", ForwardSecrecy: true},
 			DovecotMechanism{Name: "OAUTHBEARER", ForwardSecrecy: true},

@@ -24,6 +24,19 @@ const TempServerProblem = "Temporary server problem"
 
 var httpClient *http.Client
 
+type userAgentRoundTripper struct {
+	base http.RoundTripper
+	ua   string
+}
+
+func (rt *userAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", rt.ua)
+	}
+
+	return rt.base.RoundTrip(req)
+}
+
 // InitializeHttpClient configures and initializes the global HTTP client based on the provided configuration.
 func InitializeHttpClient(cfg *Config) {
 	var proxyFunc func(*http.Request) (*url.URL, error)
@@ -98,7 +111,7 @@ func InitializeHttpClient(cfg *Config) {
 
 	httpClient = &http.Client{
 		Timeout:   clientTimeout,
-		Transport: transport,
+		Transport: &userAgentRoundTripper{base: transport, ua: fmt.Sprintf("PostfixToHTTP/%s", version)},
 	}
 
 	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -305,7 +318,7 @@ func (c *MapClient) SendAndReceive() error {
 	}
 
 	// Add OIDC token if enabled
-	failed, errMsg, err := addOIDCAuth(req, c.receiver.GetName(), settings.OIDCAuth)
+	failed, errMsg, err := addOIDCAuth(req, c.receiver.GetName(), settings.BackendOIDCAuth)
 	if failed {
 		c.sender.SetStatus("TEMP")
 		c.sender.SetData(errMsg)
@@ -551,7 +564,7 @@ func (p *PolicyClient) SendAndReceive() error {
 	}
 
 	// Add OIDC token if enabled
-	failed, errMsg, err := addOIDCAuth(req, p.receiver.GetName(), settings.OIDCAuth)
+	failed, errMsg, err := addOIDCAuth(req, p.receiver.GetName(), settings.BackendOIDCAuth)
 	if failed {
 		p.sender.SetStatus("DEFER")
 		p.sender.SetData(errMsg)

@@ -86,7 +86,7 @@ func TestConfigValidation(t *testing.T) {
 				SocketMaps: map[string]Request{
 					"test": {
 						Target: "http://example.com",
-						OIDCAuth: OIDCAuth{
+						BackendOIDCAuth: BackendOIDCAuth{
 							Enabled: true,
 						},
 					},

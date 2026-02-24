@@ -80,16 +80,27 @@ type TLS struct {
 	SkipVerify bool   `mapstructure:"skip_verify"`
 }
 
-type OIDCAuth struct {
+type BackendOIDCAuth struct {
 	Enabled          bool     `mapstructure:"enabled"`
 	ConfigurationURI string   `mapstructure:"configuration_uri" validate:"required_if=Enabled true,http_url"`
 	ClientID         string   `mapstructure:"client_id" validate:"required_if=Enabled true"`
 	ClientSecret     string   `mapstructure:"client_secret"`
 	PrivateKeyFile   string   `mapstructure:"private_key_file" validate:"omitempty,file"`
 	Scopes           []string `mapstructure:"scopes"`
-	// AuthMethod controls how the client authenticates to token/introspection endpoints.
+	// AuthMethod controls how the client authenticates to token endpoints.
 	// Values: auto, client_secret_basic, client_secret_post, private_key_jwt, none
 	AuthMethod string `mapstructure:"auth_method" validate:"omitempty,oneof=auto client_secret_basic client_secret_post private_key_jwt none"`
+}
+
+type SASLOIDCAuth struct {
+	Enabled          bool     `mapstructure:"enabled"`
+	ConfigurationURI string   `mapstructure:"configuration_uri" validate:"required_if=Enabled true,http_url"`
+	ClientID         string   `mapstructure:"client_id" validate:"required_if=Enabled true"`
+	ClientSecret     string   `mapstructure:"client_secret"`
+	Scopes           []string `mapstructure:"scopes"`
+	// AuthMethod controls how the client authenticates to token/introspection endpoints.
+	// Values: auto, client_secret_basic, client_secret_post, none
+	AuthMethod string `mapstructure:"auth_method" validate:"omitempty,oneof=auto client_secret_basic client_secret_post none"`
 	// Validation controls how incoming OAuth tokens are validated for SASL.
 	// Values: introspection, jwks, auto
 	Validation   string        `mapstructure:"validation" validate:"omitempty,oneof=introspection jwks auto"`
@@ -97,16 +108,18 @@ type OIDCAuth struct {
 }
 
 type Request struct {
-	Target                  string   `mapstructure:"target" validate:"required,http_url"`
-	CustomHeaders           []string `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
-	Payload                 string   `mapstructure:"payload" validate:"omitempty,ascii"`
-	StatusCode              int      `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
-	ValueField              string   `mapstructure:"value_field" validate:"omitempty,printascii"`
-	ErrorField              string   `mapstructure:"error_field" validate:"omitempty,printascii"`
-	NoErrorValue            string   `mapstructure:"no_error_value" validate:"omitempty,printascii"`
-	OIDCAuth                OIDCAuth `mapstructure:"oidc_auth" validate:"omitempty"`
-	HTTPRequestCompression  bool     `mapstructure:"http_request_compression"`
-	HTTPResponseCompression bool     `mapstructure:"http_response_compression"`
+	Target                  string          `mapstructure:"target" validate:"required,http_url"`
+	CustomHeaders           []string        `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
+	Payload                 string          `mapstructure:"payload" validate:"omitempty,ascii"`
+	StatusCode              int             `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
+	ValueField              string          `mapstructure:"value_field" validate:"omitempty,printascii"`
+	ErrorField              string          `mapstructure:"error_field" validate:"omitempty,printascii"`
+	NoErrorValue            string          `mapstructure:"no_error_value" validate:"omitempty,printascii"`
+	BackendOIDCAuth         BackendOIDCAuth `mapstructure:"backend_oidc_auth" validate:"omitempty"`
+	SASLOIDCAuth            SASLOIDCAuth    `mapstructure:"sasl_oidc_auth" validate:"omitempty"`
+	DefaultLocalPort        string          `mapstructure:"default_local_port" validate:"omitempty,numeric"`
+	HTTPRequestCompression  bool            `mapstructure:"http_request_compression"`
+	HTTPResponseCompression bool            `mapstructure:"http_response_compression"`
 }
 
 func (cfg *Config) HandleConfig() error {
@@ -136,44 +149,62 @@ func (cfg *Config) HandleConfig() error {
 		}
 	}
 
-	// Provide sensible defaults for OIDC across all request maps
-	setOIDCDefaults := func(r *Request) {
-		if !r.OIDCAuth.Enabled {
+	// Provide sensible defaults for Backend OIDC across all request maps
+	setBackendOIDCDefaults := func(r *Request) {
+		if !r.BackendOIDCAuth.Enabled {
 			return
 		}
 		// auth_method defaulting
-		if r.OIDCAuth.AuthMethod == "" || r.OIDCAuth.AuthMethod == "auto" {
-			if r.OIDCAuth.PrivateKeyFile != "" {
-				r.OIDCAuth.AuthMethod = "private_key_jwt"
-			} else if r.OIDCAuth.ClientSecret != "" {
-				r.OIDCAuth.AuthMethod = "client_secret_basic"
+		if r.BackendOIDCAuth.AuthMethod == "" || r.BackendOIDCAuth.AuthMethod == "auto" {
+			if r.BackendOIDCAuth.PrivateKeyFile != "" {
+				r.BackendOIDCAuth.AuthMethod = "private_key_jwt"
+			} else if r.BackendOIDCAuth.ClientSecret != "" {
+				r.BackendOIDCAuth.AuthMethod = "client_secret_basic"
 			} else {
-				r.OIDCAuth.AuthMethod = "none"
+				r.BackendOIDCAuth.AuthMethod = "none"
+			}
+		}
+	}
+
+	// Provide sensible defaults for SASL OIDC across all request maps
+	setSASLOIDCDefaults := func(r *Request) {
+		if !r.SASLOIDCAuth.Enabled {
+			return
+		}
+		// auth_method defaulting
+		if r.SASLOIDCAuth.AuthMethod == "" || r.SASLOIDCAuth.AuthMethod == "auto" {
+			if r.SASLOIDCAuth.ClientSecret != "" {
+				r.SASLOIDCAuth.AuthMethod = "client_secret_basic"
+			} else {
+				r.SASLOIDCAuth.AuthMethod = "none"
 			}
 		}
 		// validation defaulting
-		if r.OIDCAuth.Validation == "" {
-			r.OIDCAuth.Validation = "introspection"
+		if r.SASLOIDCAuth.Validation == "" {
+			r.SASLOIDCAuth.Validation = "introspection"
 		}
 		// JWKS cache TTL default
-		if r.OIDCAuth.JWKSCacheTTL == 0 {
-			r.OIDCAuth.JWKSCacheTTL = 5 * time.Minute
+		if r.SASLOIDCAuth.JWKSCacheTTL == 0 {
+			r.SASLOIDCAuth.JWKSCacheTTL = 5 * time.Minute
 		}
 	}
 
 	for k := range cfg.SocketMaps {
 		v := cfg.SocketMaps[k]
-		setOIDCDefaults(&v)
+		setBackendOIDCDefaults(&v)
+		setSASLOIDCDefaults(&v)
 		cfg.SocketMaps[k] = v
 	}
 	for k := range cfg.PolicyServices {
 		v := cfg.PolicyServices[k]
-		setOIDCDefaults(&v)
+		setBackendOIDCDefaults(&v)
+		setSASLOIDCDefaults(&v)
 		cfg.PolicyServices[k] = v
 	}
 	for k := range cfg.DovecotSASL {
 		v := cfg.DovecotSASL[k]
-		setOIDCDefaults(&v)
+		setBackendOIDCDefaults(&v)
+		setSASLOIDCDefaults(&v)
 		cfg.DovecotSASL[k] = v
 	}
 

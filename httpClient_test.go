@@ -25,9 +25,13 @@ func TestHttpClientConfiguration(t *testing.T) {
 		t.Errorf("Expected timeout 15s, got %v", httpClient.Timeout)
 	}
 
-	transport, ok := httpClient.Transport.(*http.Transport)
+	rt, ok := httpClient.Transport.(*userAgentRoundTripper)
 	if !ok {
-		t.Fatal("Transport is not *http.Transport")
+		t.Fatal("Transport is not userAgentRoundTripper")
+	}
+	transport, ok := rt.base.(*http.Transport)
+	if !ok {
+		t.Fatal("Base transport is not *http.Transport")
 	}
 
 	if transport.TLSClientConfig == nil {
@@ -60,9 +64,13 @@ func TestHttpClientProxyConfiguration(t *testing.T) {
 
 	InitializeHttpClient(cfg)
 
-	transport, ok := httpClient.Transport.(*http.Transport)
+	rt, ok := httpClient.Transport.(*userAgentRoundTripper)
 	if !ok {
-		t.Fatal("Transport is not *http.Transport")
+		t.Fatal("Transport is not userAgentRoundTripper")
+	}
+	transport, ok := rt.base.(*http.Transport)
+	if !ok {
+		t.Fatal("Base transport is not *http.Transport")
 	}
 
 	if transport.Proxy == nil {
