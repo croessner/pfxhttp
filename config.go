@@ -39,6 +39,8 @@ type Listen struct {
 	Address    string           `mapstructure:"address" validate:"required"`
 	Port       int              `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
 	Mode       string           `mapstructure:"mode" validate:"omitempty,octal_mode"`
+	User       string           `mapstructure:"user" validate:"omitempty"`
+	Group      string           `mapstructure:"group" validate:"omitempty"`
 	WorkerPool WorkerPoolConfig `mapstructure:"worker_pool" validate:"omitempty"`
 }
 

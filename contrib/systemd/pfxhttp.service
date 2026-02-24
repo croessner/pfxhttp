@@ -16,6 +16,7 @@ MemoryMax=50M
 CPUQuota=10%
 
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_CHOWN
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_CHOWN
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true

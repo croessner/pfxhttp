@@ -11,10 +11,12 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -93,6 +95,9 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 				return err
 			}
 		}
+
+		oldMask := syscall.Umask(0)
+		defer syscall.Umask(oldMask)
 	} else {
 		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
 	}
@@ -114,6 +119,34 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 
 		if err = os.Chmod(instance.Address, os.FileMode(mode)); err != nil {
 			logger.Error("Could not set permissions on socket", slog.String("error", err.Error()))
+		}
+	}
+
+	if instance.Type == "unix" && (instance.User != "" || instance.Group != "") {
+		uid, gid := -1, -1
+
+		if instance.User != "" {
+			u, err := user.Lookup(instance.User)
+			if err != nil {
+				logger.Error("Could not lookup user", slog.String("user", instance.User), slog.String("error", err.Error()))
+			} else {
+				uid, _ = strconv.Atoi(u.Uid)
+			}
+		}
+
+		if instance.Group != "" {
+			g, err := user.LookupGroup(instance.Group)
+			if err != nil {
+				logger.Error("Could not lookup group", slog.String("group", instance.Group), slog.String("error", err.Error()))
+			} else {
+				gid, _ = strconv.Atoi(g.Gid)
+			}
+		}
+
+		if uid != -1 || gid != -1 {
+			if err = os.Chown(instance.Address, uid, gid); err != nil {
+				logger.Error("Could not set ownership on socket", slog.String("error", err.Error()))
+			}
 		}
 	}
 

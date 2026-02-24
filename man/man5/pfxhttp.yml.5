@@ -79,6 +79,12 @@ The port used to listen for connections. Relevant only for \fBtcp\fP and \fBtcp6
 .IP \[bu] 2
 .B mode:
 Applicable only for \fBunix\fP sockets. Sets the socket's access permissions as an octal value, such as \fB0666\fP.
+.IP \[bu] 2
+.B user:
+Applicable only for \fBunix\fP sockets. Sets the socket's owner (username or UID). Requires \fBCAP_CHOWN\fP.
+.IP \[bu] 2
+.B group:
+Applicable only for \fBunix\fP sockets. Sets the socket's group (groupname or GID). Requires \fBCAP_CHOWN\fP.
 .RE
 
 .TP
