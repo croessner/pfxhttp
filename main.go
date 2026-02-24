@@ -65,32 +65,16 @@ func inititalizeLogger(ctx *Context, cfg *Config) {
 	ctx.Set(loggerKey, slog.New(slog.NewTextHandler(os.Stdout, handlerOpts)))
 }
 
-func handleSignals(server GenericServer) {
-	signalChan := make(chan os.Signal, 1)
-
-	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
-
-	logger := server.GetContext().Value(loggerKey).(*slog.Logger)
-
-	go func() {
-		sig := <-signalChan
-		logger.Debug("Received signal", slog.String("signal", sig.String()))
-
-		if server != nil {
-			server.Stop()
-		}
-
-		os.Exit(0)
-	}()
-}
-
 func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup, globalWP WorkerPool) {
 	defer wg.Done()
 
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 	server := NewMultiServer(ctx, cfg, globalWP)
 
-	handleSignals(server)
+	go func() {
+		<-ctx.Done()
+		server.Stop()
+	}()
 
 	err := server.Start(instance, server.HandleNetStringConnection)
 	if err != nil {
@@ -106,7 +90,10 @@ func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config, wg *sy
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 	server := NewMultiServer(ctx, cfg, globalWP)
 
-	handleSignals(server)
+	go func() {
+		<-ctx.Done()
+		server.Stop()
+	}()
 
 	err := server.Start(instance, server.HandlePolicyServiceConnection)
 	if err != nil {
@@ -122,7 +109,10 @@ func newDovecotSASLInstance(instance Listen, ctx *Context, cfg *Config, wg *sync
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 	server := NewMultiServer(ctx, cfg, globalWP)
 
-	handleSignals(server)
+	go func() {
+		<-ctx.Done()
+		server.Stop()
+	}()
 
 	err := server.Start(instance, server.HandleDovecotSASLConnection)
 	if err != nil {
@@ -137,13 +127,22 @@ func runServer(ctx *Context, cfg *Config) {
 		return
 	}
 
+	// Create a context that is canceled on interrupt signals (Go 1.26 idiomatic)
+	ctx.ctx, _ = signal.NotifyContext(ctx.ctx, os.Interrupt, syscall.SIGTERM)
+
+	logger := ctx.Value(loggerKey).(*slog.Logger)
+
+	go func() {
+		<-ctx.Done()
+		logger.Info("Received signal, shutting down...")
+	}()
+
 	var (
 		wg               sync.WaitGroup
 		globalWorkerPool WorkerPool
 	)
 
 	taskCount := 0
-	logger := ctx.Value(loggerKey).(*slog.Logger)
 
 	logger.Info("Starting server", slog.String("version", version))
 
