@@ -24,8 +24,11 @@ const LogKeyClient = "client"
 
 // GenericServer defines an interface for managing a TCP server with methods to start and stop the server.
 type GenericServer interface {
-	// Start initializes and starts the server, enabling it to accept and process client connections.
-	Start(instance Listen, handler func(conn net.Conn)) error
+	// Listen initializes the listener for the server based on the provided configuration.
+	Listen(instance Listen) error
+
+	// Start starts the accept loop for the server using the provided handler.
+	Start(handler func(conn net.Conn)) error
 
 	// Stop gracefully shuts down the server, ensuring all active connections are closed and all routines are completed.
 	Stop()
@@ -70,8 +73,8 @@ func NewMultiServer(ctx *Context, config *Config, wp WorkerPool) GenericServer {
 	}
 }
 
-// Start initializes and starts the MultiServer, accepting client connections and processing them.
-func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error {
+// Listen initializes the listener for the MultiServer based on the provided configuration.
+func (s *MultiServer) Listen(instance Listen) error {
 	var (
 		mode     int64
 		conn     net.Conn
@@ -81,6 +84,12 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 
 	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
 
+	if instance.Type != "unix" {
+		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
+	} else {
+		s.address = instance.Address
+	}
+
 	conn, err = net.DialTimeout(instance.Type, s.address, 1*time.Second)
 	if err == nil {
 		_ = conn.Close()
@@ -89,7 +98,6 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 	}
 
 	if instance.Type == "unix" {
-		s.address = instance.Address
 		if fileInfo, err = os.Stat(instance.Address); err == nil && fileInfo.Mode()&os.ModeSocket != 0 {
 			if err = os.Remove(instance.Address); err != nil {
 				return err
@@ -98,8 +106,6 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 
 		oldMask := syscall.Umask(0)
 		defer syscall.Umask(oldMask)
-	} else {
-		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
 	}
 
 	if instance.Name != "" {
@@ -156,6 +162,18 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 		s.workerPool = NewWorkerPool(s.ctx, instance.WorkerPool.MaxWorkers, instance.WorkerPool.MaxQueue, &s.wg)
 	}
 
+	return nil
+}
+
+// Start starts the accept loop for the MultiServer using the provided handler.
+func (s *MultiServer) Start(handler func(conn net.Conn)) error {
+	var (
+		conn net.Conn
+		err  error
+	)
+
+	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+
 	for {
 		conn, err = s.listener.Accept()
 		if errors.Is(err, net.ErrClosed) {
@@ -183,7 +201,10 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 				s.wg.Done()
 			}
 		} else {
-			go handler(conn)
+			go func(c net.Conn) {
+				defer s.wg.Done()
+				handler(c)
+			}(conn)
 		}
 	}
 }
@@ -772,4 +793,50 @@ func (s *MultiServer) readPolicy(conn net.Conn) (Policy, error) {
 	}
 
 	return policy, nil
+}
+
+// DropPrivileges drops the process's root privileges to the specified user and group.
+func DropPrivileges(runAsUser, runAsGroup string, logger *slog.Logger) error {
+	if os.Getuid() != 0 {
+		return nil
+	}
+
+	var uid, gid int
+
+	if runAsGroup != "" {
+		g, err := user.LookupGroup(runAsGroup)
+		if err != nil {
+			return fmt.Errorf("could not lookup group %s: %w", runAsGroup, err)
+		}
+		gid, _ = strconv.Atoi(g.Gid)
+	}
+
+	if runAsUser != "" {
+		u, err := user.Lookup(runAsUser)
+		if err != nil {
+			return fmt.Errorf("could not lookup user %s: %w", runAsUser, err)
+		}
+		uid, _ = strconv.Atoi(u.Uid)
+	}
+
+	// Set supplementary groups to empty
+	if err := syscall.Setgroups([]int{}); err != nil {
+		return fmt.Errorf("could not clear supplementary groups: %w", err)
+	}
+
+	if runAsGroup != "" {
+		if err := syscall.Setgid(gid); err != nil {
+			return fmt.Errorf("could not set gid to %d: %w", gid, err)
+		}
+		logger.Info("Dropped group privileges", slog.String("group", runAsGroup), slog.Int("gid", gid))
+	}
+
+	if runAsUser != "" {
+		if err := syscall.Setuid(uid); err != nil {
+			return fmt.Errorf("could not set uid to %d: %w", uid, err)
+		}
+		logger.Info("Dropped user privileges", slog.String("user", runAsUser), slog.Int("uid", uid))
+	}
+
+	return nil
 }

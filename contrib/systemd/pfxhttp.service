@@ -5,8 +5,11 @@ After=network.target
 [Service]
 Type=simple
 Restart=always
-User=pfxhttp
-Group=pfxhttp
+# The service starts as root to bind to privileged ports or
+# to create Unix sockets in protected directories (e.g. Postfix spool).
+# It will then drop privileges to the user/group specified in the config.
+User=root
+Group=root
 EnvironmentFile=-/etc/default/pfxhttp
 ExecStart=/usr/local/sbin/pfxhttp
 StandardOutput=journal

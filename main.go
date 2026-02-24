@@ -1,11 +1,15 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+
+	"github.com/spf13/viper"
 )
 
 var version = "dev"
@@ -22,9 +26,11 @@ func loadConfig(ctx *Context) *Config {
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 
 	if err != nil {
-		logger.Error("Error loading config", "error", err)
+		if !errors.Is(err, viper.ConfigFileNotFoundError{}) {
+			logger.Error("Error loading config", "error", err)
 
-		os.Exit(1)
+			os.Exit(1)
+		}
 	}
 
 	return cfg
@@ -39,7 +45,7 @@ func inititalizeLogger(ctx *Context, cfg *Config) {
 	if cfg != nil {
 		switch cfg.Server.Logging.Level {
 		case "none":
-			ctx.Set(loggerKey, slog.DiscardHandler)
+			ctx.Set(loggerKey, slog.New(slog.DiscardHandler))
 
 			return
 		case "debug":
@@ -50,7 +56,7 @@ func inititalizeLogger(ctx *Context, cfg *Config) {
 		case "error":
 			handlerOpts.Level = slog.LevelError
 		default:
-			ctx.Set(loggerKey, slog.DiscardHandler)
+			ctx.Set(loggerKey, slog.New(slog.DiscardHandler))
 
 			return
 		}
@@ -65,61 +71,9 @@ func inititalizeLogger(ctx *Context, cfg *Config) {
 	ctx.Set(loggerKey, slog.New(slog.NewTextHandler(os.Stdout, handlerOpts)))
 }
 
-func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup, globalWP WorkerPool) {
-	defer wg.Done()
-
-	logger := ctx.Value(loggerKey).(*slog.Logger)
-	server := NewMultiServer(ctx, cfg, globalWP)
-
-	go func() {
-		<-ctx.Done()
-		server.Stop()
-	}()
-
-	err := server.Start(instance, server.HandleNetStringConnection)
-	if err != nil {
-		logger.Error("Server error", slog.String("error", err.Error()))
-
-		return
-	}
-}
-
-func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup, globalWP WorkerPool) {
-	defer wg.Done()
-
-	logger := ctx.Value(loggerKey).(*slog.Logger)
-	server := NewMultiServer(ctx, cfg, globalWP)
-
-	go func() {
-		<-ctx.Done()
-		server.Stop()
-	}()
-
-	err := server.Start(instance, server.HandlePolicyServiceConnection)
-	if err != nil {
-		logger.Error("Server error", slog.String("error", err.Error()))
-
-		return
-	}
-}
-
-func newDovecotSASLInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup, globalWP WorkerPool) {
-	defer wg.Done()
-
-	logger := ctx.Value(loggerKey).(*slog.Logger)
-	server := NewMultiServer(ctx, cfg, globalWP)
-
-	go func() {
-		<-ctx.Done()
-		server.Stop()
-	}()
-
-	err := server.Start(instance, server.HandleDovecotSASLConnection)
-	if err != nil {
-		logger.Error("Server error", slog.String("error", err.Error()))
-
-		return
-	}
+type serverTask struct {
+	server  GenericServer
+	handler func(conn net.Conn)
 }
 
 func runServer(ctx *Context, cfg *Config) {
@@ -140,9 +94,8 @@ func runServer(ctx *Context, cfg *Config) {
 	var (
 		wg               sync.WaitGroup
 		globalWorkerPool WorkerPool
+		tasks            []serverTask
 	)
-
-	taskCount := 0
 
 	logger.Info("Starting server", slog.String("version", version))
 
@@ -151,41 +104,66 @@ func runServer(ctx *Context, cfg *Config) {
 	}
 
 	for _, instance := range cfg.Server.Listen {
-		if instance.Kind == "socket_map" {
-			wg.Add(1)
-			taskCount++
+		srv := NewMultiServer(ctx, cfg, globalWorkerPool)
+		if err := srv.Listen(instance); err != nil {
+			logger.Error("Failed to listen", slog.String("kind", instance.Kind), slog.String("name", instance.Name), slog.String("error", err.Error()))
 
-			go newNetStringServerInstance(instance, ctx, cfg, &wg, globalWorkerPool)
-		} else if instance.Kind == "policy_service" {
-			if instance.Name != "" {
-				wg.Add(1)
-				taskCount++
+			return
+		}
 
-				go newPolicyServiceInstance(instance, ctx, cfg, &wg, globalWorkerPool)
-			} else {
+		var handler func(conn net.Conn)
+		switch instance.Kind {
+		case "socket_map":
+			handler = srv.HandleNetStringConnection
+		case "policy_service":
+			if instance.Name == "" {
 				logger.Error("Policy service requires a name")
-
 				return
 			}
-		} else if instance.Kind == "dovecot_sasl" {
-			if instance.Name != "" {
-				wg.Add(1)
-				taskCount++
-
-				go newDovecotSASLInstance(instance, ctx, cfg, &wg, globalWorkerPool)
-			} else {
+			handler = srv.HandlePolicyServiceConnection
+		case "dovecot_sasl":
+			if instance.Name == "" {
 				logger.Error("Dovecot SASL requires a name")
-
 				return
 			}
-		} else {
+			handler = srv.HandleDovecotSASLConnection
+		default:
 			logger.Error("Invalid listen instance", slog.String("instance", instance.Kind))
+			return
+		}
+
+		tasks = append(tasks, serverTask{
+			server:  srv,
+			handler: handler,
+		})
+	}
+
+	// All listeners are ready, now drop privileges if configured
+	if cfg.Server.RunAsUser != "" || cfg.Server.RunAsGroup != "" {
+		if err := DropPrivileges(cfg.Server.RunAsUser, cfg.Server.RunAsGroup, logger); err != nil {
+			logger.Error("Failed to drop privileges", slog.String("error", err.Error()))
 
 			return
 		}
 	}
 
-	if taskCount > 0 {
+	if len(tasks) > 0 {
+		for _, task := range tasks {
+			wg.Add(1)
+			go func(t serverTask) {
+				defer wg.Done()
+
+				go func() {
+					<-ctx.Done()
+					t.server.Stop()
+				}()
+
+				if err := t.server.Start(t.handler); err != nil {
+					logger.Error("Server error", slog.String("error", err.Error()))
+				}
+			}(task)
+		}
+
 		wg.Wait()
 		logger.Info("Server stopped", slog.String("version", version))
 	} else {

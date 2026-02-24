@@ -3,6 +3,9 @@
 
 server:
 
+  run_as_user: "pfxhttp"
+  run_as_group: "pfxhttp"
+
   listen:
     - kind: "socket_map"
       name: "map"
