@@ -475,14 +475,13 @@ func TestNauthilusSASLAuthenticatorPassword(t *testing.T) {
 		var payload map[string]string
 		json.NewDecoder(r.Body).Decode(&payload)
 
-		// Check if fields are passed correctly
-		if payload["service"] != "smtp" || payload["client_ip"] != "127.0.0.1" || payload["local_ip"] != "10.0.0.1" ||
-			payload["client_port"] != "1234" || payload["local_port"] != "25" || payload["secured"] != "true" ||
-			payload["local_name"] != "mail.example.com" || payload["user"] != "testuser" ||
-			payload["nologin"] != "true" || payload["no_penalty"] != "true" || payload["ssl_protocol"] != "TLSv1.3" ||
-			payload["ssl_cipher"] != "ECDHE-RSA-AES256-GCM-SHA384" || payload["ssl_cipher_bits"] != "256" ||
-			payload["ssl_pxt_id"] != "pxt1" || payload["client_id"] != "client1" {
+		// Check if fields are passed correctly (Nauthilus JSON auth)
+		if payload["protocol"] != "smtp" || payload["client_ip"] != "127.0.0.1" || payload["local_ip"] != "10.0.0.1" ||
+			payload["client_port"] != "1234" || payload["local_port"] != "25" || payload["ssl"] != "on" ||
+			payload["ssl_protocol"] != "TLSv1.3" || payload["ssl_cipher"] != "ECDHE-RSA-AES256-GCM-SHA384" ||
+			payload["client_id"] != "client1" || payload["method"] != "PLAIN" {
 			w.WriteHeader(http.StatusBadRequest)
+			w.Header().Set("Auth-Status", "missing or incorrect context fields")
 			json.NewEncoder(w).Encode(map[string]any{
 				"error": "missing or incorrect context fields",
 			})

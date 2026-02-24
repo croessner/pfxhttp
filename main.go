@@ -24,7 +24,7 @@ func loadConfig(ctx *Context) *Config {
 	if err != nil {
 		logger.Error("Error loading config", "error", err)
 
-		return nil
+		os.Exit(1)
 	}
 
 	return cfg
@@ -84,11 +84,11 @@ func handleSignals(server GenericServer) {
 	}()
 }
 
-func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup) {
+func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup, globalWP WorkerPool) {
 	defer wg.Done()
 
 	logger := ctx.Value(loggerKey).(*slog.Logger)
-	server := NewMultiServer(ctx, cfg)
+	server := NewMultiServer(ctx, cfg, globalWP)
 
 	handleSignals(server)
 
@@ -100,11 +100,11 @@ func newNetStringServerInstance(instance Listen, ctx *Context, cfg *Config, wg *
 	}
 }
 
-func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup) {
+func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup, globalWP WorkerPool) {
 	defer wg.Done()
 
 	logger := ctx.Value(loggerKey).(*slog.Logger)
-	server := NewMultiServer(ctx, cfg)
+	server := NewMultiServer(ctx, cfg, globalWP)
 
 	handleSignals(server)
 
@@ -116,11 +116,11 @@ func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config, wg *sy
 	}
 }
 
-func newDovecotSASLInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup) {
+func newDovecotSASLInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup, globalWP WorkerPool) {
 	defer wg.Done()
 
 	logger := ctx.Value(loggerKey).(*slog.Logger)
-	server := NewMultiServer(ctx, cfg)
+	server := NewMultiServer(ctx, cfg, globalWP)
 
 	handleSignals(server)
 
@@ -133,25 +133,36 @@ func newDovecotSASLInstance(instance Listen, ctx *Context, cfg *Config, wg *sync
 }
 
 func runServer(ctx *Context, cfg *Config) {
-	var wg sync.WaitGroup
+	if cfg == nil {
+		return
+	}
+
+	var (
+		wg               sync.WaitGroup
+		globalWorkerPool WorkerPool
+	)
 
 	taskCount := 0
 	logger := ctx.Value(loggerKey).(*slog.Logger)
 
 	logger.Info("Starting server", slog.String("version", version))
 
+	if cfg.Server.WorkerPool.MaxWorkers > 0 {
+		globalWorkerPool = NewWorkerPool(ctx, cfg.Server.WorkerPool.MaxWorkers, cfg.Server.WorkerPool.MaxQueue, &wg)
+	}
+
 	for _, instance := range cfg.Server.Listen {
 		if instance.Kind == "socket_map" {
 			wg.Add(1)
 			taskCount++
 
-			go newNetStringServerInstance(instance, ctx, cfg, &wg)
+			go newNetStringServerInstance(instance, ctx, cfg, &wg, globalWorkerPool)
 		} else if instance.Kind == "policy_service" {
 			if instance.Name != "" {
 				wg.Add(1)
 				taskCount++
 
-				go newPolicyServiceInstance(instance, ctx, cfg, &wg)
+				go newPolicyServiceInstance(instance, ctx, cfg, &wg, globalWorkerPool)
 			} else {
 				logger.Error("Policy service requires a name")
 
@@ -162,7 +173,7 @@ func runServer(ctx *Context, cfg *Config) {
 				wg.Add(1)
 				taskCount++
 
-				go newDovecotSASLInstance(instance, ctx, cfg, &wg)
+				go newDovecotSASLInstance(instance, ctx, cfg, &wg, globalWorkerPool)
 			} else {
 				logger.Error("Dovecot SASL requires a name")
 
@@ -187,17 +198,15 @@ func main() {
 	ctx := NewContext()
 	cfg := loadConfig(ctx)
 
-	if cfg != nil {
-		InitializeHttpClient(cfg)
+	InitializeHttpClient(cfg)
 
-		// Initialize response cache if enabled
-		if cfg.Server.ResponseCache.Enabled && cfg.Server.ResponseCache.TTL > 0 {
-			respCache = NewInMemoryResponseCache(cfg.Server.ResponseCache.TTL)
-		}
-
-		// Initialize OIDC manager
-		InitOIDCManager()
-
-		runServer(ctx, cfg)
+	// Initialize response cache if enabled
+	if cfg.Server.ResponseCache.Enabled && cfg.Server.ResponseCache.TTL > 0 {
+		respCache = NewInMemoryResponseCache(cfg.Server.ResponseCache.TTL)
 	}
+
+	// Initialize OIDC manager
+	InitOIDCManager()
+
+	runServer(ctx, cfg)
 }

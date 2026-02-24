@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"text/template"
 	"time"
@@ -64,15 +66,38 @@ func InitializeHttpClient(cfg *Config) {
 		}
 
 		if cfg.Server.TLS.Cert != "" && cfg.Server.TLS.Key != "" {
-			tlsConfig.Certificates = make([]tls.Certificate, 1)
-			tlsConfig.Certificates[0], _ = tls.LoadX509KeyPair(cfg.Server.TLS.Cert, cfg.Server.TLS.Key)
+			cert, err := tls.LoadX509KeyPair(cfg.Server.TLS.Cert, cfg.Server.TLS.Key)
+			if err != nil {
+				panic(fmt.Sprintf("failed to load client certificate: %v", err))
+			}
+
+			tlsConfig.Certificates = []tls.Certificate{cert}
+		}
+
+		if cfg.Server.TLS.RootCA != "" {
+			caCert, err := os.ReadFile(cfg.Server.TLS.RootCA)
+			if err != nil {
+				panic(fmt.Sprintf("failed to read root CA file: %v", err))
+			}
+
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				panic("failed to append root CA certificate")
+			}
+
+			tlsConfig.RootCAs = caCertPool
 		}
 
 		transport.TLSClientConfig = tlsConfig
 	}
 
+	clientTimeout := 60 * time.Second
+	if cfg.Server.HTTPClient.Timeout > 0 {
+		clientTimeout = cfg.Server.HTTPClient.Timeout
+	}
+
 	httpClient = &http.Client{
-		Timeout:   60 * time.Second,
+		Timeout:   clientTimeout,
 		Transport: transport,
 	}
 

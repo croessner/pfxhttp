@@ -56,11 +56,9 @@ var oidcManager *OIDCManager
 // InitOIDCManager initializes the OIDC manager
 func InitOIDCManager() {
 	oidcManager = &OIDCManager{
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		tokens:    make(map[string]*OIDCToken),
-		discovery: make(map[string]*OIDCDiscoveryResponse),
+		httpClient: httpClient,
+		tokens:     make(map[string]*OIDCToken),
+		discovery:  make(map[string]*OIDCDiscoveryResponse),
 	}
 }
 

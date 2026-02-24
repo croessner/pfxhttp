@@ -47,22 +47,24 @@ type MultiServer struct {
 	name    string
 	address string
 
-	config   *Config
-	ctx      context.Context
-	closer   context.CancelFunc
-	listener net.Listener
-	wg       sync.WaitGroup
+	config     *Config
+	ctx        context.Context
+	closer     context.CancelFunc
+	listener   net.Listener
+	wg         sync.WaitGroup
+	workerPool WorkerPool
 }
 
 // NewMultiServer creates and initializes a new MultiServer instance with the provided context and config.
-func NewMultiServer(ctx *Context, config *Config) GenericServer {
+func NewMultiServer(ctx *Context, config *Config, wp WorkerPool) GenericServer {
 	childCtx, closer := context.WithCancel(ctx)
 
 	return &MultiServer{
-		config: config,
-		ctx:    childCtx,
-		closer: closer,
-		wg:     sync.WaitGroup{},
+		config:     config,
+		ctx:        childCtx,
+		closer:     closer,
+		wg:         sync.WaitGroup{},
+		workerPool: wp,
 	}
 }
 
@@ -117,6 +119,10 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 
 	logger.Info("Server is listening", slog.String("type", instance.Type), slog.String("address", s.address), slog.String("name", s.name), slog.String("kind", instance.Kind))
 
+	if instance.WorkerPool.MaxWorkers > 0 {
+		s.workerPool = NewWorkerPool(s.ctx, instance.WorkerPool.MaxWorkers, instance.WorkerPool.MaxQueue, &s.wg)
+	}
+
 	for {
 		conn, err = s.listener.Accept()
 		if errors.Is(err, net.ErrClosed) {
@@ -133,7 +139,19 @@ func (s *MultiServer) Start(instance Listen, handler func(conn net.Conn)) error 
 
 		s.wg.Add(1)
 
-		go handler(conn)
+		if s.workerPool != nil {
+			job := Job{
+				Conn:    conn,
+				Handler: handler,
+			}
+
+			if !s.workerPool.Submit(job) {
+				_ = conn.Close()
+				s.wg.Done()
+			}
+		} else {
+			go handler(conn)
+		}
 	}
 }
 

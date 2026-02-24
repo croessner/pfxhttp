@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -28,15 +29,22 @@ type Server struct {
 	TLS                 TLS                 `mapstructure:"tls" validate:"omitempty"`
 	SockmapMaxReplySize int                 `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
 	ResponseCache       ResponseCacheConfig `mapstructure:"response_cache" validate:"omitempty"`
+	WorkerPool          WorkerPoolConfig    `mapstructure:"worker_pool" validate:"omitempty"`
 }
 
 type Listen struct {
-	Kind    string `mapstructure:"kind" validate:"required,oneof=socket_map policy_service dovecot_sasl"`
-	Name    string `mapstructure:"name" validate:"omitempty,alphanumunicode|alphanum_underscore,excludesall= "`
-	Type    string `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
-	Address string `mapstructure:"address" validate:"required,ip_addr|filepath"`
-	Port    int    `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
-	Mode    string `mapstructure:"mode" validate:"omitempty,octal_mode"`
+	Kind       string           `mapstructure:"kind" validate:"required,oneof=socket_map policy_service dovecot_sasl"`
+	Name       string           `mapstructure:"name" validate:"omitempty,alphanumunicode|alphanum_underscore,excludesall= "`
+	Type       string           `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
+	Address    string           `mapstructure:"address" validate:"required"`
+	Port       int              `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
+	Mode       string           `mapstructure:"mode" validate:"omitempty,octal_mode"`
+	WorkerPool WorkerPoolConfig `mapstructure:"worker_pool" validate:"omitempty"`
+}
+
+type WorkerPoolConfig struct {
+	MaxWorkers int `mapstructure:"max_workers" validate:"omitempty,min=1"`
+	MaxQueue   int `mapstructure:"max_queue" validate:"omitempty,min=1"`
 }
 
 type Logging struct {
@@ -54,6 +62,7 @@ type HTTPClient struct {
 	MaxIdleConns        int           `mapstructure:"max_idle_connections" validate:"omitempty,min=0,max=16384"`
 	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host" validate:"omitempty,min=0,max=16384"`
 	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout" validate:"omitempty,min=1ms,max=1h"`
+	Timeout             time.Duration `mapstructure:"timeout" validate:"omitempty,min=1s,max=1h"`
 	Proxy               string        `mapstructure:"proxy" validate:"omitempty,http_url"`
 }
 
@@ -61,7 +70,8 @@ type TLS struct {
 	Enabled    bool   `mapstructure:"enabled"`
 	Cert       string `mapstructure:"cert" validate:"omitempty,file"`
 	Key        string `mapstructure:"key" validate:"omitempty,file"`
-	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
+	RootCA     string `mapstructure:"root_ca" validate:"omitempty,file"`
+	SkipVerify bool   `mapstructure:"skip_verify"`
 }
 
 type OIDCAuth struct {
@@ -91,6 +101,26 @@ func (cfg *Config) HandleConfig() error {
 	err := viper.Unmarshal(cfg)
 	if err != nil {
 		return err
+	}
+
+	// Apply defaults for worker pool if not configured
+	numCPU := runtime.GOMAXPROCS(0)
+	if cfg.Server.WorkerPool.MaxWorkers == 0 {
+		cfg.Server.WorkerPool.MaxWorkers = numCPU * 2
+	}
+	if cfg.Server.WorkerPool.MaxQueue == 0 {
+		cfg.Server.WorkerPool.MaxQueue = cfg.Server.WorkerPool.MaxWorkers * 10
+	}
+
+	for i := range cfg.Server.Listen {
+		if cfg.Server.Listen[i].WorkerPool.MaxWorkers == 0 {
+			// If per-listener pool is not configured, we don't automatically
+			// set it here because we want it to fall back to the global pool.
+			// But if it IS partially configured (e.g. only MaxWorkers), we should
+			// provide a default for MaxQueue.
+		} else if cfg.Server.Listen[i].WorkerPool.MaxQueue == 0 {
+			cfg.Server.Listen[i].WorkerPool.MaxQueue = cfg.Server.Listen[i].WorkerPool.MaxWorkers * 10
+		}
 	}
 
 	validate := validator.New(validator.WithRequiredStructEnabled())

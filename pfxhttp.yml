@@ -22,19 +22,28 @@ server:
       address: "0.0.0.0"
       port: 23452
 
+    - kind: "dovecot_sasl"
+      name: "dovecot_sasl"
+      type: "tcp"
+      address: "0.0.0.0"
+      port: 23453
+
   logging:
     json: false
     level: debug
 
   http_client:
+    timeout: 30s
     max_connections_per_host: 10
     max_idle_connections: 4
     max_idle_connections_per_host: 1
     idle_connection_timeout: 10s
+    # proxy: "http://proxy.example.com:8080"
 
   tls:
     enabled: true
-    http_client_skip_verify: true
+    skip_verify: true
+    # root_ca: "/etc/ssl/certs/ca-certificates.crt"
 
   # Default Postfix limit
   socketmap_max_reply_size: 100000
@@ -42,6 +51,10 @@ server:
   response_cache:
     enabled: true
     ttl: 1m
+
+  worker_pool:
+    max_workers: 10
+    max_queue: 100
 
 socket_maps:
 
@@ -104,3 +117,19 @@ policy_services:
     value_field: "result"
     error_field: "error"
     no_error_value: "none"
+
+dovecot_sasl:
+
+  dovecot_sasl:
+    target: https://127.0.0.1:9443/api/v1/auth/json
+    oidc_auth:
+      enabled: true
+      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
+      client_id: admin
+      client_secret: admin-password
+    # Note: For dovecot_sasl, the payload is generated internally according to Nauthilus
+    # /api/v1/auth/json; a payload entry has no effect here.
+    status_code: 200
+    # Optional: Read username from the JSON response (Nauthilus: account_field)
+    value_field: "account_field"
+    # Errors are signaled via HTTP status and the "Auth-Status" header.

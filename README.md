@@ -134,6 +134,7 @@ The `server` section contains global options, including:
 - **HTTP Client Options**: Configure connection limits, timeouts, and optional TLS settings.
 - **OIDC Authentication**: Configure OIDC authentication (Client Credentials Flow) for HTTP requests with automatic token management.
 - **Response Cache**: Optional in-memory cache to serve responses when the backend is unavailable.
+- **Worker Pool**: Controlled performance by limiting the number of concurrent connections and providing back-pressure via a job queue.
 
 Below is a detailed example configuration for `pfxhttp.yml`:
 
@@ -158,7 +159,16 @@ server:
 
   tls:
     enabled: true
-    http_client_skip_verify: true
+    skip_verify: true
+    root_ca: "/etc/ssl/certs/ca-certificates.crt"
+
+  http_client:
+    timeout: 30s
+    max_connections_per_host: 100
+    max_idle_connections: 20
+    max_idle_connections_per_host: 20
+    idle_connection_timeout: 90s
+    proxy: "http://proxy.example.com:8080"
 
   # Optional response cache to serve data during backend outages
   response_cache:
@@ -245,6 +255,39 @@ Notes:
 - TTL must be between 1s and 168h (7 days).
 - Cache is in-memory and per-process; it is cleared on restart.
 - Keys are derived from the tuple (name, key). For policy services, the key is the JSON of the policy payload.
+
+### Worker Pool
+
+Pfxhttp uses a worker pool to manage concurrent connections efficiently. This prevents the server from spawning an unlimited number of goroutines, which could lead to resource exhaustion under high load. You can configure a global worker pool for all listeners or a dedicated pool per listener.
+
+Configuration (server section for global pool):
+```yaml
+server:
+  worker_pool:
+    max_workers: 10   # Number of concurrent workers
+    max_queue: 100    # Maximum number of connections waiting in the queue
+```
+
+Configuration (listen section for per-listener pool):
+```yaml
+server:
+  listen:
+    - kind: "socket_map"
+      name: "demo_map"
+      type: "tcp"
+      address: "[::]"
+      port: 23450
+      worker_pool:
+        max_workers: 5
+        max_queue: 20
+```
+
+Behavior:
+- **Max Workers**: Defines how many connections are processed simultaneously.
+- **Max Queue**: Defines how many connections can be queued before the server starts applying back-pressure (blocking the `accept` call).
+- **Back-Pressure**: When the queue is full, the server will wait until a worker becomes available before accepting more connections. This naturally slows down the sender (Postfix).
+- **Precedence**: A worker pool defined in the `listen` section takes precedence over the global `worker_pool` in the `server` section.
+- **Defaults**: If no `worker_pool` is configured in the `server` section, Pfxhttp automatically initializes a global worker pool with `max_workers` set to `2 * GOMAXPROCS` and `max_queue` set to `10 * max_workers`.
 
 ### OIDC Authentication
 

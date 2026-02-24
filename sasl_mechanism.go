@@ -394,54 +394,36 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 		return nil, errors.New("target URL is not specified")
 	}
 
+	// Build the Nauthilus JSON auth request as defined by /api/v1/auth/json.
+	// Only send fields understood by Nauthilus.
 	payload := map[string]string{
 		"username": username,
 		"password": password,
-		"service":  req.Service,
+		"protocol": req.Service,   // e.g. smtp
+		"method":   req.Mechanism, // e.g. PLAIN/LOGIN
 	}
 
 	if req.RemoteIP != "" {
 		payload["client_ip"] = req.RemoteIP
 	}
-
 	if req.LocalIP != "" {
 		payload["local_ip"] = req.LocalIP
 	}
-
 	if req.RemotePort != "" {
 		payload["client_port"] = req.RemotePort
 	}
-
 	if req.LocalPort != "" {
 		payload["local_port"] = req.LocalPort
 	}
-
 	if req.Secured {
-		payload["secured"] = "true"
-	}
-	if req.LocalName != "" {
-		payload["local_name"] = req.LocalName
-	}
-	if req.User != "" {
-		payload["user"] = req.User
-	}
-	if req.NoLogin {
-		payload["nologin"] = "true"
-	}
-	if req.NoPenalty {
-		payload["no_penalty"] = "true"
+		// Map Dovecot's secured-flag to Nauthilus JSON "ssl" indicator
+		payload["ssl"] = "on"
 	}
 	if req.SSLProtocol != "" {
 		payload["ssl_protocol"] = req.SSLProtocol
 	}
 	if req.SSLCipher != "" {
 		payload["ssl_cipher"] = req.SSLCipher
-	}
-	if req.SSLCipherBits != "" {
-		payload["ssl_cipher_bits"] = req.SSLCipherBits
-	}
-	if req.SSLPXTID != "" {
-		payload["ssl_pxt_id"] = req.SSLPXTID
 	}
 	if req.ClientID != "" {
 		payload["client_id"] = req.ClientID
@@ -515,18 +497,27 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 
 // handlePasswordResponse processes the HTTP response from the Nauthilus backend.
 func (a *NauthilusSASLAuthenticator) handlePasswordResponse(resp *http.Response, settings Request) (*SASLAuthResult, error) {
-	var reader io.Reader = resp.Body
+	// 1) Primary signal: HTTP status code. Non-200 => fail; 5xx => temporary.
+	if resp.StatusCode != settings.StatusCode {
+		reason := resp.Header.Get("Auth-Status")
+		if reason == "" {
+			reason = "authentication failed"
+		}
+		return &SASLAuthResult{
+			Success:   false,
+			Reason:    reason,
+			Temporary: resp.StatusCode >= 500,
+		}, nil
+	}
 
+	// 2) On success, optionally read JSON to extract account name.
+	var reader io.Reader = resp.Body
 	if settings.HTTPResponseCompression && strings.EqualFold(resp.Header.Get("Content-Encoding"), gzipCompressor.Name()) {
 		zr, err := gzipCompressor.Decompress(resp.Body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decompress response: %w", err)
 		}
-
-		defer func(zr io.ReadCloser) {
-			_ = zr.Close()
-		}(zr)
-
+		defer func(zr io.ReadCloser) { _ = zr.Close() }(zr)
 		reader = zr
 	}
 
@@ -536,45 +527,23 @@ func (a *NauthilusSASLAuthenticator) handlePasswordResponse(resp *http.Response,
 	}
 
 	var responseData map[string]any
-
-	if err = json.Unmarshal(bodyBytes, &responseData); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+	if len(bodyBytes) > 0 {
+		_ = json.Unmarshal(bodyBytes, &responseData) // best-effort; empty/null is valid
 	}
 
-	// Check error field
-	if settings.ErrorField != "" {
-		if rawValue, found := getNestedValue(responseData, settings.ErrorField, 0); found {
-			value := convertResponse(rawValue, 0)
-			if value != "" && settings.NoErrorValue != "" && value != settings.NoErrorValue {
-				return &SASLAuthResult{
-					Success:   false,
-					Reason:    "authentication error",
-					Temporary: true,
-				}, nil
-			}
-		}
-	}
-
-	if resp.StatusCode != settings.StatusCode {
-		return &SASLAuthResult{
-			Success: false,
-			Reason:  "authentication failed",
-		}, nil
-	}
-
-	// Extract username from response if available
 	username := ""
-
+	// Prefer configured value_field when present, otherwise fall back to common Nauthilus field.
 	if settings.ValueField != "" {
 		if rawValue, found := getNestedValue(responseData, settings.ValueField, 0); found {
 			username = convertResponse(rawValue, 0)
 		}
+	} else {
+		if rawValue, found := responseData["account_field"]; found {
+			username = convertResponse(rawValue, 0)
+		}
 	}
 
-	return &SASLAuthResult{
-		Success:  true,
-		Username: username,
-	}, nil
+	return &SASLAuthResult{Success: true, Username: username}, nil
 }
 
 // AuthenticateToken validates an OAuth2 token via the OIDC introspection endpoint.

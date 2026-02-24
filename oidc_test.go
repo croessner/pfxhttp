@@ -51,6 +51,7 @@ func TestOIDCManager(t *testing.T) {
 	}))
 	defer server.Close()
 
+	InitializeHttpClient(&Config{})
 	InitOIDCManager()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	ctx := context.WithValue(context.Background(), loggerKey, logger)
@@ -114,6 +115,7 @@ func TestOIDCManagerExpiration(t *testing.T) {
 	}))
 	defer server.Close()
 
+	InitializeHttpClient(&Config{})
 	InitOIDCManager()
 	logger := slog.New(slog.DiscardHandler)
 	ctx := context.WithValue(context.Background(), loggerKey, logger)
