@@ -116,6 +116,22 @@ func newPolicyServiceInstance(instance Listen, ctx *Context, cfg *Config, wg *sy
 	}
 }
 
+func newDovecotSASLInstance(instance Listen, ctx *Context, cfg *Config, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	logger := ctx.Value(loggerKey).(*slog.Logger)
+	server := NewMultiServer(ctx, cfg)
+
+	handleSignals(server)
+
+	err := server.Start(instance, server.HandleDovecotSASLConnection)
+	if err != nil {
+		logger.Error("Server error", slog.String("error", err.Error()))
+
+		return
+	}
+}
+
 func runServer(ctx *Context, cfg *Config) {
 	var wg sync.WaitGroup
 
@@ -138,6 +154,17 @@ func runServer(ctx *Context, cfg *Config) {
 				go newPolicyServiceInstance(instance, ctx, cfg, &wg)
 			} else {
 				logger.Error("Policy service requires a name")
+
+				return
+			}
+		} else if instance.Kind == "dovecot_sasl" {
+			if instance.Name != "" {
+				wg.Add(1)
+				taskCount++
+
+				go newDovecotSASLInstance(instance, ctx, cfg, &wg)
+			} else {
+				logger.Error("Dovecot SASL requires a name")
 
 				return
 			}

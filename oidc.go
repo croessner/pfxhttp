@@ -24,8 +24,9 @@ import (
 
 // OIDCDiscoveryResponse represents the response from the OpenID configuration endpoint
 type OIDCDiscoveryResponse struct {
-	Issuer        string `json:"issuer"`
-	TokenEndpoint string `json:"token_endpoint"`
+	Issuer                string `json:"issuer"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	IntrospectionEndpoint string `json:"introspection_endpoint"`
 }
 
 // OIDCTokenResponse represents the response from the token endpoint
@@ -265,6 +266,21 @@ func (m *OIDCManager) createAssertion(clientID, tokenEndpoint, keyFile string) (
 
 	token := jwt.NewWithClaims(method, claims)
 	return token.SignedString(privKey)
+}
+
+// getIntrospectionDiscovery fetches the OIDC discovery document and returns it if it contains
+// an introspection_endpoint. This is used by OAuth-based SASL mechanisms to validate tokens.
+func (m *OIDCManager) getIntrospectionDiscovery(ctx context.Context, configurationURI string) (*OIDCDiscoveryResponse, error) {
+	disc, err := m.getDiscovery(ctx, configurationURI)
+	if err != nil {
+		return nil, err
+	}
+
+	if disc.IntrospectionEndpoint == "" {
+		return nil, errors.New("discovery response missing introspection_endpoint")
+	}
+
+	return disc, nil
 }
 
 // addOIDCAuth adds the OIDC Authorization header to the request if OIDC is enabled

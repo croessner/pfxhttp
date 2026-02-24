@@ -18,6 +18,7 @@ type Config struct {
 	Server         Server             `mapstructure:"server" validate:"required"`
 	SocketMaps     map[string]Request `mapstructure:"socket_maps" validate:"omitempty,dive"`
 	PolicyServices map[string]Request `mapstructure:"policy_services" validate:"omitempty,dive"`
+	DovecotSASL    map[string]Request `mapstructure:"dovecot_sasl" validate:"omitempty,dive"`
 }
 
 type Server struct {
@@ -30,7 +31,7 @@ type Server struct {
 }
 
 type Listen struct {
-	Kind    string `mapstructure:"kind" validate:"required,oneof=socket_map policy_service"`
+	Kind    string `mapstructure:"kind" validate:"required,oneof=socket_map policy_service dovecot_sasl"`
 	Name    string `mapstructure:"name" validate:"omitempty,alphanumunicode|alphanum_underscore,excludesall= "`
 	Type    string `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
 	Address string `mapstructure:"address" validate:"required,ip_addr|filepath"`

@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +36,9 @@ type GenericServer interface {
 
 	// HandlePolicyServiceConnection manages a client connection for the Postfix policy service, handling requests and responses.
 	HandlePolicyServiceConnection(conn net.Conn)
+
+	// HandleDovecotSASLConnection manages a client connection for the Dovecot SASL authentication protocol.
+	HandleDovecotSASLConnection(conn net.Conn)
 }
 
 // MultiServer represents a TCP server that processes requests encoded in NetString format.
@@ -284,6 +290,283 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 			}
 
 			logger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
+		}
+	}
+}
+
+// dovecotCUIDCounter is a global atomic counter for generating unique connection IDs in the Dovecot SASL protocol.
+var dovecotCUIDCounter atomic.Uint64
+
+// generateCookie generates a random hex cookie for the Dovecot SASL handshake.
+func generateCookie() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+
+	return hex.EncodeToString(b)
+}
+
+// HandleDovecotSASLConnection manages a client connection for the Dovecot SASL authentication protocol.
+// It performs the server handshake, reads client handshake, then processes AUTH/CONT requests.
+func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
+	clientAddr := conn.RemoteAddr().String()
+	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+
+	logger.Info("New Dovecot SASL connection established", slog.String(LogKeyClient, clientAddr))
+
+	defer func() {
+		logger.Info("Dovecot SASL connection closed", slog.String(LogKeyClient, clientAddr))
+		_ = conn.Close()
+		s.wg.Done()
+	}()
+
+	decoder := &DovecotDecoder{}
+	encoder := &DovecotEncoder{}
+	reader := bufio.NewReader(conn)
+
+	// Determine supported mechanisms from config
+	mechanisms := []DovecotMechanism{
+		{Name: "PLAIN", PlainText: true, Dictionary: true, Active: true},
+		{Name: "LOGIN", PlainText: true, Dictionary: true, Active: true},
+	}
+
+	// Add OAuth mechanisms if OIDC is configured for this service
+	if settings, ok := s.config.DovecotSASL[s.name]; ok && settings.OIDCAuth.Enabled {
+		mechanisms = append(mechanisms,
+			DovecotMechanism{Name: "XOAUTH2", ForwardSecrecy: true},
+			DovecotMechanism{Name: "OAUTHBEARER", ForwardSecrecy: true},
+		)
+	}
+
+	cuid := dovecotCUIDCounter.Add(1)
+	handshake := &DovecotHandshake{
+		Mechanisms: mechanisms,
+		SPID:       strconv.Itoa(os.Getpid()),
+		CUID:       strconv.FormatUint(cuid, 10),
+		Cookie:     generateCookie(),
+	}
+
+	// Send server handshake
+	for _, line := range encoder.EncodeHandshake(handshake) {
+		if _, err := conn.Write([]byte(line)); err != nil {
+			logger.Error("Error writing handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+			return
+		}
+	}
+
+	logger.Debug("Handshake sent", slog.String(LogKeyClient, clientAddr))
+
+	// Read client handshake (VERSION + CPID)
+	clientHandshakeDone := false
+	for !clientHandshakeDone {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			logger.Error("Error reading client handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+			return
+		}
+
+		cmd, args := decoder.ParseLine(line)
+		switch cmd {
+		case DovecotCmdVersion:
+			major, _, err := decoder.DecodeVersion(args)
+			if err != nil {
+				logger.Error("Invalid client VERSION", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				return
+			}
+			if major != DovecotProtoVersionMajor {
+				logger.Error("Unsupported protocol version", slog.String(LogKeyClient, clientAddr), slog.Int("major", major))
+				return
+			}
+		case DovecotCmdCPID:
+			cpid, err := decoder.DecodeCPID(args)
+			if err != nil {
+				logger.Error("Invalid CPID", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				return
+			}
+			logger.Debug("Client CPID received", slog.String(LogKeyClient, clientAddr), slog.String("cpid", cpid))
+			clientHandshakeDone = true
+		default:
+			logger.Warn("Unexpected command during handshake", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
+		}
+	}
+
+	// Track active mechanism sessions for multi-step auth (keyed by request ID)
+	activeMechanisms := make(map[string]SASLMechanism)
+	activeAuthRequests := make(map[string]*DovecotAuthRequest)
+	authenticator := NewNauthilusSASLAuthenticator(s.config, s.name)
+
+	// Process AUTH and CONT commands
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+			if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				return
+			}
+
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+					continue
+				}
+				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || isConnectionResetError(err) {
+					return
+				}
+				logger.Error("Error reading command", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				return
+			}
+
+			cmd, args := decoder.ParseLine(line)
+			if cmd == "" {
+				continue
+			}
+
+			switch cmd {
+			case DovecotCmdAuth:
+				authReq, err := decoder.DecodeAuthRequest(args)
+				if err != nil {
+					logger.Error("Invalid AUTH request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+					if _, wErr := conn.Write([]byte(encoder.EncodeFail("0", "invalid request", "", false))); wErr != nil {
+						return
+					}
+					continue
+				}
+
+				logger.Debug("AUTH request received",
+					slog.String(LogKeyClient, clientAddr),
+					slog.String("id", authReq.ID),
+					slog.String("mechanism", authReq.Mechanism),
+					slog.String("service", authReq.Service))
+
+				mech := NewSASLMechanism(authReq.Mechanism)
+				if mech == nil {
+					if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, "unsupported mechanism", "", false))); wErr != nil {
+						return
+					}
+					continue
+				}
+
+				result, creds := mech.Start(authReq.InitialResponse)
+				s.handleSASLResult(conn, encoder, authenticator, logger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+
+			case DovecotCmdCont:
+				contReq, err := decoder.DecodeContRequest(args)
+				if err != nil {
+					logger.Error("Invalid CONT request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+					continue
+				}
+
+				mech, ok := activeMechanisms[contReq.ID]
+				if !ok {
+					if _, wErr := conn.Write([]byte(encoder.EncodeFail(contReq.ID, "no active auth session", "", false))); wErr != nil {
+						return
+					}
+					continue
+				}
+
+				authReq := activeAuthRequests[contReq.ID]
+				result, creds := mech.Continue(contReq.Data)
+				s.handleSASLResult(conn, encoder, authenticator, logger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+
+			default:
+				logger.Warn("Unknown command", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
+			}
+		}
+	}
+}
+
+// handleSASLResult processes the result of a SASL mechanism step and sends the appropriate protocol response.
+func (s *MultiServer) handleSASLResult(
+	conn net.Conn,
+	encoder *DovecotEncoder,
+	authenticator SASLAuthenticator,
+	logger *slog.Logger,
+	clientAddr string,
+	authReq *DovecotAuthRequest,
+	mech SASLMechanism,
+	result *SASLAuthResult,
+	creds *SASLCredentials,
+	activeMechanisms map[string]SASLMechanism,
+	activeAuthRequests map[string]*DovecotAuthRequest,
+) {
+	// If mechanism needs continuation, send CONT and store state
+	if result != nil && result.NeedContinuation {
+		activeMechanisms[authReq.ID] = mech
+		activeAuthRequests[authReq.ID] = authReq
+
+		if _, err := conn.Write([]byte(encoder.EncodeCont(authReq.ID, result.ContinuationChallenge))); err != nil {
+			logger.Error("Error writing CONT", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+		}
+
+		return
+	}
+
+	// If mechanism returned a direct failure
+	if result != nil && !result.Success {
+		delete(activeMechanisms, authReq.ID)
+		delete(activeAuthRequests, authReq.ID)
+
+		if _, err := conn.Write([]byte(encoder.EncodeFail(authReq.ID, result.Reason, result.Username, result.Temporary))); err != nil {
+			logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+		}
+
+		return
+	}
+
+	// Credentials extracted - authenticate against backend
+	if creds != nil {
+		delete(activeMechanisms, authReq.ID)
+		delete(activeAuthRequests, authReq.ID)
+
+		var authResult *SASLAuthResult
+		var err error
+
+		if IsOAuthMechanism(authReq.Mechanism) {
+			authResult, err = authenticator.AuthenticateToken(s.ctx, creds.Username, creds.Token, authReq)
+		} else {
+			authResult, err = authenticator.AuthenticatePassword(s.ctx, creds.Username, creds.Password, authReq)
+		}
+
+		if err != nil {
+			logger.Error("Authentication error",
+				slog.String(LogKeyClient, clientAddr),
+				slog.String("username", creds.Username),
+				slog.String("error", err.Error()))
+
+			if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, "internal error", creds.Username, true))); wErr != nil {
+				logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
+			}
+
+			return
+		}
+
+		if authResult.Success {
+			username := creds.Username
+			if authResult.Username != "" {
+				username = authResult.Username
+			}
+
+			logger.Info("Authentication successful",
+				slog.String(LogKeyClient, clientAddr),
+				slog.String("username", username),
+				slog.String("mechanism", authReq.Mechanism))
+
+			if _, wErr := conn.Write([]byte(encoder.EncodeOK(authReq.ID, username))); wErr != nil {
+				logger.Error("Error writing OK", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
+			}
+		} else {
+			logger.Info("Authentication failed",
+				slog.String(LogKeyClient, clientAddr),
+				slog.String("username", creds.Username),
+				slog.String("mechanism", authReq.Mechanism),
+				slog.String("reason", authResult.Reason))
+
+			if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, authResult.Reason, creds.Username, authResult.Temporary))); wErr != nil {
+				logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
+			}
 		}
 	}
 }
