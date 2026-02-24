@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -217,18 +219,23 @@ func NewConfigFile() (cfg *Config, err error) {
 	} else {
 		// Default case: look up in standard paths
 		viper.SetConfigName("pfxhttp")
-		viper.SetConfigType(configFormat)
+		// Viper will automatically look for pfxhttp.yaml, pfxhttp.yml, etc.
+		// unless SetConfigType is explicitly set.
 
-		viper.AddConfigPath("/usr/local/etc/pfxhttp/")
-		viper.AddConfigPath("/etc/pfxhttp/")
-		viper.AddConfigPath("$HOME/.pfxhttp")
+		viper.AddConfigPath("/usr/local/etc/pfxhttp")
+		viper.AddConfigPath("/etc/pfxhttp")
+		if home, err := os.UserHomeDir(); err == nil {
+			viper.AddConfigPath(filepath.Join(home, ".pfxhttp"))
+		}
 		viper.AddConfigPath(".")
 	}
 
 	// Attempt to read configuration
 	err = viper.ReadInConfig()
 	if err != nil {
-		slog.Info("No configuration file found")
+		slog.Warn("Configuration file not found, using defaults", "error", err)
+	} else {
+		slog.Info("Using configuration file", "file", viper.ConfigFileUsed())
 	}
 
 	// Enable reading environment variables

@@ -4,36 +4,35 @@ After=network.target
 
 [Service]
 Type=simple
-Restart=always
-# The service starts as root to bind to privileged ports or
-# to create Unix sockets in protected directories (e.g. Postfix spool).
-# It will then drop privileges to the user/group specified in the config.
 User=root
 Group=root
 EnvironmentFile=-/etc/default/pfxhttp
-ExecStart=/usr/local/sbin/pfxhttp
+# Be explicit: point to the config file in /etc to avoid search path surprises
+ExecStart=/usr/local/sbin/pfxhttp --config /etc/pfxhttp/pfxhttp.yml
+Restart=on-failure
+RestartSec=2s
+
+# Notes:
+# - The service starts as root to bind privileged ports or create Unix sockets
+#   in protected directories (e.g. Postfix spool). The application then drops
+#   privileges internally to the user/group configured in pfxhttp.yml.
+# - We deliberately avoid over-hardening here to keep /etc visible and allow
+#   setuid/setgid. Add hardening later only after verifying functionality.
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=pfxhttp
 MemoryMax=50M
 CPUQuota=10%
 
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_CHOWN
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_CHOWN
+# Minimal sandboxing that doesn't interfere with config access or uid/gid changes
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-NoNewPrivileges=true
-ReadOnlyPaths=/etc
-ProtectKernelModules=true
-MemoryDenyWriteExecute=true
-ProtectControlGroups=true
-ProtectKernelLogs=true
-ProtectClock=true
-RestrictSUIDSGID=true
-ProtectProc=invisible
+# If you enable ProtectSystem= or RestrictSUIDSGID= in the future, verify that
+# the config can still be read and the internal privilege drop still works.
+# If you need to create a Unix socket in Postfix' private spool, you may need:
+# ReadWritePaths=/var/spool/postfix-submission/private
+
 LimitNOFILE=1024
-#RestrictAddressFamilies=AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

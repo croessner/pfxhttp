@@ -803,6 +803,14 @@ func DropPrivileges(runAsUser, runAsGroup string, logger *slog.Logger) error {
 
 	var uid, gid int
 
+	if runAsUser != "" {
+		u, err := user.Lookup(runAsUser)
+		if err != nil {
+			return fmt.Errorf("could not lookup user %s: %w", runAsUser, err)
+		}
+		uid, _ = strconv.Atoi(u.Uid)
+	}
+
 	if runAsGroup != "" {
 		g, err := user.LookupGroup(runAsGroup)
 		if err != nil {
@@ -811,12 +819,13 @@ func DropPrivileges(runAsUser, runAsGroup string, logger *slog.Logger) error {
 		gid, _ = strconv.Atoi(g.Gid)
 	}
 
-	if runAsUser != "" {
-		u, err := user.Lookup(runAsUser)
-		if err != nil {
-			return fmt.Errorf("could not lookup user %s: %w", runAsUser, err)
-		}
-		uid, _ = strconv.Atoi(u.Uid)
+	currentUID := os.Getuid()
+	currentGID := os.Getgid()
+
+	// If we are already running as the target user/group, there's nothing to do.
+	// This also avoids clearing supplementary groups if stay as root.
+	if (runAsUser == "" || uid == currentUID) && (runAsGroup == "" || gid == currentGID) {
+		return nil
 	}
 
 	// Set supplementary groups to empty
