@@ -502,6 +502,10 @@ The following optional fields fine-tune OIDC behavior. Defaults are chosen for m
 
 - `sasl_oidc_auth.jwks_cache_ttl`: Duration for caching the JWKS document. Default: `5m`.
 
+- `sasl_oidc_auth.account_claim`: Specifies which claim (for JWT/JWKS validation) or which field in the introspection response should be used as the account/username. If omitted, the default resolution chain is used:
+  - **JWKS**: `sub` → `preferred_username` → `username`
+  - **Introspection**: `sub` → `username`
+
 Example with advanced settings:
 
 ```yaml
@@ -523,6 +527,8 @@ socket_maps:
       client_secret: "introspection-secret"
       validation: auto  # or: introspection | jwks
       jwks_cache_ttl: 5m
+      # Use a custom claim/field as the account name:
+      account_claim: "dovecot_account"
 ```
 
 Notes:

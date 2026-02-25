@@ -130,6 +130,7 @@ dovecot_sasl:
       configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
       client_id: admin
       client_secret: admin-password
+      # account_claim: "dovecot_account"
     # Note: For dovecot_sasl, the payload is generated internally according to Nauthilus
     # /api/v1/auth/json; a payload entry has no effect here.
     status_code: 200

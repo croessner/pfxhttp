@@ -876,3 +876,213 @@ func TestNauthilusSASLAuthenticatorTokenAutoFallbackToIntrospection(t *testing.T
 		t.Fatalf("username = %q, want opaque-user", res.Username)
 	}
 }
+
+func TestNauthilusSASLAuthenticatorTokenIntrospectionAccountField(t *testing.T) {
+	// Mock OIDC + Introspection server that returns a custom account field
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 "http://" + r.Host,
+				"token_endpoint":         "http://" + r.Host + "/token",
+				"introspection_endpoint": "http://" + r.Host + "/introspect",
+			})
+		case "/introspect":
+			_ = r.ParseForm()
+			token := r.FormValue("token")
+			if token == "valid-token" {
+				json.NewEncoder(w).Encode(map[string]any{
+					"active":          true,
+					"username":        "should-be-ignored",
+					"sub":             "also-ignored",
+					"dovecot_account": "custom@example.com",
+				})
+			} else {
+				json.NewEncoder(w).Encode(map[string]any{"active": false})
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	oldClient := httpClient
+	httpClient = server.Client()
+	defer func() { httpClient = oldClient }()
+
+	InitOIDCManager()
+	oidcManager.httpClient = server.Client()
+
+	cfg := &Config{
+		DovecotSASL: map[string]Request{
+			"test_af": {
+				Target:     server.URL,
+				StatusCode: 200,
+				SASLOIDCAuth: SASLOIDCAuth{
+					Enabled:          true,
+					ConfigurationURI: server.URL + "/.well-known/openid-configuration",
+					ClientID:         "client-id",
+					ClientSecret:     "client-secret",
+					AccountClaim:     "dovecot_account",
+				},
+			},
+		},
+	}
+
+	ctx := context.WithValue(t.Context(), loggerKey, slog.New(slog.DiscardHandler))
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_af")
+	authReq := &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"}
+
+	// Valid token with account_field configured
+	result, err := authenticator.AuthenticateToken(ctx, "user@example.com", "valid-token", authReq)
+	if err != nil {
+		t.Fatalf("AuthenticateToken error: %v", err)
+	}
+	if !result.Success {
+		t.Errorf("Expected success, got failure: %s", result.Reason)
+	}
+	if result.Username != "custom@example.com" {
+		t.Errorf("Username = %q, want custom@example.com", result.Username)
+	}
+}
+
+func TestNauthilusSASLAuthenticatorTokenIntrospectionAccountFieldMissing(t *testing.T) {
+	// When account_field is configured but not present in response, fallback to original username
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 "http://" + r.Host,
+				"token_endpoint":         "http://" + r.Host + "/token",
+				"introspection_endpoint": "http://" + r.Host + "/introspect",
+			})
+		case "/introspect":
+			json.NewEncoder(w).Encode(map[string]any{
+				"active":   true,
+				"username": "introspection-user",
+				"sub":      "introspection-sub",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	oldClient := httpClient
+	httpClient = server.Client()
+	defer func() { httpClient = oldClient }()
+
+	InitOIDCManager()
+	oidcManager.httpClient = server.Client()
+
+	cfg := &Config{
+		DovecotSASL: map[string]Request{
+			"test_af_missing": {
+				Target:     server.URL,
+				StatusCode: 200,
+				SASLOIDCAuth: SASLOIDCAuth{
+					Enabled:          true,
+					ConfigurationURI: server.URL + "/.well-known/openid-configuration",
+					ClientID:         "client-id",
+					ClientSecret:     "client-secret",
+					AccountClaim:     "nonexistent_field",
+				},
+			},
+		},
+	}
+
+	ctx := context.WithValue(t.Context(), loggerKey, slog.New(slog.DiscardHandler))
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_af_missing")
+	authReq := &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"}
+
+	result, err := authenticator.AuthenticateToken(ctx, "original@example.com", "any-token", authReq)
+	if err != nil {
+		t.Fatalf("AuthenticateToken error: %v", err)
+	}
+	if !result.Success {
+		t.Errorf("Expected success, got failure: %s", result.Reason)
+	}
+	// Should keep original username since configured field is not in the response
+	if result.Username != "original@example.com" {
+		t.Errorf("Username = %q, want original@example.com", result.Username)
+	}
+}
+
+func TestNauthilusSASLAuthenticatorTokenJWKSAccountField(t *testing.T) {
+	// Generate RSA key and JWT with a custom account field
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	claims := jwt.MapClaims{
+		"sub":                "jwks-sub",
+		"preferred_username": "jwks-user",
+		"dovecot_account":    "custom-jwks@example.com",
+		"exp":                time.Now().Add(1 * time.Hour).Unix(),
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = "test-key"
+	signed, err := tok.SignedString(priv)
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+
+	n := base64.RawURLEncoding.EncodeToString(priv.N.Bytes())
+	eBytes := big.NewInt(int64(priv.E)).Bytes()
+	e := base64.RawURLEncoding.EncodeToString(eBytes)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(map[string]any{
+				"issuer":         "http://" + r.Host,
+				"jwks_uri":       "http://" + r.Host + "/jwks",
+				"token_endpoint": "http://" + r.Host + "/token",
+			})
+		case "/jwks":
+			json.NewEncoder(w).Encode(map[string]any{
+				"keys": []map[string]string{{
+					"kty": "RSA", "kid": "test-key", "use": "sig", "alg": "RS256",
+					"n": n, "e": e,
+				}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	oldClient := httpClient
+	httpClient = server.Client()
+	defer func() { httpClient = oldClient }()
+	InitOIDCManager()
+	oidcManager.httpClient = server.Client()
+
+	cfg := &Config{DovecotSASL: map[string]Request{
+		"jwks_af": {
+			Target:     server.URL,
+			StatusCode: 200,
+			SASLOIDCAuth: SASLOIDCAuth{
+				Enabled:          true,
+				ConfigurationURI: server.URL + "/.well-known/openid-configuration",
+				ClientID:         "client-id",
+				Validation:       "jwks",
+				AccountClaim:     "dovecot_account",
+			},
+		},
+	}}
+
+	ctx := context.WithValue(t.Context(), loggerKey, slog.New(slog.DiscardHandler))
+	auth := NewNauthilusSASLAuthenticator(cfg, "jwks_af")
+	res, err := auth.AuthenticateToken(ctx, "ignored", signed, &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"})
+	if err != nil {
+		t.Fatalf("AuthenticateToken: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got failure: %v", res.Reason)
+	}
+	if res.Username != "custom-jwks@example.com" {
+		t.Fatalf("username = %q, want custom-jwks@example.com", res.Username)
+	}
+}

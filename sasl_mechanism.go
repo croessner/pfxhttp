@@ -605,14 +605,21 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 			if err == nil {
 				// Success via JWKS
 				resolved := username
-				if sub, ok := claims["sub"].(string); ok && sub != "" {
-					resolved = sub
-				}
-				if un, ok := claims["preferred_username"].(string); ok && un != "" {
-					resolved = un
-				}
-				if un, ok := claims["username"].(string); ok && un != "" {
-					resolved = un
+				if af := settings.SASLOIDCAuth.AccountClaim; af != "" {
+					// Use the configured account field exclusively
+					if val, ok := claims[af].(string); ok && val != "" {
+						resolved = val
+					}
+				} else {
+					if sub, ok := claims["sub"].(string); ok && sub != "" {
+						resolved = sub
+					}
+					if un, ok := claims["preferred_username"].(string); ok && un != "" {
+						resolved = un
+					}
+					if un, ok := claims["username"].(string); ok && un != "" {
+						resolved = un
+					}
 				}
 				return &SASLAuthResult{Success: true, Username: resolved}, nil
 			}
@@ -797,12 +804,19 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	// Extract username from introspection response if available
 	resolvedUsername := username
 
-	if sub, ok := introspectionResult["sub"].(string); ok && sub != "" {
-		resolvedUsername = sub
-	}
+	if af := settings.SASLOIDCAuth.AccountClaim; af != "" {
+		// Use the configured account field exclusively
+		if val, ok := introspectionResult[af].(string); ok && val != "" {
+			resolvedUsername = val
+		}
+	} else {
+		if sub, ok := introspectionResult["sub"].(string); ok && sub != "" {
+			resolvedUsername = sub
+		}
 
-	if un, ok := introspectionResult["username"].(string); ok && un != "" {
-		resolvedUsername = un
+		if un, ok := introspectionResult["username"].(string); ok && un != "" {
+			resolvedUsername = un
+		}
 	}
 
 	return &SASLAuthResult{

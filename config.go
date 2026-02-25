@@ -105,6 +105,10 @@ type SASLOIDCAuth struct {
 	// Values: introspection, jwks, auto
 	Validation   string        `mapstructure:"validation" validate:"omitempty,oneof=introspection jwks auto"`
 	JWKSCacheTTL time.Duration `mapstructure:"jwks_cache_ttl" validate:"omitempty,min=1m,max=168h"`
+	// AccountClaim specifies which claim (JWT) or introspection response field
+	// should be used as the account/username. If empty, the default resolution
+	// chain (sub → preferred_username → username) is used.
+	AccountClaim string `mapstructure:"account_claim" validate:"omitempty,printascii"`
 }
 
 type Request struct {
