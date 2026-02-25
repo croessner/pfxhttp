@@ -34,6 +34,7 @@ server:
   logging:
     json: false
     level: debug
+    use_systemd: false
   http_client:
     timeout: 30s
     max_connections_per_host: 10
@@ -97,6 +98,9 @@ Enables JSON format logging (\fBtrue\fP or \fBfalse\fP).
 .IP \[bu] 2
 .B level:
 Sets the verbosity of logs. Options are \fBnone\fP, \fBerror\fP, \fBinfo\fP, or \fBdebug\fP.
+.IP \[bu] 2
+.B use_systemd:
+If \fBtrue\fP, timestamps are omitted from log output. Useful when running under systemd, which adds its own timestamps. Default: \fBfalse\fP.
 .RE
 
 .TP

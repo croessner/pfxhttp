@@ -25,6 +25,8 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
       * [Policy Services](#policy-services)
       * [Dovecot SASL](#dovecot-sasl)
   * [Logging and Troubleshooting](#logging-and-troubleshooting)
+    * [Session Tracking](#session-tracking)
+    * [Systemd Integration](#systemd-integration)
   * [Contributing](#contributing)
   * [References](#references)
     * [Advanced OIDC options](#advanced-oidc-options)
@@ -170,6 +172,7 @@ server:
   logging:
     json: true
     level: info
+    use_systemd: false
 
   tls:
     enabled: true
@@ -454,6 +457,55 @@ Behavior:
 ## Logging and Troubleshooting
 
 Logs are output to the console by default and should be captured by the service manager (e.g., **systemd**). Log verbosity is configurable in the `pfxhttp.yml` file.
+
+Available logging options:
+
+- **json**: If `true`, log output is formatted as JSON. Default: `false`.
+- **level**: Log verbosity. Options: `none`, `debug`, `info`, `error`. Default: `info`.
+- **use_systemd**: If `true`, timestamps are omitted from log lines. This is useful when running under systemd, which adds its own timestamps. Default: `false`.
+
+```yaml
+server:
+  logging:
+    json: false
+    level: info
+    use_systemd: true
+```
+
+### Session Tracking
+
+Pfxhttp assigns a unique **session ID** to every incoming connection. This session ID is logged with every message related to that connection, making it easy to trace all activity belonging to a single client connection.
+
+Within a connection, each individual request (e.g., a socket map lookup, a policy check, or a SASL AUTH/CONT command) receives a unique **sub_session ID**. This allows fine-grained tracing of individual requests within a long-lived connection.
+
+The session IDs are 16-character random hex strings generated using `crypto/rand`.
+
+Log fields:
+
+- `session`: Identifies the connection. Stays the same for all log lines of a given connection.
+- `sub_session`: Identifies a single request within a connection.
+
+Example log output:
+
+```
+level=INFO msg="New connection established" session=a1b2c3d4e5f67890 client=127.0.0.1:12345
+level=DEBUG msg="Received request" session=a1b2c3d4e5f67890 sub_session=9f8e7d6c5b4a3210 client=127.0.0.1:12345
+level=DEBUG msg="Response sent" session=a1b2c3d4e5f67890 sub_session=9f8e7d6c5b4a3210 client=127.0.0.1:12345
+level=INFO msg="Connection closed" session=a1b2c3d4e5f67890 client=127.0.0.1:12345
+```
+
+### Systemd Integration
+
+When running under systemd, the journal already adds timestamps to every log line. To avoid duplicate timestamps, set `use_systemd: true` in the logging configuration:
+
+```yaml
+server:
+  logging:
+    level: info
+    use_systemd: true
+```
+
+This removes the `time` field from log output. All other fields (level, message, session, sub_session, etc.) remain unchanged.
 
 If Pfxhttp fails to start, verify the following:
 

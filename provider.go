@@ -44,6 +44,16 @@ func ProvideLogger(cfg *Config) *slog.Logger {
 			return slog.New(slog.DiscardHandler)
 		}
 
+		if cfg.Server.Logging.UseSystemd {
+			handlerOpts.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
+				if len(groups) == 0 && a.Key == slog.TimeKey {
+					return slog.Attr{}
+				}
+
+				return a
+			}
+		}
+
 		if cfg.Server.Logging.JSON {
 			return slog.New(slog.NewJSONHandler(os.Stdout, handlerOpts))
 		}

@@ -461,10 +461,10 @@ func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 }
 
 // NewMapClient creates and returns a new instance of MapClient configured using the provided dependencies.
-func NewMapClient(deps *Deps) GenericClient {
+func NewMapClient(deps *Deps, logger *slog.Logger) GenericClient {
 	return &MapClient{
 		config:      deps.Config,
-		logger:      deps.Logger,
+		logger:      logger,
 		httpClient:  deps.HTTPClient,
 		oidcManager: deps.OIDCManager,
 		respCache:   deps.RespCache,
@@ -702,10 +702,10 @@ func (p *PolicyClient) handleResponse(resp *http.Response, request Request) erro
 }
 
 // NewPolicyClient creates and returns a new instance of PolicyClient initialized with the provided dependencies.
-func NewPolicyClient(deps *Deps) GenericClient {
+func NewPolicyClient(deps *Deps, logger *slog.Logger) GenericClient {
 	return &PolicyClient{
 		config:      deps.Config,
-		logger:      deps.Logger,
+		logger:      logger,
 		httpClient:  deps.HTTPClient,
 		oidcManager: deps.OIDCManager,
 		respCache:   deps.RespCache,

@@ -100,6 +100,21 @@ reload systemd, then enable and start the service:
 .SH LOGGING
 By default, logs are output to standard output and usually captured by the service manager (e.g., \fBsystemd\fP). Logging verbosity can be adjusted through the configuration file or environment variables.
 
+.SS SESSION TRACKING
+Every incoming connection is assigned a unique \fBsession\fP ID (16-character random hex string).
+All log messages related to that connection include this session ID, making it easy to trace activity
+for a specific client connection.
+
+Within a connection, each individual request (e.g., a socket map lookup, a policy check, or a SASL
+AUTH/CONT command) receives a unique \fBsub_session\fP ID. This allows fine-grained tracing of
+individual requests within a long-lived connection.
+
+.SS SYSTEMD INTEGRATION
+When running under \fBsystemd\fP, the journal already adds timestamps. To avoid duplicate timestamps,
+set \fBuse_systemd: true\fP in the logging configuration. This removes the \fBtime\fP field from
+log output while keeping all other fields (level, message, session, sub_session, etc.) intact.
+
+.SS TROUBLESHOOTING
 If \fBpfxhttp\fP fails to start, common sources of errors include:
 .RS
 .IP \[bu] 2

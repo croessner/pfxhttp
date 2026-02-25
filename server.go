@@ -21,6 +21,16 @@ import (
 )
 
 const LogKeyClient = "client"
+const LogKeySession = "session"
+const LogKeySubSession = "sub_session"
+
+// generateSessionID creates a short random hex string for session tracking.
+func generateSessionID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+
+	return hex.EncodeToString(b)
+}
 
 // GenericServer defines an interface for managing a TCP server with methods to start and stop the server.
 type GenericServer interface {
@@ -233,8 +243,9 @@ var _ GenericServer = (*MultiServer)(nil)
 // HandleNetStringConnection manages an individual client connection, processing requests and sending responses in NetString format.
 func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
+	sessionID := generateSessionID()
 
-	logger := s.logger
+	logger := s.logger.With(slog.String(LogKeySession, sessionID))
 
 	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
@@ -267,23 +278,26 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 				return
 			}
 
-			logger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", netString.String()))
+			subSessionID := generateSessionID()
+			reqLogger := logger.With(slog.String(LogKeySubSession, subSessionID))
+
+			reqLogger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", netString.String()))
 
 			received := NewPostfixMapReceiver()
 
 			err = received.ReadNetString(netString)
 			if err != nil {
-				logger.Error("Error reading request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				reqLogger.Error("Error reading request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
 
-			client := NewMapClient(s.deps)
+			client := NewMapClient(s.deps, reqLogger)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()
 			if err != nil {
-				logger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				reqLogger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -293,12 +307,12 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 
 			err = s.writeNetString(conn, response)
 			if err != nil {
-				logger.Error("Error writing response", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				reqLogger.Error("Error writing response", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
 
-			logger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
+			reqLogger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
 		}
 	}
 }
@@ -306,8 +320,9 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 // HandlePolicyServiceConnection manages a client connection for the Postfix policy service, handling requests and responses.
 func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
+	sessionID := generateSessionID()
 
-	logger := s.logger
+	logger := s.logger.With(slog.String(LogKeySession, sessionID))
 
 	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
@@ -335,17 +350,20 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 				return
 			}
 
-			logger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", policy.String()))
+			subSessionID := generateSessionID()
+			reqLogger := logger.With(slog.String(LogKeySubSession, subSessionID))
+
+			reqLogger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", policy.String()))
 
 			received := NewPostfixPolicyReceiver(s.name)
 			_ = received.ReadPolcy(policy)
 
-			client := NewPolicyClient(s.deps)
+			client := NewPolicyClient(s.deps, reqLogger)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()
 			if err != nil {
-				logger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				reqLogger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -355,17 +373,17 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 			err = s.writePolicyResult(conn, responseData)
 			if err != nil {
 				if errors.Is(err, os.ErrDeadlineExceeded) {
-					logger.Warn("Write deadline exceeded, closing connection", slog.String(LogKeyClient, conn.RemoteAddr().String()))
+					reqLogger.Warn("Write deadline exceeded, closing connection", slog.String(LogKeyClient, conn.RemoteAddr().String()))
 				} else if strings.Contains(err.Error(), "broken pipe") {
-					logger.Info("Broken pipe detected, client likely disconnected", slog.String(LogKeyClient, conn.RemoteAddr().String()))
+					reqLogger.Info("Broken pipe detected, client likely disconnected", slog.String(LogKeyClient, conn.RemoteAddr().String()))
 				} else {
-					logger.Error("Error writing response", slog.String(LogKeyClient, conn.RemoteAddr().String()), slog.String("error", err.Error()))
+					reqLogger.Error("Error writing response", slog.String(LogKeyClient, conn.RemoteAddr().String()), slog.String("error", err.Error()))
 				}
 
 				return
 			}
 
-			logger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
+			reqLogger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
 		}
 	}
 }
@@ -385,7 +403,9 @@ func generateCookie() string {
 // It performs the server handshake, reads client handshake, then processes AUTH/CONT requests.
 func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
-	logger := s.logger
+	sessionID := generateSessionID()
+
+	logger := s.logger.With(slog.String(LogKeySession, sessionID))
 
 	logger.Info("New Dovecot SASL connection established", slog.String(LogKeyClient, clientAddr))
 
@@ -495,8 +515,11 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				return
 			}
 
+			subSessionID := generateSessionID()
+			reqLogger := logger.With(slog.String(LogKeySubSession, subSessionID))
+
 			redacted := redactDovecotLine(strings.TrimSpace(line))
-			logger.Debug("Incoming Dovecot SASL request", slog.String(LogKeyClient, clientAddr), slog.String("request", redacted))
+			reqLogger.Debug("Incoming Dovecot SASL request", slog.String(LogKeyClient, clientAddr), slog.String("request", redacted))
 
 			cmd, args := decoder.ParseLine(line)
 			if cmd == "" {
@@ -507,14 +530,14 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 			case DovecotCmdAuth:
 				authReq, err := decoder.DecodeAuthRequest(args)
 				if err != nil {
-					logger.Error("Invalid AUTH request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+					reqLogger.Error("Invalid AUTH request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 					if _, wErr := conn.Write([]byte(encoder.EncodeFail("0", "invalid request", "", false))); wErr != nil {
 						return
 					}
 					continue
 				}
 
-				logger.Debug("AUTH request received",
+				reqLogger.Debug("AUTH request received",
 					slog.String(LogKeyClient, clientAddr),
 					slog.String("id", authReq.ID),
 					slog.String("mechanism", authReq.Mechanism),
@@ -529,12 +552,12 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				}
 
 				result, creds := mech.Start(authReq.InitialResponse)
-				s.handleSASLResult(conn, encoder, authenticator, logger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+				s.handleSASLResult(conn, encoder, authenticator, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
 
 			case DovecotCmdCont:
 				contReq, err := decoder.DecodeContRequest(args)
 				if err != nil {
-					logger.Error("Invalid CONT request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+					reqLogger.Error("Invalid CONT request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 					continue
 				}
 
@@ -548,10 +571,10 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 
 				authReq := activeAuthRequests[contReq.ID]
 				result, creds := mech.Continue(contReq.Data)
-				s.handleSASLResult(conn, encoder, authenticator, logger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+				s.handleSASLResult(conn, encoder, authenticator, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
 
 			default:
-				logger.Warn("Unknown command", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
+				reqLogger.Warn("Unknown command", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
 			}
 		}
 	}

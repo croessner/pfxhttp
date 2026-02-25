@@ -54,8 +54,9 @@ type WorkerPoolConfig struct {
 }
 
 type Logging struct {
-	JSON  bool   `mapstructure:"json"`
-	Level string `mapstructure:"level" validate:"omitempty,oneof=none debug info error"`
+	JSON       bool   `mapstructure:"json"`
+	Level      string `mapstructure:"level" validate:"omitempty,oneof=none debug info error"`
+	UseSystemd bool   `mapstructure:"use_systemd"`
 }
 
 type ResponseCacheConfig struct {
