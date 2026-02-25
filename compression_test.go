@@ -3,9 +3,9 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -104,9 +104,15 @@ func TestMapClient_RequestAndResponseCompression(t *testing.T) {
 		},
 	}
 
-	InitializeHttpClient(cfg)
+	httpClient := InitializeHttpClient(cfg)
 
-	client := NewMapClient(context.Background(), cfg)
+	deps := &Deps{
+		Config:     cfg,
+		Logger:     slog.New(slog.DiscardHandler),
+		HTTPClient: httpClient,
+	}
+
+	client := NewMapClient(deps)
 	client.SetReceiver(&testReceiver{name: "demo", key: "abc"})
 
 	if err := client.SendAndReceive(); err != nil {
@@ -153,9 +159,15 @@ func TestPolicyClient_RequestCompression_ResponsePlain(t *testing.T) {
 		},
 	}
 
-	InitializeHttpClient(cfg)
+	httpClient := InitializeHttpClient(cfg)
 
-	client := NewPolicyClient(context.Background(), cfg)
+	deps := &Deps{
+		Config:     cfg,
+		Logger:     slog.New(slog.DiscardHandler),
+		HTTPClient: httpClient,
+	}
+
+	client := NewPolicyClient(deps)
 	client.SetReceiver(&testReceiver{name: "policy", key: "abc"})
 
 	if err := client.SendAndReceive(); err != nil {

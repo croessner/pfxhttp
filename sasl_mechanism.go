@@ -429,8 +429,10 @@ type SASLAuthenticator interface {
 // NauthilusSASLAuthenticator authenticates SASL credentials against a Nauthilus HTTP backend
 // for password-based mechanisms and performs OAuth2 token introspection for token-based mechanisms.
 type NauthilusSASLAuthenticator struct {
-	config *Config
-	name   string
+	config      *Config
+	name        string
+	httpClient  *http.Client
+	oidcManager *OIDCManager
 }
 
 // AuthenticatePassword sends the credentials to the Nauthilus HTTP backend.
@@ -522,8 +524,10 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 		}
 	}
 
+	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
+
 	// Add OIDC auth for backend communication
-	failed, errMsg, _ := addOIDCAuth(httpReq, a.name, settings.BackendOIDCAuth)
+	failed, errMsg, _ := addOIDCAuth(httpReq, a.name, settings.BackendOIDCAuth, a.oidcManager, logger)
 	if failed {
 		return &SASLAuthResult{
 			Success:   false,
@@ -531,8 +535,6 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 			Temporary: true,
 		}, nil
 	}
-
-	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
 	if logger != nil {
 		logger.Debug("Outgoing Nauthilus request",
 			slog.String("method", httpReq.Method),
@@ -541,7 +543,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 			slog.String("payload", redactJSONForLog(payload)))
 	}
 
-	resp, err := httpClient.Do(httpReq)
+	resp, err := a.httpClient.Do(httpReq)
 	if err != nil {
 		return &SASLAuthResult{
 			Success:   false,
@@ -596,12 +598,12 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	// Optional JWKS local validation before introspection
 	switch settings.SASLOIDCAuth.Validation {
 	case "jwks", "auto":
-		if oidcManager == nil {
+		if a.oidcManager == nil {
 			return &SASLAuthResult{Success: false, Reason: "OIDC manager not initialized"}, nil
 		}
 		// Try local verification when token looks like JWT
 		if strings.Count(token, ".") == 2 {
-			claims, err := oidcManager.VerifyJWTWithJWKS(ctx, settings.SASLOIDCAuth.ConfigurationURI, token, settings.SASLOIDCAuth.JWKSCacheTTL)
+			claims, err := a.oidcManager.VerifyJWTWithJWKS(ctx, settings.SASLOIDCAuth.ConfigurationURI, token, settings.SASLOIDCAuth.JWKSCacheTTL)
 			if err == nil {
 				// Success via JWKS
 				resolved := username
@@ -634,7 +636,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		}
 	}
 
-	introspectionEndpoint, err := getIntrospectionEndpoint(ctx, settings.SASLOIDCAuth.ConfigurationURI)
+	introspectionEndpoint, err := getIntrospectionEndpoint(ctx, settings.SASLOIDCAuth.ConfigurationURI, a.oidcManager)
 	if err != nil {
 		if logger != nil {
 			logger.Error("Failed to get introspection endpoint", "error", err)
@@ -744,7 +746,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 			slog.String("payload", redactFormForLog(data)))
 	}
 
-	resp, err := httpClient.Do(httpReq)
+	resp, err := a.httpClient.Do(httpReq)
 	if err != nil {
 		return &SASLAuthResult{
 			Success:   false,
@@ -827,21 +829,24 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 
 var _ SASLAuthenticator = (*NauthilusSASLAuthenticator)(nil)
 
-// NewNauthilusSASLAuthenticator creates a new authenticator for the given config and service name.
-func NewNauthilusSASLAuthenticator(config *Config, name string) SASLAuthenticator {
+// NewNauthilusSASLAuthenticator creates a new authenticator for the given config, service name,
+// and injected dependencies.
+func NewNauthilusSASLAuthenticator(config *Config, name string, httpClient *http.Client, oidcManager *OIDCManager) SASLAuthenticator {
 	return &NauthilusSASLAuthenticator{
-		config: config,
-		name:   name,
+		config:      config,
+		name:        name,
+		httpClient:  httpClient,
+		oidcManager: oidcManager,
 	}
 }
 
 // getIntrospectionEndpoint fetches the introspection_endpoint from the OIDC discovery document.
-func getIntrospectionEndpoint(ctx context.Context, configurationURI string) (string, error) {
-	if oidcManager == nil {
+func getIntrospectionEndpoint(ctx context.Context, configurationURI string, mgr *OIDCManager) (string, error) {
+	if mgr == nil {
 		return "", errors.New("OIDC manager not initialized")
 	}
 
-	disc, err := oidcManager.getIntrospectionDiscovery(ctx, configurationURI)
+	disc, err := mgr.getIntrospectionDiscovery(ctx, configurationURI)
 	if err != nil {
 		return "", err
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -53,19 +54,26 @@ func minimalConfig() *Config {
 
 func TestMapClient_UsesCacheOnBackendFailure(t *testing.T) {
 	cfg := minimalConfig()
-	respCache = NewInMemoryResponseCache(time.Second)
+	cache := NewInMemoryResponseCache(time.Second)
 
 	// Backend returns error
-	httpClient = newTestHTTPClient(func(r *http.Request) (*http.Response, error) {
+	testHTTPClient := newTestHTTPClient(func(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("backend down")
 	})
 
 	// Seed cache
-	respCache.Set("map1", "key-123", CachedResponse{Status: "OK", Data: "cached"})
+	cache.Set("map1", "key-123", CachedResponse{Status: "OK", Data: "cached"})
+
+	deps := &Deps{
+		Config:     cfg,
+		Logger:     slog.New(slog.DiscardHandler),
+		HTTPClient: testHTTPClient,
+		RespCache:  cache,
+	}
 
 	recv := &PostfixMapReceiver{}
 	_ = recv.ReadNetString(NewNetStringFromString("map1 key-123"))
-	client := NewMapClient(NewContext(), cfg)
+	client := NewMapClient(deps)
 	client.SetReceiver(recv)
 
 	if err := client.SendAndReceive(); err != nil {
@@ -79,10 +87,10 @@ func TestMapClient_UsesCacheOnBackendFailure(t *testing.T) {
 
 func TestPolicyClient_UsesCacheOnBackendFailure(t *testing.T) {
 	cfg := minimalConfig()
-	respCache = NewInMemoryResponseCache(time.Second)
+	cache := NewInMemoryResponseCache(time.Second)
 
 	// Backend returns error
-	httpClient = newTestHTTPClient(func(r *http.Request) (*http.Response, error) {
+	testHTTPClient := newTestHTTPClient(func(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("backend down")
 	})
 
@@ -93,9 +101,16 @@ func TestPolicyClient_UsesCacheOnBackendFailure(t *testing.T) {
 	recv := NewPostfixPolicyReceiver("policyA")
 	_ = recv.ReadPolcy(pol)
 
-	respCache.Set("policyA", recv.GetKey(), CachedResponse{Status: "REJECT", Data: "blocked"})
+	cache.Set("policyA", recv.GetKey(), CachedResponse{Status: "REJECT", Data: "blocked"})
 
-	client := NewPolicyClient(NewContext(), cfg)
+	deps := &Deps{
+		Config:     cfg,
+		Logger:     slog.New(slog.DiscardHandler),
+		HTTPClient: testHTTPClient,
+		RespCache:  cache,
+	}
+
+	client := NewPolicyClient(deps)
 	client.SetReceiver(recv)
 
 	if err := client.SendAndReceive(); err != nil {
@@ -109,7 +124,7 @@ func TestPolicyClient_UsesCacheOnBackendFailure(t *testing.T) {
 
 func TestClients_UpdateCacheOnSuccess(t *testing.T) {
 	cfg := minimalConfig()
-	respCache = NewInMemoryResponseCache(time.Second)
+	cache := NewInMemoryResponseCache(time.Second)
 
 	// Backend responds successfully with JSON
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,11 +137,16 @@ func TestClients_UpdateCacheOnSuccess(t *testing.T) {
 
 	cfg.SocketMaps["map1"] = Request{Target: ts.URL, Payload: `{"key":"{{.Key}}"}`, StatusCode: 200, ValueField: "value"}
 
-	httpClient = ts.Client()
+	deps := &Deps{
+		Config:     cfg,
+		Logger:     slog.New(slog.DiscardHandler),
+		HTTPClient: ts.Client(),
+		RespCache:  cache,
+	}
 
 	recv := &PostfixMapReceiver{}
 	_ = recv.ReadNetString(NewNetStringFromString("map1 key-xyz"))
-	client := NewMapClient(NewContext(), cfg)
+	client := NewMapClient(deps)
 	client.SetReceiver(recv)
 
 	if err := client.SendAndReceive(); err != nil {
@@ -134,14 +154,14 @@ func TestClients_UpdateCacheOnSuccess(t *testing.T) {
 	}
 
 	// Check that cache has the entry
-	if entry, ok := respCache.Get("map1", "key-xyz"); !ok || entry.Status != "OK" || entry.Data != "OK done" {
+	if entry, ok := cache.Get("map1", "key-xyz"); !ok || entry.Status != "OK" || entry.Data != "OK done" {
 		t.Fatalf("expected cache updated with OK done, got ok=%v entry=%+v", ok, entry)
 	}
 }
 
 func TestMapClient_DoesNotCacheOnNotFoundOrPerm(t *testing.T) {
 	cfg := minimalConfig()
-	respCache = NewInMemoryResponseCache(time.Second)
+	cache := NewInMemoryResponseCache(time.Second)
 
 	// Backend responds 200 but missing value -> NOTFOUND
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,14 +171,20 @@ func TestMapClient_DoesNotCacheOnNotFoundOrPerm(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg.SocketMaps["map1"] = Request{Target: ts.URL, Payload: `{"key":"{{.Key}}"}`, StatusCode: 200, ValueField: "value"}
-	httpClient = ts.Client()
+
+	deps := &Deps{
+		Config:     cfg,
+		Logger:     slog.New(slog.DiscardHandler),
+		HTTPClient: ts.Client(),
+		RespCache:  cache,
+	}
 
 	recv := &PostfixMapReceiver{}
 	_ = recv.ReadNetString(NewNetStringFromString("map1 key-no-cache"))
-	client := NewMapClient(NewContext(), cfg)
+	client := NewMapClient(deps)
 	client.SetReceiver(recv)
 	_ = client.SendAndReceive()
-	if _, ok := respCache.Get("map1", "key-no-cache"); ok {
+	if _, ok := cache.Get("map1", "key-no-cache"); ok {
 		t.Fatalf("expected NOTFOUND result not to be cached")
 	}
 }

@@ -51,10 +51,10 @@ func TestOIDCManager(t *testing.T) {
 	}))
 	defer server.Close()
 
-	InitializeHttpClient(&Config{})
-	InitOIDCManager()
+	httpClient := InitializeHttpClient(&Config{})
+	mgr := NewOIDCManager(httpClient)
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	ctx := context.WithValue(context.Background(), loggerKey, logger)
+	ctx := context.Background()
 
 	auth := BackendOIDCAuth{
 		Enabled:          true,
@@ -64,7 +64,7 @@ func TestOIDCManager(t *testing.T) {
 	}
 
 	// First call should fetch from server
-	token, err := oidcManager.GetToken(ctx, logger, auth)
+	token, err := mgr.GetToken(ctx, logger, auth)
 	if err != nil {
 		t.Fatalf("Failed to get token: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestOIDCManager(t *testing.T) {
 	}
 
 	// Second call should come from cache
-	token2, err := oidcManager.GetToken(ctx, logger, auth)
+	token2, err := mgr.GetToken(ctx, logger, auth)
 	if err != nil {
 		t.Fatalf("Failed to get token again: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestOIDCManager(t *testing.T) {
 
 	// Check if addOIDCAuth works
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://example.com", nil)
-	ok, _, err := addOIDCAuth(req, "test-request", auth)
+	ok, _, err := addOIDCAuth(req, "test-request", auth, mgr, logger)
 	if err != nil {
 		t.Fatalf("addOIDCAuth failed: %v", err)
 	}
@@ -115,10 +115,10 @@ func TestOIDCManagerExpiration(t *testing.T) {
 	}))
 	defer server.Close()
 
-	InitializeHttpClient(&Config{})
-	InitOIDCManager()
+	httpClient := InitializeHttpClient(&Config{})
+	mgr := NewOIDCManager(httpClient)
 	logger := slog.New(slog.DiscardHandler)
-	ctx := context.WithValue(context.Background(), loggerKey, logger)
+	ctx := context.Background()
 
 	auth := BackendOIDCAuth{
 		Enabled:          true,
@@ -126,18 +126,18 @@ func TestOIDCManagerExpiration(t *testing.T) {
 		ClientID:         "client-id",
 	}
 
-	token, _ := oidcManager.GetToken(ctx, logger, auth)
+	token, _ := mgr.GetToken(ctx, logger, auth)
 	if token != "token-1" {
 		t.Errorf("Expected token-1, got %s", token)
 	}
 
 	// Manually expire the token in cache
-	oidcManager.mu.Lock()
+	mgr.mu.Lock()
 	key := server.URL + "/.well-known/openid-configuration|client-id"
-	oidcManager.tokens[key].ExpiresAt = time.Now().Add(-1 * time.Minute)
-	oidcManager.mu.Unlock()
+	mgr.tokens[key].ExpiresAt = time.Now().Add(-1 * time.Minute)
+	mgr.mu.Unlock()
 
-	token2, _ := oidcManager.GetToken(ctx, logger, auth)
+	token2, _ := mgr.GetToken(ctx, logger, auth)
 	if token2 != "token-2" {
 		t.Errorf("Expected token-2, got %s", token2)
 	}

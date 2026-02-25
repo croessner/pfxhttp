@@ -511,10 +511,8 @@ func TestNauthilusSASLAuthenticatorPassword(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Save and restore global httpClient
-	oldClient := httpClient
-	httpClient = server.Client()
-	defer func() { httpClient = oldClient }()
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
@@ -531,7 +529,7 @@ func TestNauthilusSASLAuthenticatorPassword(t *testing.T) {
 	logger := slog.DiscardHandler
 	ctx := context.WithValue(context.Background(), loggerKey, slog.New(logger))
 
-	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_sasl")
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_sasl", testClient, mgr)
 	authReq := &DovecotAuthRequest{
 		ID:            "1",
 		Mechanism:     "PLAIN",
@@ -617,14 +615,8 @@ func TestNauthilusSASLAuthenticatorTokenIntrospection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Save and restore globals
-	oldClient := httpClient
-	httpClient = server.Client()
-	defer func() { httpClient = oldClient }()
-
-	InitOIDCManager()
-	// Override OIDC manager's http client for test server
-	oidcManager.httpClient = server.Client()
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
@@ -644,7 +636,7 @@ func TestNauthilusSASLAuthenticatorTokenIntrospection(t *testing.T) {
 	logger := slog.DiscardHandler
 	ctx := context.WithValue(context.Background(), loggerKey, slog.New(logger))
 
-	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_oauth")
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_oauth", testClient, mgr)
 	authReq := &DovecotAuthRequest{
 		ID:            "1",
 		Mechanism:     "XOAUTH2",
@@ -699,7 +691,7 @@ func TestNauthilusSASLAuthenticatorMissingConfig(t *testing.T) {
 	logger := slog.DiscardHandler
 	ctx := context.WithValue(context.Background(), loggerKey, slog.New(logger))
 
-	authenticator := NewNauthilusSASLAuthenticator(cfg, "nonexistent")
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "nonexistent", &http.Client{}, nil)
 	authReq := &DovecotAuthRequest{ID: "1", Mechanism: "PLAIN", Service: "smtp"}
 
 	_, err := authenticator.AuthenticatePassword(ctx, "user", "pass", authReq)
@@ -729,7 +721,7 @@ func TestNauthilusSASLAuthenticatorOAuthNotConfigured(t *testing.T) {
 	logger := slog.DiscardHandler
 	ctx := context.WithValue(context.Background(), loggerKey, slog.New(logger))
 
-	authenticator := NewNauthilusSASLAuthenticator(cfg, "no_oauth")
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "no_oauth", &http.Client{}, nil)
 	authReq := &DovecotAuthRequest{ID: "1", Mechanism: "XOAUTH2", Service: "smtp"}
 
 	result, err := authenticator.AuthenticateToken(ctx, "user", "token", authReq)
@@ -789,12 +781,8 @@ func TestNauthilusSASLAuthenticatorTokenJWKS(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Override clients
-	oldClient := httpClient
-	httpClient = server.Client()
-	defer func() { httpClient = oldClient }()
-	InitOIDCManager()
-	oidcManager.httpClient = server.Client()
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
 
 	cfg := &Config{DovecotSASL: map[string]Request{
 		"jwks": {
@@ -810,7 +798,7 @@ func TestNauthilusSASLAuthenticatorTokenJWKS(t *testing.T) {
 	}}
 
 	ctx := context.WithValue(context.Background(), loggerKey, slog.New(slog.DiscardHandler))
-	auth := NewNauthilusSASLAuthenticator(cfg, "jwks")
+	auth := NewNauthilusSASLAuthenticator(cfg, "jwks", testClient, mgr)
 	res, err := auth.AuthenticateToken(ctx, "ignored", signed, &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"})
 	if err != nil {
 		t.Fatalf("AuthenticateToken: %v", err)
@@ -845,11 +833,8 @@ func TestNauthilusSASLAuthenticatorTokenAutoFallbackToIntrospection(t *testing.T
 	}))
 	defer server.Close()
 
-	oldClient := httpClient
-	httpClient = server.Client()
-	defer func() { httpClient = oldClient }()
-	InitOIDCManager()
-	oidcManager.httpClient = server.Client()
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
 
 	cfg := &Config{DovecotSASL: map[string]Request{
 		"auto": {
@@ -864,7 +849,7 @@ func TestNauthilusSASLAuthenticatorTokenAutoFallbackToIntrospection(t *testing.T
 		},
 	}}
 	ctx := context.WithValue(context.Background(), loggerKey, slog.New(slog.DiscardHandler))
-	auth := NewNauthilusSASLAuthenticator(cfg, "auto")
+	auth := NewNauthilusSASLAuthenticator(cfg, "auto", testClient, mgr)
 	res, err := auth.AuthenticateToken(ctx, "ignored", "opaque", &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"})
 	if err != nil {
 		t.Fatalf("AuthenticateToken: %v", err)
@@ -906,12 +891,8 @@ func TestNauthilusSASLAuthenticatorTokenIntrospectionAccountField(t *testing.T) 
 	}))
 	defer server.Close()
 
-	oldClient := httpClient
-	httpClient = server.Client()
-	defer func() { httpClient = oldClient }()
-
-	InitOIDCManager()
-	oidcManager.httpClient = server.Client()
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
@@ -930,7 +911,7 @@ func TestNauthilusSASLAuthenticatorTokenIntrospectionAccountField(t *testing.T) 
 	}
 
 	ctx := context.WithValue(t.Context(), loggerKey, slog.New(slog.DiscardHandler))
-	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_af")
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_af", testClient, mgr)
 	authReq := &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"}
 
 	// Valid token with account_field configured
@@ -968,12 +949,8 @@ func TestNauthilusSASLAuthenticatorTokenIntrospectionAccountFieldMissing(t *test
 	}))
 	defer server.Close()
 
-	oldClient := httpClient
-	httpClient = server.Client()
-	defer func() { httpClient = oldClient }()
-
-	InitOIDCManager()
-	oidcManager.httpClient = server.Client()
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
@@ -992,7 +969,7 @@ func TestNauthilusSASLAuthenticatorTokenIntrospectionAccountFieldMissing(t *test
 	}
 
 	ctx := context.WithValue(t.Context(), loggerKey, slog.New(slog.DiscardHandler))
-	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_af_missing")
+	authenticator := NewNauthilusSASLAuthenticator(cfg, "test_af_missing", testClient, mgr)
 	authReq := &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"}
 
 	result, err := authenticator.AuthenticateToken(ctx, "original@example.com", "any-token", authReq)
@@ -1053,11 +1030,8 @@ func TestNauthilusSASLAuthenticatorTokenJWKSAccountField(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldClient := httpClient
-	httpClient = server.Client()
-	defer func() { httpClient = oldClient }()
-	InitOIDCManager()
-	oidcManager.httpClient = server.Client()
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
 
 	cfg := &Config{DovecotSASL: map[string]Request{
 		"jwks_af": {
@@ -1074,7 +1048,7 @@ func TestNauthilusSASLAuthenticatorTokenJWKSAccountField(t *testing.T) {
 	}}
 
 	ctx := context.WithValue(t.Context(), loggerKey, slog.New(slog.DiscardHandler))
-	auth := NewNauthilusSASLAuthenticator(cfg, "jwks_af")
+	auth := NewNauthilusSASLAuthenticator(cfg, "jwks_af", testClient, mgr)
 	res, err := auth.AuthenticateToken(ctx, "ignored", signed, &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"})
 	if err != nil {
 		t.Fatalf("AuthenticateToken: %v", err)

@@ -57,11 +57,9 @@ type OIDCManager struct {
 	jwksMu     sync.RWMutex
 }
 
-var oidcManager *OIDCManager
-
-// InitOIDCManager initializes the OIDC manager
-func InitOIDCManager() {
-	oidcManager = &OIDCManager{
+// NewOIDCManager creates a new OIDCManager with the given HTTP client.
+func NewOIDCManager(httpClient *http.Client) *OIDCManager {
+	return &OIDCManager{
 		httpClient: httpClient,
 		tokens:     make(map[string]*OIDCToken),
 		discovery:  make(map[string]*OIDCDiscoveryResponse),
@@ -508,20 +506,18 @@ func (m *OIDCManager) getIntrospectionDiscovery(ctx context.Context, configurati
 	return disc, nil
 }
 
-// addOIDCAuth adds the OIDC Authorization header to the request if OIDC is enabled
-func addOIDCAuth(req *http.Request, requestName string, auth BackendOIDCAuth) (bool, string, error) {
+// addOIDCAuth adds the OIDC Authorization header to the request if OIDC is enabled.
+// The OIDCManager and logger are passed explicitly for dependency injection.
+func addOIDCAuth(req *http.Request, requestName string, auth BackendOIDCAuth, mgr *OIDCManager, logger *slog.Logger) (bool, string, error) {
 	if !auth.Enabled {
 		return false, "", nil
 	}
 
-	if oidcManager == nil {
+	if mgr == nil {
 		return false, "", errors.New("OIDC manager not initialized")
 	}
 
-	// We use the request's context
-	logger := req.Context().Value(loggerKey).(*slog.Logger)
-
-	token, err := oidcManager.GetToken(req.Context(), logger, auth)
+	token, err := mgr.GetToken(req.Context(), logger, auth)
 	if err != nil {
 		return false, "", fmt.Errorf("failed to get OIDC token for %s: %w", requestName, err)
 	}

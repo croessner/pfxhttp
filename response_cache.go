@@ -84,4 +84,3 @@ func (c *InMemoryResponseCache) Set(name, key string, resp CachedResponse) {
 }
 
 var _ ResponseCache = &InMemoryResponseCache{}
-var respCache ResponseCache

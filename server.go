@@ -52,7 +52,9 @@ type MultiServer struct {
 	name    string
 	address string
 
+	deps       *Deps
 	config     *Config
+	logger     *slog.Logger
 	ctx        context.Context
 	closer     context.CancelFunc
 	listener   net.Listener
@@ -60,12 +62,14 @@ type MultiServer struct {
 	workerPool WorkerPool
 }
 
-// NewMultiServer creates and initializes a new MultiServer instance with the provided context and config.
-func NewMultiServer(ctx *Context, config *Config, wp WorkerPool) GenericServer {
+// NewMultiServer creates and initializes a new MultiServer instance with the provided context and dependencies.
+func NewMultiServer(ctx context.Context, deps *Deps, wp WorkerPool) GenericServer {
 	childCtx, closer := context.WithCancel(ctx)
 
 	return &MultiServer{
-		config:     config,
+		deps:       deps,
+		config:     deps.Config,
+		logger:     deps.Logger,
 		ctx:        childCtx,
 		closer:     closer,
 		wg:         sync.WaitGroup{},
@@ -82,7 +86,7 @@ func (s *MultiServer) Listen(instance Listen) error {
 		err      error
 	)
 
-	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+	logger := s.logger
 
 	if instance.Type != "unix" {
 		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
@@ -172,7 +176,7 @@ func (s *MultiServer) Start(handler func(conn net.Conn)) error {
 		err  error
 	)
 
-	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+	logger := s.logger
 
 	for {
 		conn, err = s.listener.Accept()
@@ -215,9 +219,9 @@ func (s *MultiServer) Stop() {
 		s.closer()
 	}
 
-	s.wg.Wait()
-
 	_ = s.listener.Close()
+
+	s.wg.Wait()
 }
 
 func (s *MultiServer) GetContext() context.Context {
@@ -230,7 +234,7 @@ var _ GenericServer = (*MultiServer)(nil)
 func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 
-	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+	logger := s.logger
 
 	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
@@ -274,7 +278,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 				return
 			}
 
-			client := NewMapClient(s.ctx, s.config)
+			client := NewMapClient(s.deps)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()
@@ -303,7 +307,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 
-	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+	logger := s.logger
 
 	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
@@ -336,7 +340,7 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 			received := NewPostfixPolicyReceiver(s.name)
 			_ = received.ReadPolcy(policy)
 
-			client := NewPolicyClient(s.ctx, s.config)
+			client := NewPolicyClient(s.deps)
 			client.SetReceiver(received)
 
 			err = client.SendAndReceive()
@@ -381,7 +385,7 @@ func generateCookie() string {
 // It performs the server handshake, reads client handshake, then processes AUTH/CONT requests.
 func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
-	logger := s.GetContext().Value(loggerKey).(*slog.Logger)
+	logger := s.logger
 
 	logger.Info("New Dovecot SASL connection established", slog.String(LogKeyClient, clientAddr))
 
@@ -467,7 +471,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	// Track active mechanism sessions for multi-step auth (keyed by request ID)
 	activeMechanisms := make(map[string]SASLMechanism)
 	activeAuthRequests := make(map[string]*DovecotAuthRequest)
-	authenticator := NewNauthilusSASLAuthenticator(s.config, s.name)
+	authenticator := NewNauthilusSASLAuthenticator(s.config, s.name, s.deps.HTTPClient, s.deps.OIDCManager)
 
 	// Process AUTH and CONT commands
 	for {

@@ -19,13 +19,13 @@ func TestHttpClientConfiguration(t *testing.T) {
 		},
 	}
 
-	InitializeHttpClient(cfg)
+	client := InitializeHttpClient(cfg)
 
-	if httpClient.Timeout != 15*time.Second {
-		t.Errorf("Expected timeout 15s, got %v", httpClient.Timeout)
+	if client.Timeout != 15*time.Second {
+		t.Errorf("Expected timeout 15s, got %v", client.Timeout)
 	}
 
-	rt, ok := httpClient.Transport.(*userAgentRoundTripper)
+	rt, ok := client.Transport.(*userAgentRoundTripper)
 	if !ok {
 		t.Fatal("Transport is not userAgentRoundTripper")
 	}
@@ -45,10 +45,10 @@ func TestHttpClientConfiguration(t *testing.T) {
 
 func TestHttpClientDefaultTimeout(t *testing.T) {
 	cfg := &Config{}
-	InitializeHttpClient(cfg)
+	client := InitializeHttpClient(cfg)
 
-	if httpClient.Timeout != 60*time.Second {
-		t.Errorf("Expected default timeout 60s, got %v", httpClient.Timeout)
+	if client.Timeout != 60*time.Second {
+		t.Errorf("Expected default timeout 60s, got %v", client.Timeout)
 	}
 }
 
@@ -62,9 +62,9 @@ func TestHttpClientProxyConfiguration(t *testing.T) {
 		},
 	}
 
-	InitializeHttpClient(cfg)
+	client := InitializeHttpClient(cfg)
 
-	rt, ok := httpClient.Transport.(*userAgentRoundTripper)
+	rt, ok := client.Transport.(*userAgentRoundTripper)
 	if !ok {
 		t.Fatal("Transport is not userAgentRoundTripper")
 	}
