@@ -63,8 +63,6 @@ type MultiServer struct {
 	address string
 
 	deps       *Deps
-	config     *Config
-	logger     *slog.Logger
 	ctx        context.Context
 	closer     context.CancelFunc
 	listener   net.Listener
@@ -78,8 +76,6 @@ func NewMultiServer(ctx context.Context, deps *Deps, wp WorkerPool) GenericServe
 
 	return &MultiServer{
 		deps:       deps,
-		config:     deps.Config,
-		logger:     deps.Logger,
 		ctx:        childCtx,
 		closer:     closer,
 		wg:         sync.WaitGroup{},
@@ -95,8 +91,6 @@ func (s *MultiServer) Listen(instance Listen) error {
 		fileInfo os.FileInfo
 		err      error
 	)
-
-	logger := s.logger
 
 	if instance.Type != "unix" {
 		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
@@ -134,11 +128,11 @@ func (s *MultiServer) Listen(instance Listen) error {
 	if instance.Type == "unix" && instance.Mode != "" {
 		mode, err = strconv.ParseInt(instance.Mode, 8, 64)
 		if err != nil {
-			logger.Error("Could not parse socket mode", slog.String("error", err.Error()))
+			s.deps.GetLogger().Error("Could not parse socket mode", slog.String("error", err.Error()))
 		}
 
 		if err = os.Chmod(instance.Address, os.FileMode(mode)); err != nil {
-			logger.Error("Could not set permissions on socket", slog.String("error", err.Error()))
+			s.deps.GetLogger().Error("Could not set permissions on socket", slog.String("error", err.Error()))
 		}
 	}
 
@@ -148,7 +142,7 @@ func (s *MultiServer) Listen(instance Listen) error {
 		if instance.User != "" {
 			u, err := user.Lookup(instance.User)
 			if err != nil {
-				logger.Error("Could not lookup user", slog.String("user", instance.User), slog.String("error", err.Error()))
+				s.deps.GetLogger().Error("Could not lookup user", slog.String("user", instance.User), slog.String("error", err.Error()))
 			} else {
 				uid, _ = strconv.Atoi(u.Uid)
 			}
@@ -157,7 +151,7 @@ func (s *MultiServer) Listen(instance Listen) error {
 		if instance.Group != "" {
 			g, err := user.LookupGroup(instance.Group)
 			if err != nil {
-				logger.Error("Could not lookup group", slog.String("group", instance.Group), slog.String("error", err.Error()))
+				s.deps.GetLogger().Error("Could not lookup group", slog.String("group", instance.Group), slog.String("error", err.Error()))
 			} else {
 				gid, _ = strconv.Atoi(g.Gid)
 			}
@@ -165,12 +159,12 @@ func (s *MultiServer) Listen(instance Listen) error {
 
 		if uid != -1 || gid != -1 {
 			if err = os.Chown(instance.Address, uid, gid); err != nil {
-				logger.Error("Could not set ownership on socket", slog.String("error", err.Error()))
+				s.deps.GetLogger().Error("Could not set ownership on socket", slog.String("error", err.Error()))
 			}
 		}
 	}
 
-	logger.Info("Server is listening", slog.String("type", instance.Type), slog.String("address", s.address), slog.String("name", s.name), slog.String("kind", instance.Kind))
+	s.deps.GetLogger().Info("Server is listening", slog.String("type", instance.Type), slog.String("address", s.address), slog.String("name", s.name), slog.String("kind", instance.Kind))
 
 	if instance.WorkerPool.MaxWorkers > 0 {
 		s.workerPool = NewWorkerPool(s.ctx, instance.WorkerPool.MaxWorkers, instance.WorkerPool.MaxQueue, &s.wg)
@@ -186,18 +180,16 @@ func (s *MultiServer) Start(handler func(conn net.Conn)) error {
 		err  error
 	)
 
-	logger := s.logger
-
 	for {
 		conn, err = s.listener.Accept()
 		if errors.Is(err, net.ErrClosed) {
-			logger.Info("Server is shutting down", slog.String("address", s.address), slog.String("name", s.name))
+			s.deps.GetLogger().Info("Server is shutting down", slog.String("address", s.address), slog.String("name", s.name))
 
 			return nil
 		}
 
 		if err != nil {
-			logger.Error("Error accepting connection", slog.String("error", err.Error()))
+			s.deps.GetLogger().Error("Error accepting connection", slog.String("error", err.Error()))
 
 			continue
 		}
@@ -245,12 +237,15 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 	sessionID := generateSessionID()
 
-	logger := s.logger.With(slog.String(LogKeySession, sessionID))
+	// Helper that always returns a fresh logger with the session ID attached.
+	sessionLogger := func() *slog.Logger {
+		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
+	}
 
-	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
+	sessionLogger().Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
 	defer func() {
-		logger.Info("Connection closed", slog.String(LogKeyClient, clientAddr))
+		sessionLogger().Info("Connection closed", slog.String(LogKeyClient, clientAddr))
 
 		_ = conn.Close()
 
@@ -268,7 +263,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 					break
 				}
 
-				logger.Error("Error reading NetString", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Error reading NetString", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
@@ -279,7 +274,7 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 			}
 
 			subSessionID := generateSessionID()
-			reqLogger := logger.With(slog.String(LogKeySubSession, subSessionID))
+			reqLogger := sessionLogger().With(slog.String(LogKeySubSession, subSessionID))
 
 			reqLogger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", netString.String()))
 
@@ -322,12 +317,15 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 	sessionID := generateSessionID()
 
-	logger := s.logger.With(slog.String(LogKeySession, sessionID))
+	// Helper that always returns a fresh logger with the session ID attached.
+	sessionLogger := func() *slog.Logger {
+		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
+	}
 
-	logger.Info("New connection established", slog.String(LogKeyClient, clientAddr))
+	sessionLogger().Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
 	defer func() {
-		logger.Info("Connection closed", slog.String(LogKeyClient, clientAddr))
+		sessionLogger().Info("Connection closed", slog.String(LogKeyClient, clientAddr))
 
 		_ = conn.Close()
 
@@ -345,13 +343,13 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 					break
 				}
 
-				logger.Error("Error reading policy", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Error reading policy", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 
 				return
 			}
 
 			subSessionID := generateSessionID()
-			reqLogger := logger.With(slog.String(LogKeySubSession, subSessionID))
+			reqLogger := sessionLogger().With(slog.String(LogKeySubSession, subSessionID))
 
 			reqLogger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", policy.String()))
 
@@ -405,12 +403,17 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 	sessionID := generateSessionID()
 
-	logger := s.logger.With(slog.String(LogKeySession, sessionID))
+	// Helper that always returns a fresh logger with the session ID attached.
+	sessionLogger := func() *slog.Logger {
+		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
+	}
 
-	logger.Info("New Dovecot SASL connection established", slog.String(LogKeyClient, clientAddr))
+	config := s.deps.GetConfig()
+
+	sessionLogger().Info("New Dovecot SASL connection established", slog.String(LogKeyClient, clientAddr))
 
 	defer func() {
-		logger.Info("Dovecot SASL connection closed", slog.String(LogKeyClient, clientAddr))
+		sessionLogger().Info("Dovecot SASL connection closed", slog.String(LogKeyClient, clientAddr))
 		_ = conn.Close()
 		s.wg.Done()
 	}()
@@ -426,7 +429,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	}
 
 	// Add OAuth mechanisms if SASL OIDC validation is configured for this service
-	if settings, ok := s.config.DovecotSASL[s.name]; ok && settings.SASLOIDCAuth.Enabled {
+	if settings, ok := config.DovecotSASL[s.name]; ok && settings.SASLOIDCAuth.Enabled {
 		mechanisms = append(mechanisms,
 			DovecotMechanism{Name: "XOAUTH2", ForwardSecrecy: true},
 			DovecotMechanism{Name: "OAUTHBEARER", ForwardSecrecy: true},
@@ -444,12 +447,12 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	// Send server handshake
 	for _, line := range encoder.EncodeHandshake(handshake) {
 		if _, err := conn.Write([]byte(line)); err != nil {
-			logger.Error("Error writing handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+			sessionLogger().Error("Error writing handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 			return
 		}
 	}
 
-	logger.Debug("Handshake sent", slog.String(LogKeyClient, clientAddr))
+	sessionLogger().Debug("Handshake sent", slog.String(LogKeyClient, clientAddr))
 
 	// Read client handshake (VERSION + CPID)
 	clientHandshakeDone := false
@@ -459,7 +462,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 			if errors.Is(err, io.EOF) {
 				return
 			}
-			logger.Error("Error reading client handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+			sessionLogger().Error("Error reading client handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 			return
 		}
 
@@ -468,30 +471,30 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 		case DovecotCmdVersion:
 			major, _, err := decoder.DecodeVersion(args)
 			if err != nil {
-				logger.Error("Invalid client VERSION", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Invalid client VERSION", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 				return
 			}
 			if major != DovecotProtoVersionMajor {
-				logger.Error("Unsupported protocol version", slog.String(LogKeyClient, clientAddr), slog.Int("major", major))
+				sessionLogger().Error("Unsupported protocol version", slog.String(LogKeyClient, clientAddr), slog.Int("major", major))
 				return
 			}
 		case DovecotCmdCPID:
 			cpid, err := decoder.DecodeCPID(args)
 			if err != nil {
-				logger.Error("Invalid CPID", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Invalid CPID", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 				return
 			}
-			logger.Debug("Client CPID received", slog.String(LogKeyClient, clientAddr), slog.String("cpid", cpid))
+			sessionLogger().Debug("Client CPID received", slog.String(LogKeyClient, clientAddr), slog.String("cpid", cpid))
 			clientHandshakeDone = true
 		default:
-			logger.Warn("Unexpected command during handshake", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
+			sessionLogger().Warn("Unexpected command during handshake", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
 		}
 	}
 
 	// Track active mechanism sessions for multi-step auth (keyed by request ID)
 	activeMechanisms := make(map[string]SASLMechanism)
 	activeAuthRequests := make(map[string]*DovecotAuthRequest)
-	authenticator := NewNauthilusSASLAuthenticator(s.config, s.name, s.deps.HTTPClient, s.deps.OIDCManager)
+	authenticator := NewNauthilusSASLAuthenticator(config, s.name, s.deps.GetHTTPClient(), s.deps.GetOIDCManager())
 
 	// Process AUTH and CONT commands
 	for {
@@ -511,12 +514,12 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || isConnectionResetError(err) {
 					return
 				}
-				logger.Error("Error reading command", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Error reading command", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 				return
 			}
 
 			subSessionID := generateSessionID()
-			reqLogger := logger.With(slog.String(LogKeySubSession, subSessionID))
+			reqLogger := sessionLogger().With(slog.String(LogKeySubSession, subSessionID))
 
 			redacted := redactDovecotLine(strings.TrimSpace(line))
 			reqLogger.Debug("Incoming Dovecot SASL request", slog.String(LogKeyClient, clientAddr), slog.String("request", redacted))

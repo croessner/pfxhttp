@@ -34,6 +34,10 @@ func NewWorkerPool(ctx context.Context, maxWorkers, queueSize int, wg *sync.Wait
 		queueSize = 1
 	}
 
+	if wg == nil {
+		wg = &sync.WaitGroup{}
+	}
+
 	wp := &channelWorkerPool{
 		jobQueue: make(chan Job, queueSize),
 		ctx:      ctx,

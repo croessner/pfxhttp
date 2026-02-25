@@ -73,7 +73,7 @@ func TestMapClient_UsesCacheOnBackendFailure(t *testing.T) {
 
 	recv := &PostfixMapReceiver{}
 	_ = recv.ReadNetString(NewNetStringFromString("map1 key-123"))
-	client := NewMapClient(deps, deps.Logger)
+	client := NewMapClient(deps, deps.GetLogger())
 	client.SetReceiver(recv)
 
 	if err := client.SendAndReceive(); err != nil {
@@ -110,7 +110,7 @@ func TestPolicyClient_UsesCacheOnBackendFailure(t *testing.T) {
 		RespCache:  cache,
 	}
 
-	client := NewPolicyClient(deps, deps.Logger)
+	client := NewPolicyClient(deps, deps.GetLogger())
 	client.SetReceiver(recv)
 
 	if err := client.SendAndReceive(); err != nil {
@@ -146,7 +146,7 @@ func TestClients_UpdateCacheOnSuccess(t *testing.T) {
 
 	recv := &PostfixMapReceiver{}
 	_ = recv.ReadNetString(NewNetStringFromString("map1 key-xyz"))
-	client := NewMapClient(deps, deps.Logger)
+	client := NewMapClient(deps, deps.GetLogger())
 	client.SetReceiver(recv)
 
 	if err := client.SendAndReceive(); err != nil {
@@ -181,7 +181,7 @@ func TestMapClient_DoesNotCacheOnNotFoundOrPerm(t *testing.T) {
 
 	recv := &PostfixMapReceiver{}
 	_ = recv.ReadNetString(NewNetStringFromString("map1 key-no-cache"))
-	client := NewMapClient(deps, deps.Logger)
+	client := NewMapClient(deps, deps.GetLogger())
 	client.SetReceiver(recv)
 	_ = client.SendAndReceive()
 	if _, ok := cache.Get("map1", "key-no-cache"); ok {

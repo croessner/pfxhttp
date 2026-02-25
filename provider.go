@@ -23,6 +23,7 @@ func ProvideConfig() (*Config, error) {
 }
 
 // ProvideLogger creates a structured logger based on the configuration.
+// Also used during reload via CreateLogger.
 func ProvideLogger(cfg *Config) *slog.Logger {
 	handlerOpts := &slog.HandlerOptions{
 		AddSource: false,

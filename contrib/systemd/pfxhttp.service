@@ -9,6 +9,7 @@ Group=root
 EnvironmentFile=-/etc/default/pfxhttp
 # Be explicit: point to the config file in /etc to avoid search path surprises
 ExecStart=/usr/local/sbin/pfxhttp --config /etc/pfxhttp/pfxhttp.yml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
 

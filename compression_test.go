@@ -112,7 +112,7 @@ func TestMapClient_RequestAndResponseCompression(t *testing.T) {
 		HTTPClient: httpClient,
 	}
 
-	client := NewMapClient(deps, deps.Logger)
+	client := NewMapClient(deps, deps.GetLogger())
 	client.SetReceiver(&testReceiver{name: "demo", key: "abc"})
 
 	if err := client.SendAndReceive(); err != nil {
@@ -167,7 +167,7 @@ func TestPolicyClient_RequestCompression_ResponsePlain(t *testing.T) {
 		HTTPClient: httpClient,
 	}
 
-	client := NewPolicyClient(deps, deps.Logger)
+	client := NewPolicyClient(deps, deps.GetLogger())
 	client.SetReceiver(&testReceiver{name: "policy", key: "abc"})
 
 	if err := client.SendAndReceive(); err != nil {

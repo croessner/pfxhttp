@@ -285,6 +285,21 @@ func NewConfigFile() (cfg *Config, err error) {
 	return cfg, err
 }
 
+// ReloadConfig re-reads the configuration file and returns a new Config instance.
+func ReloadConfig() (*Config, error) {
+	cfg := &Config{}
+
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("error re-reading config: %w", err)
+	}
+
+	if err := cfg.HandleConfig(); err != nil {
+		return nil, fmt.Errorf("config validation failed: %w", err)
+	}
+
+	return cfg, nil
+}
+
 func isValidOctalMode(fl validator.FieldLevel) bool {
 	mode := fl.Field().String()
 
