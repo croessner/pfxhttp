@@ -335,8 +335,8 @@ func (m *OAuthBearerMechanism) parseToken(data []byte) (*SASLAuthResult, *SASLCr
 	str := string(data)
 
 	// GS2 header: "n,a=<authzid>," or "n,,"
-	gs2End := strings.Index(str, ",")
-	if gs2End == -1 {
+	_, after, ok := strings.Cut(str, ",")
+	if !ok {
 		return &SASLAuthResult{
 			Success: false,
 			Reason:  "invalid OAUTHBEARER data: missing GS2 header",
@@ -344,17 +344,17 @@ func (m *OAuthBearerMechanism) parseToken(data []byte) (*SASLAuthResult, *SASLCr
 	}
 
 	// Find the second comma (end of GS2 header)
-	rest := str[gs2End+1:]
-	commaIdx := strings.Index(rest, ",")
-	if commaIdx == -1 {
+	rest := after
+	before, after, ok := strings.Cut(rest, ",")
+	if !ok {
 		return &SASLAuthResult{
 			Success: false,
 			Reason:  "invalid OAUTHBEARER data: incomplete GS2 header",
 		}, nil
 	}
 
-	authzIDPart := rest[:commaIdx]
-	kvPart := rest[commaIdx+1:]
+	authzIDPart := before
+	kvPart := after
 
 	var authzID string
 
@@ -365,8 +365,8 @@ func (m *OAuthBearerMechanism) parseToken(data []byte) (*SASLAuthResult, *SASLCr
 	// Parse key-value pairs separated by \x01
 	var token string
 
-	parts := strings.Split(kvPart, "\x01")
-	for _, part := range parts {
+	parts := strings.SplitSeq(kvPart, "\x01")
+	for part := range parts {
 		if after, found := strings.CutPrefix(part, "auth=Bearer "); found {
 			token = after
 		} else if after, found := strings.CutPrefix(part, "auth=bearer "); found {
