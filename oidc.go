@@ -92,7 +92,7 @@ func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth Ba
 
 	logger.Debug("Fetching new OIDC token", "client_id", auth.ClientID)
 
-	newToken, err := m.fetchToken(ctx, logger, auth)
+	newToken, err := m.fetchToken(ctx, auth)
 	if err != nil {
 		return "", err
 	}
@@ -149,7 +149,7 @@ func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (*OIDCDiscov
 	return &d, nil
 }
 
-func (m *OIDCManager) fetchToken(ctx context.Context, logger *slog.Logger, auth BackendOIDCAuth) (*OIDCToken, error) {
+func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (*OIDCToken, error) {
 	disc, err := m.getDiscovery(ctx, auth.ConfigurationURI)
 	if err != nil {
 		return nil, err
@@ -399,7 +399,16 @@ func (j JWK) publicKey() (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid EC y: %w", err)
 		}
-		pub := &ecdsa.PublicKey{Curve: curve, X: new(big.Int).SetBytes(xBytes), Y: new(big.Int).SetBytes(yBytes)}
+		// Build uncompressed EC point: 0x04 || X || Y (each coordinate padded to curve byte size)
+		byteLen := (curve.Params().BitSize + 7) / 8
+		point := make([]byte, 1+2*byteLen)
+		point[0] = 0x04
+		copy(point[1+byteLen-len(xBytes):1+byteLen], xBytes)
+		copy(point[1+2*byteLen-len(yBytes):1+2*byteLen], yBytes)
+		pub, err := ecdsa.ParseUncompressedPublicKey(curve, point)
+		if err != nil {
+			return nil, fmt.Errorf("invalid EC public key: %w", err)
+		}
 		return pub, nil
 	case "OKP": // EdDSA
 		xBytes, err := base64.RawURLEncoding.DecodeString(j.X)
