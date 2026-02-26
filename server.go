@@ -232,25 +232,34 @@ func (s *MultiServer) GetContext() context.Context {
 
 var _ GenericServer = (*MultiServer)(nil)
 
-// HandleNetStringConnection manages an individual client connection, processing requests and sending responses in NetString format.
-func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
-	clientAddr := conn.RemoteAddr().String()
+// setupConnection initializes a new client connection by generating a session ID, creating a session logger,
+// and logging the connection establishment. It returns the client address, the session logger factory,
+// and a cleanup function that should be deferred by the caller.
+func (s *MultiServer) setupConnection(conn net.Conn) (clientAddr string, sessionLogger func() *slog.Logger, cleanup func()) {
+	clientAddr = conn.RemoteAddr().String()
 	sessionID := generateSessionID()
 
-	// Helper that always returns a fresh logger with the session ID attached.
-	sessionLogger := func() *slog.Logger {
+	sessionLogger = func() *slog.Logger {
 		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
 	}
 
 	sessionLogger().Info("New connection established", slog.String(LogKeyClient, clientAddr))
 
-	defer func() {
+	cleanup = func() {
 		sessionLogger().Info("Connection closed", slog.String(LogKeyClient, clientAddr))
 
 		_ = conn.Close()
 
 		s.wg.Done()
-	}()
+	}
+
+	return
+}
+
+// HandleNetStringConnection manages an individual client connection, processing requests and sending responses in NetString format.
+func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
+	clientAddr, sessionLogger, cleanup := s.setupConnection(conn)
+	defer cleanup()
 
 	for {
 		select {
@@ -314,23 +323,8 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 
 // HandlePolicyServiceConnection manages a client connection for the Postfix policy service, handling requests and responses.
 func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
-	clientAddr := conn.RemoteAddr().String()
-	sessionID := generateSessionID()
-
-	// Helper that always returns a fresh logger with the session ID attached.
-	sessionLogger := func() *slog.Logger {
-		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
-	}
-
-	sessionLogger().Info("New connection established", slog.String(LogKeyClient, clientAddr))
-
-	defer func() {
-		sessionLogger().Info("Connection closed", slog.String(LogKeyClient, clientAddr))
-
-		_ = conn.Close()
-
-		s.wg.Done()
-	}()
+	clientAddr, sessionLogger, cleanup := s.setupConnection(conn)
+	defer cleanup()
 
 	for {
 		select {
@@ -657,12 +651,7 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeMechanisms, authReq.ID)
 		delete(activeAuthRequests, authReq.ID)
 
-		resp := encoder.EncodeFail(authReq.ID, result.Reason, result.Username, result.Temporary)
-		logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
-
-		if _, err := conn.Write([]byte(resp)); err != nil {
-			logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
-		}
+		sendDovecotFail(conn, encoder, logger, clientAddr, authReq.ID, result.Reason, result.Username, result.Temporary)
 
 		return
 	}
@@ -723,13 +712,18 @@ func (s *MultiServer) handleSASLResult(
 				slog.String("mechanism", authReq.Mechanism),
 				slog.String("reason", authResult.Reason))
 
-			resp := encoder.EncodeFail(authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
-			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
-
-			if _, wErr := conn.Write([]byte(resp)); wErr != nil {
-				logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
-			}
+			sendDovecotFail(conn, encoder, logger, clientAddr, authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
 		}
+	}
+}
+
+// sendDovecotFail encodes and sends a FAIL response over the Dovecot SASL protocol, logging the response and any write errors.
+func sendDovecotFail(conn net.Conn, encoder *DovecotEncoder, logger *slog.Logger, clientAddr string, id string, reason string, username string, temporary bool) {
+	resp := encoder.EncodeFail(id, reason, username, temporary)
+	logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
+
+	if _, err := conn.Write([]byte(resp)); err != nil {
+		logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 	}
 }
 
