@@ -672,13 +672,15 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeMechanisms, authReq.ID)
 		delete(activeAuthRequests, authReq.ID)
 
+		authCtx := context.WithValue(s.ctx, loggerKey, logger)
+
 		var authResult *SASLAuthResult
 		var err error
 
 		if IsOAuthMechanism(authReq.Mechanism) {
-			authResult, err = authenticator.AuthenticateToken(s.ctx, creds.Username, creds.Token, authReq)
+			authResult, err = authenticator.AuthenticateToken(authCtx, creds.Username, creds.Token, authReq)
 		} else {
-			authResult, err = authenticator.AuthenticatePassword(s.ctx, creds.Username, creds.Password, authReq)
+			authResult, err = authenticator.AuthenticatePassword(authCtx, creds.Username, creds.Password, authReq)
 		}
 
 		if err != nil {

@@ -527,11 +527,11 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
 
 	// Add OIDC auth for backend communication
-	failed, errMsg, _ := addOIDCAuth(httpReq, a.name, settings.BackendOIDCAuth, a.oidcManager, logger)
-	if failed {
+	_, _, oidcErr := addOIDCAuth(httpReq, a.name, settings.BackendOIDCAuth, a.oidcManager, logger)
+	if oidcErr != nil {
 		return &SASLAuthResult{
 			Success:   false,
-			Reason:    errMsg,
+			Reason:    oidcErr.Error(),
 			Temporary: true,
 		}, nil
 	}

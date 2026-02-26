@@ -320,10 +320,10 @@ func (c *MapClient) SendAndReceive() error {
 	}
 
 	// Add OIDC token if enabled
-	failed, errMsg, err := addOIDCAuth(req, c.receiver.GetName(), settings.BackendOIDCAuth, c.oidcManager, c.logger)
-	if failed {
+	_, _, err = addOIDCAuth(req, c.receiver.GetName(), settings.BackendOIDCAuth, c.oidcManager, c.logger)
+	if err != nil {
 		c.sender.SetStatus("TEMP")
-		c.sender.SetData(errMsg)
+		c.sender.SetData(err.Error())
 
 		return nil
 	}
@@ -571,10 +571,10 @@ func (p *PolicyClient) SendAndReceive() error {
 	}
 
 	// Add OIDC token if enabled
-	failed, errMsg, err := addOIDCAuth(req, p.receiver.GetName(), settings.BackendOIDCAuth, p.oidcManager, p.logger)
-	if failed {
+	_, _, err = addOIDCAuth(req, p.receiver.GetName(), settings.BackendOIDCAuth, p.oidcManager, p.logger)
+	if err != nil {
 		p.sender.SetStatus("DEFER")
-		p.sender.SetData(errMsg)
+		p.sender.SetData(err.Error())
 
 		return nil
 	}
