@@ -329,6 +329,12 @@ func (c *MapClient) SendAndReceive() error {
 	}
 
 	resp, err := c.httpClient.Do(req)
+	if resp != nil && resp.Body != nil {
+		defer func(Body io.ReadCloser) {
+			_ = Body.Close()
+		}(resp.Body)
+	}
+
 	if err != nil {
 		// On backend errors, try cache first if available
 		if c.respCache != nil {
@@ -580,6 +586,12 @@ func (p *PolicyClient) SendAndReceive() error {
 	}
 
 	resp, err := p.httpClient.Do(req)
+	if resp != nil && resp.Body != nil {
+		defer func(Body io.ReadCloser) {
+			_ = Body.Close()
+		}(resp.Body)
+	}
+
 	if err != nil {
 		// Try cache on backend failure
 		if p.respCache != nil {
