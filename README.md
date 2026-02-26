@@ -274,6 +274,54 @@ dovecot_sasl:
 
 **Important**: Postfix has a hardcoded socket map reply size limit of **100,000 bytes** (Postfix 3.9.1 or older).
 
+### Section Defaults
+
+Each section (`socket_maps`, `policy_services`, `dovecot_sasl`) supports an optional `defaults` block. Values defined in `defaults` are automatically inherited by all entries in that section. Explicit values in an entry override the inherited defaults.
+
+- **Additive merge for `custom_headers`**: Headers from `defaults` are prepended to entry-specific headers (not replaced).
+- The `defaults` key is **reserved** and cannot be used as a listener name.
+- `defaults` is optional — existing configurations without it continue to work unchanged.
+
+Example with defaults:
+```yaml
+socket_maps:
+  defaults:
+    target: "https://api.example.com/postfix/map"
+    http_auth_basic: "user:secret"
+    http_response_compression: true
+    payload: >
+      {
+        "key": "{{ .Key }}"
+      }
+    status_code: 200
+    value_field: "result"
+    error_field: "error"
+
+  relay_domains:
+    custom_headers:
+      - "X-Pfx-Name: relay_domains"
+
+  relay_recipient_maps:
+    custom_headers:
+      - "X-Pfx-Name: relay_recipient_maps"
+
+  transport_maps:
+    custom_headers:
+      - "X-Pfx-Name: transport_maps"
+```
+
+Each entry inherits `target`, `http_auth_basic`, `payload`, `status_code`, etc. from `defaults` and only needs to specify what differs.
+
+### HTTP Basic Authentication
+
+Instead of manually adding an `Authorization: Basic ...` header, you can use the `http_auth_basic` field:
+
+```yaml
+http_auth_basic: "user:password"
+```
+
+The value is automatically Base64-encoded and set as an `Authorization: Basic <base64>` header. This field can be used both in `defaults` and in individual entries.
+
 ### Response Cache
 
 Pfxhttp includes an optional in-memory response cache. It always forwards responses from your backend, but if the backend becomes unavailable, it can serve a previously cached response for a configurable time (TTL).

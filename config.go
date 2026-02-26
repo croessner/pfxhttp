@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -112,8 +114,12 @@ type SASLOIDCAuth struct {
 	AccountClaim string `mapstructure:"account_claim" validate:"omitempty,printascii"`
 }
 
+// reservedConfigKey is the key name reserved for section-level defaults.
+const reservedConfigKey = "defaults"
+
 type Request struct {
-	Target                  string          `mapstructure:"target" validate:"required,http_url"`
+	Target                  string          `mapstructure:"target" validate:"omitempty,http_url"`
+	HTTPAuthBasic           string          `mapstructure:"http_auth_basic" validate:"omitempty"`
 	CustomHeaders           []string        `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
 	Payload                 string          `mapstructure:"payload" validate:"omitempty,ascii"`
 	StatusCode              int             `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
@@ -127,10 +133,163 @@ type Request struct {
 	HTTPResponseCompression bool            `mapstructure:"http_response_compression"`
 }
 
+// mergeRequest merges defaults into a specific entry.
+// Explicit (non-zero) values in entry take precedence over defaults.
+// CustomHeaders are merged additively (defaults first, then entry-specific).
+func mergeRequest(defaults, entry Request) Request {
+	if entry.Target == "" {
+		entry.Target = defaults.Target
+	}
+
+	if entry.HTTPAuthBasic == "" {
+		entry.HTTPAuthBasic = defaults.HTTPAuthBasic
+	}
+
+	// Additive merge for custom_headers: defaults headers first, then entry-specific
+	if len(defaults.CustomHeaders) > 0 {
+		merged := make([]string, 0, len(defaults.CustomHeaders)+len(entry.CustomHeaders))
+		merged = append(merged, defaults.CustomHeaders...)
+		merged = append(merged, entry.CustomHeaders...)
+		entry.CustomHeaders = merged
+	}
+
+	if entry.Payload == "" {
+		entry.Payload = defaults.Payload
+	}
+
+	if entry.StatusCode == 0 {
+		entry.StatusCode = defaults.StatusCode
+	}
+
+	if entry.ValueField == "" {
+		entry.ValueField = defaults.ValueField
+	}
+
+	if entry.ErrorField == "" {
+		entry.ErrorField = defaults.ErrorField
+	}
+
+	if entry.NoErrorValue == "" {
+		entry.NoErrorValue = defaults.NoErrorValue
+	}
+
+	if !entry.HTTPRequestCompression {
+		entry.HTTPRequestCompression = defaults.HTTPRequestCompression
+	}
+
+	if !entry.HTTPResponseCompression {
+		entry.HTTPResponseCompression = defaults.HTTPResponseCompression
+	}
+
+	if !entry.BackendOIDCAuth.Enabled && defaults.BackendOIDCAuth.Enabled {
+		entry.BackendOIDCAuth = defaults.BackendOIDCAuth
+	}
+
+	if !entry.SASLOIDCAuth.Enabled && defaults.SASLOIDCAuth.Enabled {
+		entry.SASLOIDCAuth = defaults.SASLOIDCAuth
+	}
+
+	if entry.DefaultLocalPort == "" {
+		entry.DefaultLocalPort = defaults.DefaultLocalPort
+	}
+
+	return entry
+}
+
+// resolveDefaults extracts the optional "defaults" key from a section map,
+// merges its values into all other entries, and returns a flat map without
+// the "defaults" key.
+func resolveDefaults(raw map[string]Request) map[string]Request {
+	if raw == nil {
+		return nil
+	}
+
+	defaults, hasDefaults := raw[reservedConfigKey]
+
+	result := make(map[string]Request, len(raw))
+
+	for name, entry := range maps.All(raw) {
+		if name == reservedConfigKey {
+			continue
+		}
+
+		if hasDefaults {
+			entry = mergeRequest(defaults, entry)
+		}
+
+		result[name] = entry
+	}
+
+	return result
+}
+
+// validateTargets checks that all entries in a section map have a non-empty target URL.
+func validateTargets(section map[string]Request, sectionName string) error {
+	for name, entry := range maps.All(section) {
+		if entry.Target == "" {
+			return fmt.Errorf("entry '%s' in '%s' is missing a required 'target' URL", name, sectionName)
+		}
+	}
+
+	return nil
+}
+
+// validateNoReservedKeys checks that no listener references the reserved "defaults" key.
+func validateNoReservedKeys(cfg *Config) error {
+	for _, listen := range cfg.Server.Listen {
+		if listen.Name == reservedConfigKey {
+			return fmt.Errorf("listener name '%s' is reserved and cannot be used", reservedConfigKey)
+		}
+	}
+
+	return nil
+}
+
+// resolveHTTPAuthBasic converts the http_auth_basic field into a Base64-encoded
+// Authorization header and prepends it to CustomHeaders.
+func resolveHTTPAuthBasic(section map[string]Request) {
+	for name, entry := range maps.All(section) {
+		if entry.HTTPAuthBasic != "" {
+			encoded := base64.StdEncoding.EncodeToString([]byte(entry.HTTPAuthBasic))
+			entry.CustomHeaders = append([]string{"Authorization: Basic " + encoded}, entry.CustomHeaders...)
+			entry.HTTPAuthBasic = ""
+			section[name] = entry
+		}
+	}
+}
+
 func (cfg *Config) HandleConfig() error {
 
 	err := viper.Unmarshal(cfg)
 	if err != nil {
+		return err
+	}
+
+	// Validate reserved keywords before resolving defaults
+	if err := validateNoReservedKeys(cfg); err != nil {
+		return err
+	}
+
+	// Resolve defaults for each section
+	cfg.SocketMaps = resolveDefaults(cfg.SocketMaps)
+	cfg.PolicyServices = resolveDefaults(cfg.PolicyServices)
+	cfg.DovecotSASL = resolveDefaults(cfg.DovecotSASL)
+
+	// Resolve http_auth_basic into Authorization headers
+	resolveHTTPAuthBasic(cfg.SocketMaps)
+	resolveHTTPAuthBasic(cfg.PolicyServices)
+	resolveHTTPAuthBasic(cfg.DovecotSASL)
+
+	// Validate that all entries have a target after defaults merge
+	if err := validateTargets(cfg.SocketMaps, "socket_maps"); err != nil {
+		return err
+	}
+
+	if err := validateTargets(cfg.PolicyServices, "policy_services"); err != nil {
+		return err
+	}
+
+	if err := validateTargets(cfg.DovecotSASL, "dovecot_sasl"); err != nil {
 		return err
 	}
 
