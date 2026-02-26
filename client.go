@@ -375,6 +375,13 @@ func (c *MapClient) SendAndReceive() error {
 		}
 	}
 
+	if resp == nil {
+		c.sender.SetStatus("TEMP")
+		c.sender.SetData("no response received")
+
+		return nil
+	}
+
 	err = c.handleResponse(resp, settings)
 
 	// Cache only on successful definitive result
@@ -619,6 +626,13 @@ func (p *PolicyClient) SendAndReceive() error {
 				"error", err.Error())
 		}
 
+		p.sender.SetStatus("DEFER")
+		p.sender.SetData(TempServerProblem)
+
+		return nil
+	}
+
+	if resp == nil {
 		p.sender.SetStatus("DEFER")
 		p.sender.SetData(TempServerProblem)
 
