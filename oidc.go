@@ -128,7 +128,11 @@ func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (*OIDCDiscov
 	if err != nil {
 		return nil, fmt.Errorf("discovery request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			slog.Default().Error("failed to close discovery response body", "error", cerr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("discovery returned status %d", resp.StatusCode)
@@ -217,7 +221,11 @@ func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (*OI
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			slog.Default().Error("failed to close token response body", "error", cerr)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -341,7 +349,11 @@ func (m *OIDCManager) getJWKS(ctx context.Context, jwksURI string, ttl time.Dura
 	if err != nil {
 		return JWKS{}, fmt.Errorf("JWKS request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			slog.Default().Error("failed to close JWKS response body", "error", cerr)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return JWKS{}, fmt.Errorf("JWKS returned status %d", resp.StatusCode)
 	}
@@ -497,7 +509,7 @@ func (m *OIDCManager) VerifyJWTWithJWKS(ctx context.Context, configurationURI, t
 	}
 
 	// return raw map[string]any
-	return map[string]any(claims), nil
+	return claims, nil
 }
 
 // getIntrospectionDiscovery fetches the OIDC discovery document and returns it if it contains
