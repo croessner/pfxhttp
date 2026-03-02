@@ -16,8 +16,13 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
   * [Configuration](#configuration)
     * [HTTP Client User-Agent](#http-client-user-agent)
     * [Server Settings](#server-settings)
+    * [Section Defaults](#section-defaults)
+    * [HTTP Basic Authentication](#http-basic-authentication)
     * [Response Cache](#response-cache)
     * [Worker Pool](#worker-pool)
+    * [Privilege Dropping & Chroot](#privilege-dropping--chroot)
+      * [Privilege Dropping](#privilege-dropping)
+      * [Chroot](#chroot)
     * [OIDC Authentication](#oidc-authentication)
     * [HTTP Request/Response Compression](#http-requestresponse-compression)
     * [Integrating with Postfix](#integrating-with-postfix)
@@ -79,7 +84,7 @@ SyslogIdentifier=pfxhttp
 MemoryMax=50M
 CPUQuota=10%
 
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_CHOWN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_CHOWN CAP_SYS_CHROOT
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
@@ -140,6 +145,8 @@ Pfxhttp is configured through a YAML file named `pfxhttp.yml` (or a custom file 
 The `server` section contains global options, including:
 
 - **Listeners**: Define socket map and policy service listeners for Postfix integration.
+- **Privilege Dropping**: Run as a specific user/group after binding listeners (`run_as_user`, `run_as_group`).
+- **Chroot**: Optionally isolate the process in a chroot jail (`chroot`).
 - **Logging**: Enable JSON-formatted logs and set verbosity (`debug`, `info`, or `error`).
 - **HTTP Client Options**: Configure connection limits, timeouts, and optional TLS settings.
 - **OIDC Authentication**: Configure OIDC authentication (Client Credentials Flow) for HTTP requests with automatic token management.
@@ -150,6 +157,10 @@ Below is a detailed example configuration for `pfxhttp.yml`:
 
 ```yaml
 server:
+  run_as_user: "pfxhttp"
+  run_as_group: "pfxhttp"
+  # chroot: "/var/lib/pfxhttp"
+
   listen:
     - kind: "socket_map"
       name: "demo_map"
@@ -378,6 +389,52 @@ Behavior:
 - **Back-Pressure**: When the queue is full, the server will wait until a worker becomes available before accepting more connections. This naturally slows down the sender (Postfix).
 - **Precedence**: A worker pool defined in the `listen` section takes precedence over the global `worker_pool` in the `server` section.
 - **Defaults**: If no `worker_pool` is configured in the `server` section, Pfxhttp automatically initializes a global worker pool with `max_workers` set to `2 * GOMAXPROCS` and `max_queue` set to `10 * max_workers`.
+
+### Privilege Dropping & Chroot
+
+Pfxhttp can drop root privileges after startup and optionally run inside a chroot jail for additional isolation.
+
+#### Privilege Dropping
+
+When started as root, Pfxhttp can drop to a non-root user and group after binding all listeners:
+
+```yaml
+server:
+  run_as_user: "pfxhttp"
+  run_as_group: "pfxhttp"
+```
+
+The user and group must exist on the system. Supplementary groups are cleared before switching.
+
+#### Chroot
+
+Pfxhttp supports an optional `chroot` setting that changes the process root directory after binding listeners but before dropping privileges:
+
+```yaml
+server:
+  run_as_user: "pfxhttp"
+  run_as_group: "pfxhttp"
+  chroot: "/var/lib/pfxhttp"
+```
+
+The startup order is:
+
+1. **Resolve credentials** — look up user/group in `/etc/passwd` and `/etc/group`
+2. **Bind listeners** — bind to privileged ports or Unix sockets
+3. **Chroot** — change root directory
+4. **Drop privileges** — switch to the resolved UID/GID
+
+The chroot directory **must** contain the following files for DNS resolution to work:
+
+- `etc/resolv.conf`
+- `etc/hosts`
+- `etc/nsswitch.conf`
+
+If any of these files are missing, Pfxhttp will refuse to start and log an error listing the missing files.
+
+When using TLS with a custom `root_ca`, the CA certificate file must also be present inside the chroot (e.g., `/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt`).
+
+> **Note:** When using chroot, the systemd unit file must run the service as root (remove `User=` and `Group=` directives) and include `CAP_SYS_CHROOT` in `CapabilityBoundingSet`. Use `run_as_user` and `run_as_group` in the configuration file instead.
 
 ### OIDC Authentication
 

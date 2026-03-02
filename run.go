@@ -51,6 +51,20 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 
 	registry := NewListenerRegistry()
 
+	// Resolve user/group credentials before chroot (needs /etc/passwd and /etc/group)
+	var creds *Credentials
+
+	if cfg.Server.RunAsUser != "" || cfg.Server.RunAsGroup != "" {
+		var err error
+
+		creds, err = ResolveCredentials(cfg.Server.RunAsUser, cfg.Server.RunAsGroup)
+		if err != nil {
+			deps.GetLogger().Error("Failed to resolve credentials", slog.String("error", err.Error()))
+
+			return
+		}
+	}
+
 	// Create global worker pool if configured
 	var globalWorkerPool WorkerPool
 
@@ -69,9 +83,20 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 		}
 	}
 
-	// Drop privileges after all listeners are bound
-	if cfg.Server.RunAsUser != "" || cfg.Server.RunAsGroup != "" {
-		if err := DropPrivileges(cfg.Server.RunAsUser, cfg.Server.RunAsGroup, deps.GetLogger()); err != nil {
+	// Perform chroot after binding listeners but before dropping privileges
+	if cfg.Server.Chroot != "" {
+		if err := PerformChroot(cfg.Server.Chroot, deps.GetLogger()); err != nil {
+			deps.GetLogger().Error("Failed to chroot", slog.String("error", err.Error()))
+
+			registry.StopAll()
+
+			return
+		}
+	}
+
+	// Drop privileges using pre-resolved credentials
+	if creds != nil {
+		if err := DropPrivileges(creds, deps.GetLogger()); err != nil {
 			deps.GetLogger().Error("Failed to drop privileges", slog.String("error", err.Error()))
 
 			registry.StopAll()

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -879,28 +880,109 @@ func (s *MultiServer) readPolicy(conn net.Conn) (Policy, error) {
 	return policy, nil
 }
 
-// DropPrivileges drops the process's root privileges to the specified user and group.
-func DropPrivileges(runAsUser, runAsGroup string, logger *slog.Logger) error {
-	if os.Getuid() != 0 {
+// requiredChrootFiles lists files that must exist inside the chroot directory
+// for the Go runtime to function correctly (DNS resolution, name lookups).
+var requiredChrootFiles = []string{
+	"etc/resolv.conf",
+	"etc/hosts",
+	"etc/nsswitch.conf",
+}
+
+// PerformChroot changes the root directory of the current process to the specified path.
+func PerformChroot(chrootDir string, logger *slog.Logger) error {
+	if chrootDir == "" {
 		return nil
 	}
 
-	var uid, gid int
+	if os.Getuid() != 0 {
+		return fmt.Errorf("chroot requires root privileges")
+	}
+
+	// Verify that essential runtime files exist inside the chroot
+	var missing []string
+
+	for _, f := range requiredChrootFiles {
+		path := filepath.Join(chrootDir, f)
+		if _, err := os.Stat(path); err != nil {
+			missing = append(missing, f)
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("chroot %s is missing required files: %s", chrootDir, strings.Join(missing, ", "))
+	}
+
+	if err := syscall.Chroot(chrootDir); err != nil {
+		return fmt.Errorf("could not chroot to %s: %w", chrootDir, err)
+	}
+
+	if err := os.Chdir("/"); err != nil {
+		return fmt.Errorf("could not chdir to / after chroot: %w", err)
+	}
+
+	logger.Info("Changed root directory", slog.String("chroot", chrootDir))
+
+	return nil
+}
+
+// Credentials holds resolved numeric user and group IDs for privilege dropping.
+type Credentials struct {
+	UID       int
+	GID       int
+	HasUser   bool
+	HasGroup  bool
+	UserName  string
+	GroupName string
+}
+
+// ResolveCredentials looks up the numeric UID and GID for the given user and group names.
+// This must be called before chroot, because it needs access to /etc/passwd and /etc/group.
+func ResolveCredentials(runAsUser, runAsGroup string) (*Credentials, error) {
+	creds := &Credentials{}
 
 	if runAsUser != "" {
 		u, err := user.Lookup(runAsUser)
 		if err != nil {
-			return fmt.Errorf("could not lookup user %s: %w", runAsUser, err)
+			return nil, fmt.Errorf("could not lookup user %s: %w", runAsUser, err)
 		}
-		uid, _ = strconv.Atoi(u.Uid)
+
+		uid, err := strconv.ParseInt(u.Uid, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse uid %q: %w", u.Uid, err)
+		}
+
+		creds.UID = int(uid)
+		creds.HasUser = true
+		creds.UserName = runAsUser
 	}
 
 	if runAsGroup != "" {
 		g, err := user.LookupGroup(runAsGroup)
 		if err != nil {
-			return fmt.Errorf("could not lookup group %s: %w", runAsGroup, err)
+			return nil, fmt.Errorf("could not lookup group %s: %w", runAsGroup, err)
 		}
-		gid, _ = strconv.Atoi(g.Gid)
+
+		gid, err := strconv.ParseInt(g.Gid, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse gid %q: %w", g.Gid, err)
+		}
+
+		creds.GID = int(gid)
+		creds.HasGroup = true
+		creds.GroupName = runAsGroup
+	}
+
+	return creds, nil
+}
+
+// DropPrivileges drops the process's root privileges using pre-resolved credentials.
+func DropPrivileges(creds *Credentials, logger *slog.Logger) error {
+	if creds == nil || (!creds.HasUser && !creds.HasGroup) {
+		return nil
+	}
+
+	if os.Getuid() != 0 {
+		return nil
 	}
 
 	currentUID := os.Getuid()
@@ -908,7 +990,7 @@ func DropPrivileges(runAsUser, runAsGroup string, logger *slog.Logger) error {
 
 	// If we are already running as the target user/group, there's nothing to do.
 	// This also avoids clearing supplementary groups if stay as root.
-	if (runAsUser == "" || uid == currentUID) && (runAsGroup == "" || gid == currentGID) {
+	if (!creds.HasUser || creds.UID == currentUID) && (!creds.HasGroup || creds.GID == currentGID) {
 		return nil
 	}
 
@@ -917,18 +999,18 @@ func DropPrivileges(runAsUser, runAsGroup string, logger *slog.Logger) error {
 		return fmt.Errorf("could not clear supplementary groups: %w", err)
 	}
 
-	if runAsGroup != "" {
-		if err := syscall.Setgid(gid); err != nil {
-			return fmt.Errorf("could not set gid to %d: %w", gid, err)
+	if creds.HasGroup {
+		if err := syscall.Setgid(creds.GID); err != nil {
+			return fmt.Errorf("could not set gid to %d: %w", creds.GID, err)
 		}
-		logger.Info("Dropped group privileges", slog.String("group", runAsGroup), slog.Int("gid", gid))
+		logger.Info("Dropped group privileges", slog.String("group", creds.GroupName), slog.Int("gid", creds.GID))
 	}
 
-	if runAsUser != "" {
-		if err := syscall.Setuid(uid); err != nil {
-			return fmt.Errorf("could not set uid to %d: %w", uid, err)
+	if creds.HasUser {
+		if err := syscall.Setuid(creds.UID); err != nil {
+			return fmt.Errorf("could not set uid to %d: %w", creds.UID, err)
 		}
-		logger.Info("Dropped user privileges", slog.String("user", runAsUser), slog.Int("uid", uid))
+		logger.Info("Dropped user privileges", slog.String("user", creds.UserName), slog.Int("uid", creds.UID))
 	}
 
 	return nil

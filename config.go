@@ -30,6 +30,7 @@ type Server struct {
 	Listen              []Listen            `mapstructure:"listen" validate:"required,min=1,dive"`
 	RunAsUser           string              `mapstructure:"run_as_user" validate:"omitempty"`
 	RunAsGroup          string              `mapstructure:"run_as_group" validate:"omitempty"`
+	Chroot              string              `mapstructure:"chroot" validate:"omitempty,dir"`
 	Logging             Logging             `mapstructure:"logging" validate:"omitempty"`
 	HTTPClient          HTTPClient          `mapstructure:"http_client" validate:"omitempty"`
 	TLS                 TLS                 `mapstructure:"tls" validate:"omitempty"`

@@ -25,6 +25,9 @@ The \fBserver\fP section provides global settings for how \fBpfxhttp\fP operates
 .nf
 .EXAMPLE
 server:
+  run_as_user: "pfxhttp"
+  run_as_group: "pfxhttp"
+  # chroot: "/var/lib/pfxhttp"
   listen:
     - kind: "socket_map"
       name: "map"
@@ -57,6 +60,31 @@ server:
     max_queue: 100
 .fi
 .RE
+
+.TP
+.B run_as_user
+Optional. Drop privileges to this user after binding listeners. The user must exist in \fB/etc/passwd\fP. Requires root privileges at startup.
+
+.TP
+.B run_as_group
+Optional. Drop privileges to this group after binding listeners. The group must exist in \fB/etc/group\fP. Requires root privileges at startup.
+
+.TP
+.B chroot
+Optional. Change the root directory of the process to the specified path after binding listeners but before dropping privileges. Requires root privileges. The chroot directory must contain the following files for the Go runtime to function correctly (DNS resolution, name lookups):
+.RS
+.IP \[bu] 2
+\fBetc/resolv.conf\fP
+.IP \[bu] 2
+\fBetc/hosts\fP
+.IP \[bu] 2
+\fBetc/nsswitch.conf\fP
+.RE
+.IP
+If any of these files are missing, \fBpfxhttp\fP will refuse to start and log an error listing the missing files.
+When using TLS with a custom \fBroot_ca\fP, the CA file must also be present inside the chroot (e.g., \fB/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt\fP).
+
+The startup order is: resolve user/group credentials, bind listeners, chroot, drop privileges.
 
 .TP
 .B listen

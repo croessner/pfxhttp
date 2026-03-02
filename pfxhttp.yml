@@ -5,6 +5,7 @@ server:
 
   run_as_user: "pfxhttp"
   run_as_group: "pfxhttp"
+  # chroot: "/var/lib/pfxhttp"
 
   listen:
     - kind: "socket_map"

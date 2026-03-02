@@ -17,6 +17,8 @@ RestartSec=2s
 # - The service starts as root to bind privileged ports or create Unix sockets
 #   in protected directories (e.g. Postfix spool). The application then drops
 #   privileges internally to the user/group configured in pfxhttp.yml.
+# - If chroot is enabled in pfxhttp.yml, the chroot directory must contain
+#   etc/resolv.conf, etc/hosts, and etc/nsswitch.conf for DNS resolution.
 # - We deliberately avoid over-hardening here to keep /etc visible and allow
 #   setuid/setgid. Add hardening later only after verifying functionality.
 

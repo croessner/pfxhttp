@@ -65,7 +65,7 @@ SyslogIdentifier=pfxhttp
 MemoryMax=50M
 CPUQuota=10%
 
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_CHOWN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_CHOWN CAP_SYS_CHROOT
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
@@ -86,6 +86,8 @@ WantedBy=multi-user.target
 .fi
 
 You must create a user pfxhttp and a group pfxhttp before using this unit file!
+
+When using the \fBchroot\fP option, the service must run as root initially (remove \fBUser=\fP and \fBGroup=\fP from the unit file and use \fBrun_as_user\fP/\fBrun_as_group\fP in the configuration instead). The capability \fBCAP_SYS_CHROOT\fP is required. The chroot directory must contain \fBetc/resolv.conf\fP, \fBetc/hosts\fP, and \fBetc/nsswitch.conf\fP.
 
 To set it up as a system service on a systemd-based Linux system, save the file above to
 \fI/etc/systemd/system/pfxhttp.service\fP.
