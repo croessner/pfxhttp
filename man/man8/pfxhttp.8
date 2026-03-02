@@ -87,7 +87,7 @@ WantedBy=multi-user.target
 
 You must create a user pfxhttp and a group pfxhttp before using this unit file!
 
-When using the \fBchroot\fP option, the service must run as root initially (remove \fBUser=\fP and \fBGroup=\fP from the unit file and use \fBrun_as_user\fP/\fBrun_as_group\fP in the configuration instead). The capability \fBCAP_SYS_CHROOT\fP is required. The chroot directory must contain \fBetc/resolv.conf\fP, \fBetc/hosts\fP, and \fBetc/nsswitch.conf\fP.
+When using the \fBchroot\fP option, the service must run as root initially (remove \fBUser=\fP and \fBGroup=\fP from the unit file and use \fBrun_as_user\fP/\fBrun_as_group\fP in the configuration instead). The capability \fBCAP_SYS_CHROOT\fP is required. The chroot directory must contain \fBetc/resolv.conf\fP, \fBetc/hosts\fP, and \fBetc/nsswitch.conf\fP for DNS resolution. TCP listeners and Unix sockets are bound before the chroot and privilege drop, so privileged ports and socket paths on the real filesystem work at initial startup. After a SIGHUP reload, the process runs as an unprivileged user inside the chroot: binding privileged ports (< 1024) will fail, and new Unix socket paths are resolved relative to the chroot root. The configuration file is read before the chroot; it only needs to exist inside the jail if SIGHUP reload is used. TLS certificate files (\fBroot_ca\fP, \fBcert\fP, \fBkey\fP) should be placed inside the chroot for reload compatibility. See \fBpfxhttp.yml\fP(5) for full details on chroot constraints.
 
 To set it up as a system service on a systemd-based Linux system, save the file above to
 \fI/etc/systemd/system/pfxhttp.service\fP.

@@ -23,6 +23,7 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
     * [Privilege Dropping & Chroot](#privilege-dropping--chroot)
       * [Privilege Dropping](#privilege-dropping)
       * [Chroot](#chroot)
+        * [Limitations and prerequisites](#limitations-and-prerequisites)
     * [OIDC Authentication](#oidc-authentication)
     * [HTTP Request/Response Compression](#http-requestresponse-compression)
     * [Integrating with Postfix](#integrating-with-postfix)
@@ -424,15 +425,52 @@ The startup order is:
 3. **Chroot** — change root directory
 4. **Drop privileges** — switch to the resolved UID/GID
 
-The chroot directory **must** contain the following files for DNS resolution to work:
+##### Limitations and prerequisites
+
+Running inside a chroot jail imposes several constraints that must be understood before enabling this feature:
+
+**Configuration file**
+The configuration file (`pfxhttp.yml`) is read **before** the chroot takes effect. The path given via `--config` (or the default search paths) must refer to the real filesystem, not to a path inside the chroot. After chroot, the configuration file does not need to be present inside the jail. However, a SIGHUP reload will re-read the configuration file — since the process is now inside the chroot, the file must also be accessible at its configured path relative to the new root (e.g., `/var/lib/pfxhttp/etc/pfxhttp/pfxhttp.yml`).
+
+**Port binding and TCP listeners**
+All TCP listeners are bound **before** the chroot and privilege drop. Privileged ports (< 1024) therefore work at initial startup, because the process still has root privileges at that point. No special preparation inside the chroot is needed for TCP listeners. After a SIGHUP reload, however, the process runs as an unprivileged user. Binding new or changed TCP listeners to privileged ports (< 1024) will fail. Only unprivileged ports (≥ 1024) can be used for listeners added or changed via reload.
+
+**Unix sockets**
+Unix socket listeners are created **before** the chroot. The socket paths in the configuration refer to the real filesystem. After chroot, the process can still accept connections on these existing sockets because the file descriptors remain open. Postfix (or any other client) connects to the socket path on the real filesystem — no change is needed on the client side.
+
+After a SIGHUP reload, any new or changed Unix socket listener paths are resolved relative to the chroot root. For example, a configured path `/run/pfxhttp/new.sock` becomes `/var/lib/pfxhttp/run/pfxhttp/new.sock` on the real filesystem. The corresponding directories must exist inside the chroot and be writable by the unprivileged user.
+
+**DNS resolution**
+The Go runtime requires certain files for name resolution. The chroot directory **must** contain:
 
 - `etc/resolv.conf`
 - `etc/hosts`
 - `etc/nsswitch.conf`
 
-If any of these files are missing, Pfxhttp will refuse to start and log an error listing the missing files.
+If any of these files are missing, Pfxhttp will refuse to start and log an error listing the missing files. Without these files, HTTP requests to hostnames (e.g., OIDC discovery endpoints) will fail silently or return errors.
 
-When using TLS with a custom `root_ca`, the CA certificate file must also be present inside the chroot (e.g., `/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt`).
+**TLS certificates**
+When using TLS with a custom `root_ca`, the CA certificate file is loaded **before** the chroot. The path in the configuration refers to the real filesystem. However, if the HTTP client is re-initialized during a SIGHUP reload, the `root_ca` path must be accessible inside the chroot (e.g., `/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt`). It is therefore recommended to always place the CA file inside the chroot.
+
+Similarly, if `cert` and `key` are configured for client TLS certificates, these files should also be present inside the chroot for reload compatibility.
+
+**OIDC private key files**
+If `private_key_file` is configured for `private_key_jwt` authentication, the key file is read at token fetch time (not at startup). After chroot, the path must be accessible inside the jail.
+
+**Example chroot directory layout**
+
+```
+/var/lib/pfxhttp/
+├── etc/
+│   ├── hosts
+│   ├── nsswitch.conf
+│   ├── resolv.conf
+│   ├── ssl/
+│   │   └── certs/
+│   │       └── ca-bundle.crt
+│   └── pfxhttp/
+│       └── pfxhttp.yml          # only needed if SIGHUP reload is used
+```
 
 > **Note:** When using chroot, the systemd unit file must run the service as root (remove `User=` and `Group=` directives) and include `CAP_SYS_CHROOT` in `CapabilityBoundingSet`. Use `run_as_user` and `run_as_group` in the configuration file instead.
 

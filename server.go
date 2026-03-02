@@ -927,12 +927,13 @@ func PerformChroot(chrootDir string, logger *slog.Logger) error {
 
 // Credentials holds resolved numeric user and group IDs for privilege dropping.
 type Credentials struct {
-	UID       int
-	GID       int
-	HasUser   bool
-	HasGroup  bool
-	UserName  string
-	GroupName string
+	UID               int
+	GID               int
+	SupplementaryGIDs []int
+	HasUser           bool
+	HasGroup          bool
+	UserName          string
+	GroupName         string
 }
 
 // ResolveCredentials looks up the numeric UID and GID for the given user and group names.
@@ -954,6 +955,20 @@ func ResolveCredentials(runAsUser, runAsGroup string) (*Credentials, error) {
 		creds.UID = int(uid)
 		creds.HasUser = true
 		creds.UserName = runAsUser
+
+		groupIDs, err := u.GroupIds()
+		if err != nil {
+			return nil, fmt.Errorf("could not lookup supplementary groups for user %s: %w", runAsUser, err)
+		}
+
+		for _, gidStr := range groupIDs {
+			sgid, err := strconv.ParseInt(gidStr, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("could not parse supplementary gid %q: %w", gidStr, err)
+			}
+
+			creds.SupplementaryGIDs = append(creds.SupplementaryGIDs, int(sgid))
+		}
 	}
 
 	if runAsGroup != "" {
@@ -994,9 +1009,9 @@ func DropPrivileges(creds *Credentials, logger *slog.Logger) error {
 		return nil
 	}
 
-	// Set supplementary groups to empty
-	if err := syscall.Setgroups([]int{}); err != nil {
-		return fmt.Errorf("could not clear supplementary groups: %w", err)
+	// Set supplementary groups for the target user (or clear them if none were resolved)
+	if err := syscall.Setgroups(creds.SupplementaryGIDs); err != nil {
+		return fmt.Errorf("could not set supplementary groups: %w", err)
 	}
 
 	if creds.HasGroup {

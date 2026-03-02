@@ -82,9 +82,19 @@ Optional. Change the root directory of the process to the specified path after b
 .RE
 .IP
 If any of these files are missing, \fBpfxhttp\fP will refuse to start and log an error listing the missing files.
-When using TLS with a custom \fBroot_ca\fP, the CA file must also be present inside the chroot (e.g., \fB/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt\fP).
-
+Without these files, HTTP requests to hostnames (e.g., OIDC discovery endpoints) will fail silently or return errors.
+.IP
 The startup order is: resolve user/group credentials, bind listeners, chroot, drop privileges.
+.IP
+\fBConfiguration file:\fP The configuration file is read before the chroot takes effect. The path given via \fB\-\-config\fP refers to the real filesystem. After chroot, the file does not need to be present inside the jail unless SIGHUP reload is used, in which case it must be accessible at its configured path relative to the new root.
+.IP
+\fBTCP listeners:\fP All TCP listeners are bound before the chroot and privilege drop. Privileged ports (< 1024) work at initial startup because the process still has root privileges at that point. After a SIGHUP reload, the process runs as an unprivileged user. Binding new or changed TCP listeners to privileged ports (< 1024) will fail. Only unprivileged ports (>= 1024) can be used for listeners added or changed via reload.
+.IP
+\fBUnix sockets:\fP Unix socket listeners are created before the chroot. The socket paths refer to the real filesystem. After chroot, existing sockets continue to work via their open file descriptors. After a SIGHUP reload, any new or changed Unix socket listener paths are resolved relative to the chroot root. The corresponding directories must exist inside the chroot and be writable by the unprivileged user.
+.IP
+\fBTLS certificates:\fP The \fBroot_ca\fP file is loaded before the chroot. However, if the HTTP client is re-initialized during a SIGHUP reload, the file must be accessible inside the chroot (e.g., \fB/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt\fP). It is recommended to always place CA files inside the chroot. The same applies to \fBcert\fP and \fBkey\fP files.
+.IP
+\fBOIDC private key files:\fP If \fBprivate_key_file\fP is configured for \fBprivate_key_jwt\fP authentication, the key file is read at token fetch time (not at startup). After chroot, the path must be accessible inside the jail.
 
 .TP
 .B listen
