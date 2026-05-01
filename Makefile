@@ -35,10 +35,18 @@ clean:
 
 # Test targets
 test:
-	go test -v ./...
+	GOEXPERIMENT=runtimesecret go test -v ./...
 
 # Print version
 version:
 	@echo $(VERSION)
 
-.PHONY: all build clean version install uninstall test
+# Regenerate gRPC stubs from proto/auth/v1/auth.proto.
+# Requires protoc and the protoc-gen-go / protoc-gen-go-grpc plugins on PATH.
+generate-grpc:
+	protoc \
+		--go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		proto/auth/v1/auth.proto
+
+.PHONY: all build clean version install uninstall test generate-grpc

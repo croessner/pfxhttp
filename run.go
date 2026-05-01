@@ -39,6 +39,10 @@ func RunServer(lc fx.Lifecycle, deps *Deps) {
 			cancelServer()
 			<-done
 
+			if pool := deps.GetGRPCConnPool(); pool != nil {
+				pool.CloseAll()
+			}
+
 			return nil
 		},
 	})

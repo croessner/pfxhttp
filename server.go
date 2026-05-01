@@ -489,7 +489,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	// Track active mechanism sessions for multi-step auth (keyed by request ID)
 	activeMechanisms := make(map[string]SASLMechanism)
 	activeAuthRequests := make(map[string]*DovecotAuthRequest)
-	authenticator := NewNauthilusSASLAuthenticator(config, s.name, s.deps.GetHTTPClient(), s.deps.GetOIDCManager())
+	authenticator := newSASLAuthenticatorForEntry(config, s.name, s.deps)
 
 	// Process AUTH and CONT commands
 	for {

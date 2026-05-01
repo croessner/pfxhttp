@@ -114,6 +114,52 @@ func TestConfigValidation(t *testing.T) {
 			wantErr:     true,
 			errContains: []string{"field 'max_workers' (struct field: 'MaxWorkers') failed on the 'min' validation rule"},
 		},
+		{
+			name: "DovecotSASL gRPC transport without address",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport: transportGRPC,
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"transport 'grpc'", "grpc.address"},
+		},
+		{
+			name: "DovecotSASL gRPC transport with address",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport: transportGRPC,
+						GRPC: GRPCRequest{
+							Address: "nauthilus.example.com:9444",
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -118,6 +118,35 @@ type SASLOIDCAuth struct {
 // reservedConfigKey is the key name reserved for section-level defaults.
 const reservedConfigKey = "defaults"
 
+// Transport names accepted on dovecot_sasl entries.
+const (
+	transportJSON = "json"
+	transportGRPC = "grpc"
+)
+
+// GRPCRequest holds gRPC-specific transport settings used when
+// dovecot_sasl.<name>.transport is set to "grpc". The application-level
+// authorization (Basic/Bearer) is derived from the surrounding Request
+// (http_auth_basic / backend_oidc_auth) so the same credentials work for
+// both HTTP and gRPC transports.
+type GRPCRequest struct {
+	Address string        `mapstructure:"address" validate:"omitempty,hostname_port"`
+	Timeout time.Duration `mapstructure:"timeout" validate:"omitempty,min=1ms,max=1h"`
+	TLS     GRPCTLS       `mapstructure:"tls" validate:"omitempty"`
+}
+
+// GRPCTLS configures the TLS connection for the gRPC client. CACert pins the
+// trust anchors; ClientCert/ClientKey enable mTLS; ServerName overrides the
+// SNI/SAN used during the handshake.
+type GRPCTLS struct {
+	Enabled    bool   `mapstructure:"enabled"`
+	CACert     string `mapstructure:"ca_cert" validate:"omitempty,file"`
+	ClientCert string `mapstructure:"client_cert" validate:"omitempty,file"`
+	ClientKey  string `mapstructure:"client_key" validate:"omitempty,file"`
+	ServerName string `mapstructure:"server_name" validate:"omitempty"`
+	SkipVerify bool   `mapstructure:"skip_verify"`
+}
+
 type Request struct {
 	Target                  string          `mapstructure:"target" validate:"omitempty,http_url"`
 	HTTPAuthBasic           string          `mapstructure:"http_auth_basic" validate:"omitempty"`
@@ -130,6 +159,8 @@ type Request struct {
 	BackendOIDCAuth         BackendOIDCAuth `mapstructure:"backend_oidc_auth" validate:"omitempty"`
 	SASLOIDCAuth            SASLOIDCAuth    `mapstructure:"sasl_oidc_auth" validate:"omitempty"`
 	DefaultLocalPort        string          `mapstructure:"default_local_port" validate:"omitempty,numeric"`
+	Transport               string          `mapstructure:"transport" validate:"omitempty,oneof=json grpc"`
+	GRPC                    GRPCRequest     `mapstructure:"grpc" validate:"omitempty"`
 	HTTPRequestCompression  bool            `mapstructure:"http_request_compression"`
 	HTTPResponseCompression bool            `mapstructure:"http_response_compression"`
 }
@@ -194,7 +225,49 @@ func mergeRequest(defaults, entry Request) Request {
 		entry.DefaultLocalPort = defaults.DefaultLocalPort
 	}
 
+	if entry.Transport == "" {
+		entry.Transport = defaults.Transport
+	}
+
+	mergeGRPC(&entry.GRPC, defaults.GRPC)
+
 	return entry
+}
+
+// mergeGRPC fills empty fields of entry with values from defaults so the
+// section-level "defaults" block can supply common gRPC settings.
+func mergeGRPC(entry *GRPCRequest, defaults GRPCRequest) {
+	if entry.Address == "" {
+		entry.Address = defaults.Address
+	}
+
+	if entry.Timeout == 0 {
+		entry.Timeout = defaults.Timeout
+	}
+
+	if !entry.TLS.Enabled {
+		entry.TLS.Enabled = defaults.TLS.Enabled
+	}
+
+	if entry.TLS.CACert == "" {
+		entry.TLS.CACert = defaults.TLS.CACert
+	}
+
+	if entry.TLS.ClientCert == "" {
+		entry.TLS.ClientCert = defaults.TLS.ClientCert
+	}
+
+	if entry.TLS.ClientKey == "" {
+		entry.TLS.ClientKey = defaults.TLS.ClientKey
+	}
+
+	if entry.TLS.ServerName == "" {
+		entry.TLS.ServerName = defaults.TLS.ServerName
+	}
+
+	if !entry.TLS.SkipVerify {
+		entry.TLS.SkipVerify = defaults.TLS.SkipVerify
+	}
 }
 
 // resolveDefaults extracts the optional "defaults" key from a section map,
@@ -229,6 +302,28 @@ func validateTargets(section map[string]Request, sectionName string) error {
 	for name, entry := range maps.All(section) {
 		if entry.Target == "" {
 			return fmt.Errorf("entry '%s' in '%s' is missing a required 'target' URL", name, sectionName)
+		}
+	}
+
+	return nil
+}
+
+// validateDovecotSASLEndpoints checks transport-specific endpoint requirements
+// for dovecot_sasl entries. For HTTP transport (default) the entry must have
+// a 'target' URL. For gRPC transport the entry must have a 'grpc.address'.
+func validateDovecotSASLEndpoints(section map[string]Request) error {
+	for name, entry := range maps.All(section) {
+		switch entry.Transport {
+		case transportGRPC:
+			if entry.GRPC.Address == "" {
+				return fmt.Errorf("entry '%s' in 'dovecot_sasl' uses transport 'grpc' and is missing a required 'grpc.address'", name)
+			}
+		case transportJSON, "":
+			if entry.Target == "" {
+				return fmt.Errorf("entry '%s' in 'dovecot_sasl' is missing a required 'target' URL", name)
+			}
+		default:
+			return fmt.Errorf("entry '%s' in 'dovecot_sasl' has unsupported transport %q", name, entry.Transport)
 		}
 	}
 
@@ -290,7 +385,7 @@ func (cfg *Config) HandleConfig() error {
 		return err
 	}
 
-	if err := validateTargets(cfg.DovecotSASL, "dovecot_sasl"); err != nil {
+	if err := validateDovecotSASLEndpoints(cfg.DovecotSASL); err != nil {
 		return err
 	}
 

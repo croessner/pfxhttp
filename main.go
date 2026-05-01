@@ -12,6 +12,7 @@ func main() {
 			ProvideHTTPClient,
 			ProvideOIDCManager,
 			ProvideResponseCache,
+			ProvideGRPCConnPool,
 			ProvideDeps,
 		),
 		fx.Invoke(RunServer),
