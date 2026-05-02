@@ -82,13 +82,27 @@ func ProvideResponseCache(cfg *Config) ResponseCache {
 	return nil
 }
 
+// ProvideGRPCConnPool creates the shared connection pool used by gRPC SASL
+// authenticators.
+func ProvideGRPCConnPool() *GRPCConnPool {
+	return NewGRPCConnPool()
+}
+
 // ProvideDeps bundles all dependencies into a single Deps struct.
-func ProvideDeps(cfg *Config, logger *slog.Logger, httpClient *http.Client, oidcManager *OIDCManager, respCache ResponseCache) *Deps {
+func ProvideDeps(
+	cfg *Config,
+	logger *slog.Logger,
+	httpClient *http.Client,
+	oidcManager *OIDCManager,
+	respCache ResponseCache,
+	grpcPool *GRPCConnPool,
+) *Deps {
 	return &Deps{
-		Config:      cfg,
-		Logger:      logger,
-		HTTPClient:  httpClient,
-		OIDCManager: oidcManager,
-		RespCache:   respCache,
+		Config:       cfg,
+		Logger:       logger,
+		HTTPClient:   httpClient,
+		OIDCManager:  oidcManager,
+		RespCache:    respCache,
+		GRPCConnPool: grpcPool,
 	}
 }

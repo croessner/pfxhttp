@@ -489,7 +489,6 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	// Track active mechanism sessions for multi-step auth (keyed by request ID)
 	activeMechanisms := make(map[string]SASLMechanism)
 	activeAuthRequests := make(map[string]*DovecotAuthRequest)
-	authenticator := NewNauthilusSASLAuthenticator(config, s.name, s.deps.GetHTTPClient(), s.deps.GetOIDCManager())
 
 	// Process AUTH and CONT commands
 	for {
@@ -550,7 +549,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				}
 
 				result, creds := mech.Start(authReq.InitialResponse)
-				s.handleSASLResult(conn, encoder, authenticator, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
 
 			case DovecotCmdCont:
 				contReq, err := decoder.DecodeContRequest(args)
@@ -569,7 +568,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 
 				authReq := activeAuthRequests[contReq.ID]
 				result, creds := mech.Continue(contReq.Data)
-				s.handleSASLResult(conn, encoder, authenticator, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
 
 			default:
 				reqLogger.Warn("Unknown command", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
@@ -622,7 +621,6 @@ func redactDovecotLine(line string) string {
 func (s *MultiServer) handleSASLResult(
 	conn net.Conn,
 	encoder *DovecotEncoder,
-	authenticator SASLAuthenticator,
 	logger *slog.Logger,
 	clientAddr string,
 	authReq *DovecotAuthRequest,
@@ -663,6 +661,19 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeAuthRequests, authReq.ID)
 
 		authCtx := context.WithValue(s.ctx, loggerKey, logger)
+		currentConfig := s.deps.GetConfig()
+		if currentConfig == nil {
+			logger.Error("Authentication error",
+				slog.String(LogKeyClient, clientAddr),
+				slog.String("username", creds.Username),
+				slog.String("error", "configuration not loaded"))
+
+			sendDovecotFail(conn, encoder, logger, clientAddr, authReq.ID, "internal error", creds.Username, true)
+
+			return
+		}
+
+		authenticator := newSASLAuthenticatorForEntry(currentConfig, s.name, s.deps)
 
 		var authResult *SASLAuthResult
 		var err error

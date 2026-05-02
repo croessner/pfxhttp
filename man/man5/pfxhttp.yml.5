@@ -490,7 +490,7 @@ protocol (from Dovecot service, e.g. smtp)
 .IP \[bu] 2
 method (SASL mechanism, e.g. PLAIN/LOGIN)
 .IP \[bu] 2
-client_ip, client_port, local_ip, local_port
+client_ip, client_port, client_hostname (from Dovecot local_name), local_ip, local_port
 .IP \[bu] 2
 ssl (set when the connection is secured), ssl_protocol, ssl_cipher
 .IP \[bu] 2
@@ -498,9 +498,39 @@ client_id
 .RE
 
 .TP
+.B gRPC transport
+Password-based SASL mechanisms can use the Nauthilus gRPC AuthService instead of the JSON endpoint:
+.RS
+.nf
+dovecot_sasl:
+  smtp_auth:
+    transport: grpc
+    http_auth_basic: admin:admin-password
+    default_local_port: "587"
+    grpc:
+      address: nauthilus.example.org:9444
+      timeout: 5s
+      tls:
+        enabled: true
+        root_ca: /etc/pfxhttp/nauthilus-ca.pem
+        server_name: nauthilus.example.org
+        min_tls_version: "1.2"
+        skip_verify: false
+.fi
+.RE
+
+When \fBtransport: grpc\fP is set, \fBgrpc.address\fP is mandatory and the HTTP \fBtarget\fP URL is not required.
+Caller authorization is taken from \fBbackend_oidc_auth\fP or from the effective \fBAuthorization\fP header after
+\fBhttp_auth_basic\fP and \fBcustom_headers\fP have been merged. Existing Dovecot connections pick up reloaded
+backend settings on the next authentication request; the gRPC connection pool rebuilds connections when transport
+settings change and closes entries removed or switched away from gRPC.
+
+.TP
 .B Response handling
-Pfxhttp evaluates the HTTP status code as the primary success indicator. On failures, the optional
+For JSON transport, Pfxhttp evaluates the HTTP status code as the primary success indicator. On failures, the optional
 \fBAuth-Status\fP HTTP response header (set by Nauthilus) is used as the human-readable reason. On success,
-Pfxhttp derives the resolved username exclusively from the HTTP response header \fBAuth-User\fP.
-JSON fields such as \fBaccount_field\fP are not consulted and \fBvalue_field\fP has no effect for \fBdovecot_sasl\fP.
+Pfxhttp derives the resolved username from the HTTP response header \fBAuth-User\fP. For gRPC transport, Pfxhttp
+evaluates the AuthService decision and reads the resolved username from the response \fBaccount_field\fP attribute,
+falling back to an \fBAuth-User\fP attribute.
+JSON configuration keys such as \fBvalue_field\fP have no effect for \fBdovecot_sasl\fP.
 The \fBpayload\fP key is ignored for \fBdovecot_sasl\fP blocks and should not be configured.

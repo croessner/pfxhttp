@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func TestWorkerPoolDefaults(t *testing.T) {
@@ -121,6 +123,122 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 	}
 	if b.ValueField != "result" {
 		t.Errorf("entry_b.ValueField not inherited")
+	}
+}
+
+func TestResolveDefaultsMergesGRPCFields(t *testing.T) {
+	raw := map[string]Request{
+		"defaults": {
+			Transport: transportGRPC,
+			GRPC: GRPCRequest{
+				Address: "nauthilus.example:9444",
+				Timeout: 0,
+				TLS: GRPCTLS{
+					Enabled:    new(true),
+					RootCA:     "/etc/pfxhttp/ca.pem",
+					ServerName: "nauthilus.example",
+				},
+			},
+		},
+		"smtp_auth": {},
+		"submission_auth": {
+			GRPC: GRPCRequest{
+				TLS: GRPCTLS{ServerName: "override.example"},
+			},
+		},
+	}
+
+	result := resolveDefaults(raw)
+
+	if _, ok := result["defaults"]; ok {
+		t.Fatal("expected 'defaults' key to be removed")
+	}
+
+	a := result["smtp_auth"]
+	if a.Transport != transportGRPC {
+		t.Errorf("smtp_auth.Transport = %q, want %q", a.Transport, transportGRPC)
+	}
+	if a.GRPC.Address != "nauthilus.example:9444" {
+		t.Errorf("smtp_auth.GRPC.Address = %q, want inherited value", a.GRPC.Address)
+	}
+	if !boolValue(a.GRPC.TLS.Enabled) || a.GRPC.TLS.RootCA != "/etc/pfxhttp/ca.pem" || a.GRPC.TLS.ServerName != "nauthilus.example" {
+		t.Errorf("smtp_auth TLS fields not inherited: %+v", a.GRPC.TLS)
+	}
+
+	b := result["submission_auth"]
+	if b.Transport != transportGRPC {
+		t.Errorf("submission_auth.Transport = %q, want inherited %q", b.Transport, transportGRPC)
+	}
+	if b.GRPC.Address != "nauthilus.example:9444" {
+		t.Errorf("submission_auth.GRPC.Address = %q, want inherited", b.GRPC.Address)
+	}
+	if b.GRPC.TLS.ServerName != "override.example" {
+		t.Errorf("submission_auth.GRPC.TLS.ServerName = %q, want explicit override", b.GRPC.TLS.ServerName)
+	}
+	if b.GRPC.TLS.RootCA != "/etc/pfxhttp/ca.pem" {
+		t.Errorf("submission_auth.GRPC.TLS.RootCA = %q, want inherited from defaults", b.GRPC.TLS.RootCA)
+	}
+}
+
+func TestResolveDefaultsAllowsGRPCTLSBooleanOverrides(t *testing.T) {
+	raw := map[string]Request{
+		"defaults": {
+			Transport: transportGRPC,
+			GRPC: GRPCRequest{
+				TLS: GRPCTLS{
+					Enabled:    new(true),
+					SkipVerify: new(true),
+				},
+			},
+		},
+		"smtp_auth": {
+			GRPC: GRPCRequest{
+				TLS: GRPCTLS{
+					Enabled:    new(false),
+					SkipVerify: new(false),
+				},
+			},
+		},
+		"submission_auth": {},
+	}
+
+	result := resolveDefaults(raw)
+
+	if boolValue(result["smtp_auth"].GRPC.TLS.Enabled) {
+		t.Fatal("explicit grpc.tls.enabled=false must override defaults")
+	}
+	if boolValue(result["smtp_auth"].GRPC.TLS.SkipVerify) {
+		t.Fatal("explicit grpc.tls.skip_verify=false must override defaults")
+	}
+	if !boolValue(result["submission_auth"].GRPC.TLS.Enabled) {
+		t.Fatal("missing grpc.tls.enabled should inherit defaults")
+	}
+	if !boolValue(result["submission_auth"].GRPC.TLS.SkipVerify) {
+		t.Fatal("missing grpc.tls.skip_verify should inherit defaults")
+	}
+}
+
+func TestGRPCTLSBooleanPointersDecodeExplicitFalse(t *testing.T) {
+	v := viper.New()
+	v.Set("tls.enabled", false)
+	v.Set("tls.skip_verify", false)
+
+	var got GRPCRequest
+	if err := v.Unmarshal(&got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if got.TLS.Enabled == nil {
+		t.Fatal("tls.enabled=false should decode as an explicit value")
+	}
+	if boolValue(got.TLS.Enabled) {
+		t.Fatal("tls.enabled=false decoded as true")
+	}
+	if got.TLS.SkipVerify == nil {
+		t.Fatal("tls.skip_verify=false should decode as an explicit value")
+	}
+	if boolValue(got.TLS.SkipVerify) {
+		t.Fatal("tls.skip_verify=false decoded as true")
 	}
 }
 

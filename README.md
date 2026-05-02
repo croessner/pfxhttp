@@ -595,6 +595,72 @@ Behavior:
 - Else, if `default_local_port` is set, it is sent as `local_port` to the backend.
 - Applies to both password-based and OAuth-based SASL flows.
 
+##### gRPC Transport (alternative to JSON)
+
+For password-based SASL mechanisms (PLAIN/LOGIN), `dovecot_sasl` entries can
+optionally call the Nauthilus **gRPC AuthService** instead of posting JSON to
+the HTTP endpoint. The gRPC service shares the same authentication contract
+(`Authenticate` RPC in `nauthilus.auth.v1`), so caller credentials, OIDC
+backend authentication and TLS settings keep their semantics across both
+transports.
+
+Token-based mechanisms (XOAUTH2 / OAUTHBEARER) always validate via the OIDC
+introspection / JWKS endpoints over HTTP, regardless of `transport`.
+
+```yaml
+dovecot_sasl:
+  smtp_auth:
+    transport: grpc
+    # backend_oidc_auth applies to gRPC just like HTTP and produces the
+    # `authorization: Bearer <token>` metadata for outgoing RPCs.
+    backend_oidc_auth:
+      enabled: true
+      configuration_uri: "https://idp.example.org/.well-known/openid-configuration"
+      client_id: "pfxhttp"
+      private_key_file: "/etc/pfxhttp/private.pem"
+      auth_method: "private_key_jwt"
+    grpc:
+      address: "nauthilus.example.org:9444"
+      timeout: 5s
+      tls:
+        enabled: true
+        root_ca: "/etc/pfxhttp/nauthilus-ca.pem"
+        # Optional mTLS:
+        client_cert: "/etc/pfxhttp/client.pem"
+        client_key: "/etc/pfxhttp/client.key"
+        # server_name overrides the SNI/SAN used during the TLS handshake.
+        server_name: "nauthilus.example.org"
+        # min_tls_version is "1.2" (default) or "1.3". Anything below 1.2
+        # is rejected at config-load time.
+        min_tls_version: "1.3"
+        # skip_verify disables certificate verification — only for testing.
+        skip_verify: false
+```
+
+Notes:
+
+- `transport` defaults to `json`. When set to `grpc`, the `target` HTTP URL
+  is no longer required; instead `grpc.address` (`host:port`) becomes
+  mandatory.
+- Caller authorization is derived from existing fields:
+  - `backend_oidc_auth.enabled: true` → the OIDC manager fetches a token via
+    Client Credentials / `private_key_jwt` and the result is sent as
+    `authorization: Bearer <token>` metadata.
+  - Otherwise an `Authorization` header from `custom_headers` (typically
+    populated by `http_auth_basic`) is reused as gRPC metadata so HTTP and
+    gRPC share the same source of truth.
+- The shared connection pool maintains one long-lived `*grpc.ClientConn` per
+  `dovecot_sasl` entry. Multiple SASL sessions multiplex over the same HTTP/2
+  connection. Existing Dovecot connections use the reloaded backend settings
+  for the next authentication request. SIGHUP-based reloads automatically:
+  - rebuild a connection when the gRPC settings of an entry change,
+  - close connections for entries that were removed or switched back to
+    the JSON transport,
+  - leave unchanged entries' connections in place to avoid disruption.
+- gRPC errors are mapped conservatively: caller-credential rejection,
+  backend unavailability and timeouts surface as **temporary** failures so
+  Postfix retries instead of immediately blacklisting the user.
+
 ---
 
 ## Logging and Troubleshooting
