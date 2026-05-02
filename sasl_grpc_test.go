@@ -9,8 +9,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -430,6 +436,38 @@ func TestGRPCConnPoolReusesConnections(t *testing.T) {
 	}
 }
 
+func TestGRPCConnPoolRetainOnlyDropsOrphans(t *testing.T) {
+	addr1, stop1 := startFakeAuthServer(t, &fakeAuthServer{})
+	defer stop1()
+
+	addr2, stop2 := startFakeAuthServer(t, &fakeAuthServer{})
+	defer stop2()
+
+	pool := NewGRPCConnPool()
+	defer pool.CloseAll()
+
+	if _, err := pool.Get("keep_me", GRPCRequest{Address: addr1}); err != nil {
+		t.Fatalf("seed keep_me: %v", err)
+	}
+
+	if _, err := pool.Get("drop_me", GRPCRequest{Address: addr2}); err != nil {
+		t.Fatalf("seed drop_me: %v", err)
+	}
+
+	pool.RetainOnly(map[string]struct{}{"keep_me": {}})
+
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	if _, ok := pool.conns["keep_me"]; !ok {
+		t.Fatalf("RetainOnly removed an entry that should be kept")
+	}
+
+	if _, ok := pool.conns["drop_me"]; ok {
+		t.Fatalf("RetainOnly did not drop the orphan entry")
+	}
+}
+
 func TestGRPCConnPoolRebuildsOnFingerprintChange(t *testing.T) {
 	addr1, stop1 := startFakeAuthServer(t, &fakeAuthServer{})
 	defer stop1()
@@ -467,4 +505,195 @@ func TestDialGRPCInsecureByDefault(t *testing.T) {
 		t.Fatalf("control dial: %v", err)
 	}
 	_ = conn.Close()
+}
+
+// --- Helper unit tests ---
+
+func TestEffectiveGRPCTimeoutDefault(t *testing.T) {
+	if got := effectiveGRPCTimeout(GRPCRequest{}); got != 5*time.Second {
+		t.Fatalf("default timeout: got %v want 5s", got)
+	}
+}
+
+func TestEffectiveGRPCTimeoutCustom(t *testing.T) {
+	if got := effectiveGRPCTimeout(GRPCRequest{Timeout: 250 * time.Millisecond}); got != 250*time.Millisecond {
+		t.Fatalf("explicit timeout: got %v want 250ms", got)
+	}
+}
+
+func TestBuildClientTLSConfigEmpty(t *testing.T) {
+	tlsCfg, err := buildClientTLSConfig(GRPCTLS{})
+	if err != nil {
+		t.Fatalf("empty TLS section must succeed: %v", err)
+	}
+
+	if tlsCfg.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("min TLS version: got %x want %x", tlsCfg.MinVersion, tls.VersionTLS12)
+	}
+}
+
+func TestBuildClientTLSConfigCAErrors(t *testing.T) {
+	_, err := buildClientTLSConfig(GRPCTLS{CACert: "/nonexistent/file/path/to/ca.pem"})
+	if err == nil {
+		t.Fatalf("expected error for missing CA file")
+	}
+
+	tmp := t.TempDir()
+	bogus := filepath.Join(tmp, "bogus.pem")
+	if writeErr := os.WriteFile(bogus, []byte("not a pem"), 0o600); writeErr != nil {
+		t.Fatalf("write bogus pem: %v", writeErr)
+	}
+
+	_, err = buildClientTLSConfig(GRPCTLS{CACert: bogus})
+	if err == nil {
+		t.Fatalf("expected error for malformed CA pem")
+	}
+}
+
+func TestBuildClientTLSConfigClientCertWithoutKey(t *testing.T) {
+	tmp := t.TempDir()
+	certFile := filepath.Join(tmp, "client.pem")
+	if err := os.WriteFile(certFile, []byte("dummy"), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+
+	_, err := buildClientTLSConfig(GRPCTLS{ClientCert: certFile})
+	if err == nil {
+		t.Fatalf("expected error when client_cert is set without client_key")
+	}
+}
+
+// --- Factory tests ---
+
+func TestNewSASLAuthenticatorForEntryReturnsHTTPForJSON(t *testing.T) {
+	cfg := &Config{
+		DovecotSASL: map[string]Request{
+			"http_entry": {Target: "http://nauthilus.example/api/v1/auth/json"},
+			"json_entry": {Target: "http://nauthilus.example/api/v1/auth/json", Transport: transportJSON},
+		},
+	}
+
+	deps := &Deps{HTTPClient: &http.Client{}, GRPCConnPool: NewGRPCConnPool()}
+
+	for _, name := range []string{"http_entry", "json_entry"} {
+		t.Run(name, func(t *testing.T) {
+			got := newSASLAuthenticatorForEntry(cfg, name, deps)
+			if _, isGRPC := got.(*NauthilusGRPCSASLAuthenticator); isGRPC {
+				t.Fatalf("expected HTTP authenticator for transport=%q", cfg.DovecotSASL[name].Transport)
+			}
+		})
+	}
+}
+
+func TestNewSASLAuthenticatorForEntryReturnsGRPC(t *testing.T) {
+	cfg := &Config{
+		DovecotSASL: map[string]Request{
+			"grpc_entry": {
+				Transport: transportGRPC,
+				GRPC:      GRPCRequest{Address: "127.0.0.1:9444"},
+			},
+		},
+	}
+
+	deps := &Deps{HTTPClient: &http.Client{}, GRPCConnPool: NewGRPCConnPool()}
+
+	got := newSASLAuthenticatorForEntry(cfg, "grpc_entry", deps)
+	if _, isGRPC := got.(*NauthilusGRPCSASLAuthenticator); !isGRPC {
+		t.Fatalf("expected gRPC authenticator for transport=grpc, got %T", got)
+	}
+}
+
+// --- OIDC backend bearer auth end-to-end ---
+
+func TestNauthilusGRPCSASLAuthenticatorOIDCBearer(t *testing.T) {
+	const issuedToken = "test-access-token-xyz"
+
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			discovery := map[string]any{
+				"issuer":                 "https://idp.local",
+				"token_endpoint":         "http://" + r.Host + "/token",
+				"introspection_endpoint": "http://" + r.Host + "/introspect",
+				"jwks_uri":               "http://" + r.Host + "/jwks",
+			}
+			w.Header().Set("Content-Type", "application/json")
+
+			if err := json.NewEncoder(w).Encode(discovery); err != nil {
+				t.Fatalf("encode discovery: %v", err)
+			}
+		case "/token":
+			body := map[string]any{
+				"access_token": issuedToken,
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			}
+			w.Header().Set("Content-Type", "application/json")
+
+			if err := json.NewEncoder(w).Encode(body); err != nil {
+				t.Fatalf("encode token: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer idp.Close()
+
+	fake := &fakeAuthServer{
+		wantAuth: "Bearer " + issuedToken,
+		response: &authv1.AuthResponse{
+			Ok:           true,
+			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+			AccountField: "Auth-User",
+			Attributes: map[string]*authv1.AttributeValues{
+				"Auth-User": {Values: []string{"oidc-user@example.com"}},
+			},
+		},
+	}
+
+	addr, stop := startFakeAuthServer(t, fake)
+	defer stop()
+
+	cfg := &Config{
+		DovecotSASL: map[string]Request{
+			"smtp_oidc": {
+				Transport: transportGRPC,
+				BackendOIDCAuth: BackendOIDCAuth{
+					Enabled:          true,
+					ConfigurationURI: idp.URL + "/.well-known/openid-configuration",
+					ClientID:         "pfxhttp-test",
+					ClientSecret:     "shh",
+					AuthMethod:       "client_secret_basic",
+				},
+				GRPC: GRPCRequest{Address: addr, Timeout: 2 * time.Second},
+			},
+		},
+	}
+
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	mgr := NewOIDCManager(httpClient)
+
+	pool := NewGRPCConnPool()
+	defer pool.CloseAll()
+
+	auth := NewNauthilusGRPCSASLAuthenticator(cfg, "smtp_oidc", pool, mgr, nil)
+
+	res, err := auth.AuthenticatePassword(context.Background(), "alice", "secret",
+		&DovecotAuthRequest{Service: "smtp", Mechanism: "PLAIN"})
+	if err != nil {
+		t.Fatalf("AuthenticatePassword: %v", err)
+	}
+
+	if !res.Success {
+		t.Fatalf("expected success, got %+v", res)
+	}
+
+	if res.Username != "oidc-user@example.com" {
+		t.Fatalf("username mismatch: %q", res.Username)
+	}
+
+	got, _ := fake.authSeen.Load().(string)
+	if got != "Bearer "+issuedToken {
+		t.Fatalf("expected Bearer metadata to match issued token, got %q", got)
+	}
 }

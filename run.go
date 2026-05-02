@@ -178,6 +178,20 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 
 	deps.Reload(newCfg, newLogger, newHTTPClient, newRespCache)
 
+	// Drop pooled gRPC connections for entries that no longer exist or are
+	// no longer using the gRPC transport.
+	if pool := deps.GetGRPCConnPool(); pool != nil {
+		keep := make(map[string]struct{}, len(newCfg.DovecotSASL))
+
+		for name, entry := range newCfg.DovecotSASL {
+			if entry.Transport == transportGRPC {
+				keep[name] = struct{}{}
+			}
+		}
+
+		pool.RetainOnly(keep)
+	}
+
 	// Use the new logger from now on
 	logger = newLogger
 

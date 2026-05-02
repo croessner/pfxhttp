@@ -86,15 +86,22 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 		return nil, fmt.Errorf("dovecot_sasl '%s' is not configured for gRPC transport", a.name)
 	}
 
+	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
+
 	conn, err := a.pool.Get(a.name, settings.GRPC)
 	if err != nil {
+		if logger != nil {
+			logger.Error("Failed to obtain gRPC connection",
+				slog.String("entry", a.name),
+				slog.String("address", settings.GRPC.Address),
+				slog.String("error", err.Error()))
+		}
+
 		return &SASLAuthResult{Success: false, Reason: "grpc backend unavailable", Temporary: true}, nil
 	}
 
 	authCtx, cancel := context.WithTimeout(ctx, effectiveGRPCTimeout(settings.GRPC))
 	defer cancel()
-
-	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
 
 	authCtx, err = a.attachCallerCredentials(authCtx, settings, logger)
 	if err != nil {

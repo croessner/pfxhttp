@@ -91,6 +91,26 @@ func (p *GRPCConnPool) CloseAll() {
 	p.conns = make(map[string]*pooledConn)
 }
 
+// RetainOnly closes connections whose entry name is no longer present in
+// keepNames. This is intended for SIGHUP-driven reloads where dovecot_sasl
+// entries get removed or switched away from the gRPC transport.
+func (p *GRPCConnPool) RetainOnly(keepNames map[string]struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for name, pc := range p.conns {
+		if _, keep := keepNames[name]; keep {
+			continue
+		}
+
+		if cerr := pc.conn.Close(); cerr != nil {
+			slog.Default().Warn("failed to close gRPC connection", slog.String("entry", name), slog.String("error", cerr.Error()))
+		}
+
+		delete(p.conns, name)
+	}
+}
+
 // dialGRPC creates a new client connection for the supplied settings. TLS is
 // applied when settings.TLS.Enabled is true; otherwise the connection is
 // plaintext (suitable only for trusted networks).
