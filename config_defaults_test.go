@@ -124,6 +124,60 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 	}
 }
 
+func TestResolveDefaultsMergesGRPCFields(t *testing.T) {
+	raw := map[string]Request{
+		"defaults": {
+			Transport: transportGRPC,
+			GRPC: GRPCRequest{
+				Address: "nauthilus.example:9444",
+				Timeout: 0,
+				TLS: GRPCTLS{
+					Enabled:    true,
+					CACert:     "/etc/pfxhttp/ca.pem",
+					ServerName: "nauthilus.example",
+				},
+			},
+		},
+		"smtp_auth": {},
+		"submission_auth": {
+			GRPC: GRPCRequest{
+				TLS: GRPCTLS{ServerName: "override.example"},
+			},
+		},
+	}
+
+	result := resolveDefaults(raw)
+
+	if _, ok := result["defaults"]; ok {
+		t.Fatal("expected 'defaults' key to be removed")
+	}
+
+	a := result["smtp_auth"]
+	if a.Transport != transportGRPC {
+		t.Errorf("smtp_auth.Transport = %q, want %q", a.Transport, transportGRPC)
+	}
+	if a.GRPC.Address != "nauthilus.example:9444" {
+		t.Errorf("smtp_auth.GRPC.Address = %q, want inherited value", a.GRPC.Address)
+	}
+	if !a.GRPC.TLS.Enabled || a.GRPC.TLS.CACert != "/etc/pfxhttp/ca.pem" || a.GRPC.TLS.ServerName != "nauthilus.example" {
+		t.Errorf("smtp_auth TLS fields not inherited: %+v", a.GRPC.TLS)
+	}
+
+	b := result["submission_auth"]
+	if b.Transport != transportGRPC {
+		t.Errorf("submission_auth.Transport = %q, want inherited %q", b.Transport, transportGRPC)
+	}
+	if b.GRPC.Address != "nauthilus.example:9444" {
+		t.Errorf("submission_auth.GRPC.Address = %q, want inherited", b.GRPC.Address)
+	}
+	if b.GRPC.TLS.ServerName != "override.example" {
+		t.Errorf("submission_auth.GRPC.TLS.ServerName = %q, want explicit override", b.GRPC.TLS.ServerName)
+	}
+	if b.GRPC.TLS.CACert != "/etc/pfxhttp/ca.pem" {
+		t.Errorf("submission_auth.GRPC.TLS.CACert = %q, want inherited from defaults", b.GRPC.TLS.CACert)
+	}
+}
+
 func TestResolveDefaultsNilMap(t *testing.T) {
 	result := resolveDefaults(nil)
 	if result != nil {

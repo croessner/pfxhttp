@@ -648,8 +648,14 @@ Notes:
     gRPC share the same source of truth.
 - The shared connection pool maintains one long-lived `*grpc.ClientConn` per
   `dovecot_sasl` entry. Multiple SASL sessions multiplex over the same HTTP/2
-  connection. SIGHUP-based reloads automatically rebuild the connection if
-  the gRPC settings changed.
+  connection. SIGHUP-based reloads automatically:
+  - rebuild a connection when the gRPC settings of an entry change,
+  - close connections for entries that were removed or switched back to
+    the JSON transport,
+  - leave unchanged entries' connections in place to avoid disruption.
+- gRPC errors are mapped conservatively: caller-credential rejection,
+  backend unavailability and timeouts surface as **temporary** failures so
+  Postfix retries instead of immediately blacklisting the user.
 
 ---
 
