@@ -630,6 +630,9 @@ dovecot_sasl:
         client_key: "/etc/pfxhttp/client.key"
         # server_name overrides the SNI/SAN used during the TLS handshake.
         server_name: "nauthilus.example.org"
+        # min_tls_version is "1.2" (default) or "1.3". Anything below 1.2
+        # is rejected at config-load time.
+        min_tls_version: "1.3"
         # skip_verify disables certificate verification — only for testing.
         skip_verify: false
 ```

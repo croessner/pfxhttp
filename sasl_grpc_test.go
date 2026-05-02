@@ -528,7 +528,63 @@ func TestBuildClientTLSConfigEmpty(t *testing.T) {
 	}
 
 	if tlsCfg.MinVersion != tls.VersionTLS12 {
-		t.Fatalf("min TLS version: got %x want %x", tlsCfg.MinVersion, tls.VersionTLS12)
+		t.Fatalf("default min TLS version: got %x want %x", tlsCfg.MinVersion, tls.VersionTLS12)
+	}
+}
+
+func TestBuildClientTLSConfigMinVersion13(t *testing.T) {
+	tlsCfg, err := buildClientTLSConfig(GRPCTLS{MinVersion: "1.3"})
+	if err != nil {
+		t.Fatalf("min_tls_version=1.3 must succeed: %v", err)
+	}
+
+	if tlsCfg.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("min TLS version: got %x want %x", tlsCfg.MinVersion, tls.VersionTLS13)
+	}
+}
+
+func TestBuildClientTLSConfigRejectsLegacyVersions(t *testing.T) {
+	for _, value := range []string{"1.0", "1.1", "ssl3", "garbage"} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := buildClientTLSConfig(GRPCTLS{MinVersion: value}); err == nil {
+				t.Fatalf("expected rejection for min_tls_version=%q", value)
+			}
+		})
+	}
+}
+
+func TestResolveTLSMinVersion(t *testing.T) {
+	cases := []struct {
+		in   string
+		want uint16
+		err  bool
+	}{
+		{"", tls.VersionTLS12, false},
+		{"1.2", tls.VersionTLS12, false},
+		{"1.3", tls.VersionTLS13, false},
+		{"1.1", 0, true},
+		{"TLS1.2", 0, true},
+		{"foo", 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := resolveTLSMinVersion(tc.in)
+			if tc.err {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.in)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got != tc.want {
+				t.Fatalf("got %x want %x", got, tc.want)
+			}
+		})
 	}
 }
 

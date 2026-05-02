@@ -141,10 +141,15 @@ func dialGRPC(settings GRPCRequest) (*grpc.ClientConn, error) {
 // buildClientTLSConfig converts the configured TLS section into a *tls.Config
 // usable with grpc.credentials.NewTLS.
 func buildClientTLSConfig(cfg GRPCTLS) (*tls.Config, error) {
+	minVersion, err := resolveTLSMinVersion(cfg.MinVersion)
+	if err != nil {
+		return nil, err
+	}
+
 	tlsConfig := &tls.Config{
 		ServerName:         cfg.ServerName,
 		InsecureSkipVerify: cfg.SkipVerify,
-		MinVersion:         tls.VersionTLS12,
+		MinVersion:         minVersion,
 	}
 
 	if cfg.CACert != "" {
@@ -181,18 +186,35 @@ func buildClientTLSConfig(cfg GRPCTLS) (*tls.Config, error) {
 // the pool can detect configuration changes after a reload.
 func grpcFingerprint(s GRPCRequest) uint64 {
 	h := fnv.New64a()
-	_, _ = fmt.Fprintf(h, "addr=%s|to=%s|tls=%t|sni=%s|skip=%t|ca=%s|cert=%s|key=%s",
+	_, _ = fmt.Fprintf(h, "addr=%s|to=%s|tls=%t|sni=%s|skip=%t|min=%s|ca=%s|cert=%s|key=%s",
 		s.Address,
 		s.Timeout,
 		s.TLS.Enabled,
 		s.TLS.ServerName,
 		s.TLS.SkipVerify,
+		s.TLS.MinVersion,
 		s.TLS.CACert,
 		s.TLS.ClientCert,
 		s.TLS.ClientKey,
 	)
 
 	return h.Sum64()
+}
+
+// resolveTLSMinVersion converts the YAML "min_tls_version" value (1.2, 1.3,
+// or empty) into a crypto/tls version constant. Anything below 1.2 is
+// rejected — pfxhttp does not negotiate down to TLS 1.0/1.1 even if the
+// peer would accept it. Empty defaults to TLS 1.2 so the floor is safe by
+// default.
+func resolveTLSMinVersion(value string) (uint16, error) {
+	switch value {
+	case "", "1.2":
+		return tls.VersionTLS12, nil
+	case "1.3":
+		return tls.VersionTLS13, nil
+	default:
+		return 0, fmt.Errorf("unsupported min_tls_version %q (allowed: 1.2, 1.3)", value)
+	}
 }
 
 // effectiveGRPCTimeout returns the configured timeout or a sensible default

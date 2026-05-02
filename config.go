@@ -137,13 +137,16 @@ type GRPCRequest struct {
 
 // GRPCTLS configures the TLS connection for the gRPC client. CACert pins the
 // trust anchors; ClientCert/ClientKey enable mTLS; ServerName overrides the
-// SNI/SAN used during the handshake.
+// SNI/SAN used during the handshake. MinVersion selects the lowest accepted
+// TLS protocol version (1.2 or 1.3). The hard floor is 1.2 — anything older
+// is forbidden by validation regardless of YAML input.
 type GRPCTLS struct {
 	Enabled    bool   `mapstructure:"enabled"`
 	CACert     string `mapstructure:"ca_cert" validate:"omitempty,file"`
 	ClientCert string `mapstructure:"client_cert" validate:"omitempty,file"`
 	ClientKey  string `mapstructure:"client_key" validate:"omitempty,file"`
 	ServerName string `mapstructure:"server_name" validate:"omitempty"`
+	MinVersion string `mapstructure:"min_tls_version" validate:"omitempty,oneof=1.2 1.3"`
 	SkipVerify bool   `mapstructure:"skip_verify"`
 }
 
@@ -263,6 +266,10 @@ func mergeGRPC(entry *GRPCRequest, defaults GRPCRequest) {
 
 	if entry.TLS.ServerName == "" {
 		entry.TLS.ServerName = defaults.TLS.ServerName
+	}
+
+	if entry.TLS.MinVersion == "" {
+		entry.TLS.MinVersion = defaults.TLS.MinVersion
 	}
 
 	if !entry.TLS.SkipVerify {

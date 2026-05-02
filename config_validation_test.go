@@ -160,6 +160,57 @@ func TestConfigValidation(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "DovecotSASL gRPC accepts min_tls_version=1.3",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport: transportGRPC,
+						GRPC: GRPCRequest{
+							Address: "nauthilus.example.com:9444",
+							TLS:     GRPCTLS{Enabled: true, MinVersion: "1.3"},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "DovecotSASL gRPC rejects min_tls_version=1.1",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport: transportGRPC,
+						GRPC: GRPCRequest{
+							Address: "nauthilus.example.com:9444",
+							TLS:     GRPCTLS{Enabled: true, MinVersion: "1.1"},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"min_version", "oneof"},
+		},
 	}
 
 	for _, tt := range tests {
