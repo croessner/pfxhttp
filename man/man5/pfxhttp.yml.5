@@ -520,6 +520,18 @@ dovecot_sasl:
 .RE
 
 When \fBtransport: grpc\fP is set, \fBgrpc.address\fP is mandatory and the HTTP \fBtarget\fP URL is not required.
+The gRPC \fBAuthenticate\fP request forwards the same core SASL context as the JSON transport and additionally
+maps every parsed field that exists in the AuthService contract when Postfix/Dovecot supplies it:
+\fBexternal_session_id\fP (or \fBsession\fP), \fBuser_agent\fP, \fBssl_session_id\fP,
+\fBssl_client_verify\fP, \fBssl_client_dn\fP, \fBssl_client_cn\fP, \fBssl_issuer\fP,
+\fBssl_client_notbefore\fP, \fBssl_client_notafter\fP, \fBssl_subject_dn\fP,
+\fBssl_issuer_dn\fP, \fBssl_client_subject_dn\fP, \fBssl_client_issuer_dn\fP,
+\fBssl_serial\fP, \fBssl_fingerprint\fP, \fBoidc_cid\fP, and \fBauth_login_attempt\fP.
+Direct contract names such as \fBclient_ip\fP, \fBlocal_ip\fP, \fBclient_port\fP,
+\fBlocal_port\fP, \fBclient_hostname\fP, \fBprotocol\fP, \fBmethod\fP, \fBssl\fP, and
+\fBssl_protocol\fP are also accepted; classic Dovecot names such as \fBrip\fP, \fBlip\fP,
+and \fBlocal_name\fP remain supported. Fields without an AuthService equivalent, such as
+\fBssl_cipher_bits\fP, \fBssl_pxt_id\fP, \fBnologin\fP, and \fBno_penalty\fP, are not sent over gRPC.
 Caller authorization is taken from \fBbackend_oidc_auth\fP or from the effective \fBAuthorization\fP header after
 \fBhttp_auth_basic\fP and \fBcustom_headers\fP have been merged. Existing Dovecot connections pick up reloaded
 backend settings on the next authentication request; the gRPC connection pool rebuilds connections when transport

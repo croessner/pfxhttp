@@ -297,6 +297,70 @@ func TestDovecotDecoderDecodeAuthRequest(t *testing.T) {
 	}
 }
 
+func TestDovecotDecoderDecodeAuthRequestGRPCFields(t *testing.T) {
+	decoder := &DovecotDecoder{}
+
+	got, err := decoder.DecodeAuthRequest(
+		"1\tplain\tprotocol=smtp\tmethod=login\tlocal_ip=127.0.0.1\tclient_ip=192.0.2.10\tlocal_port=587\tclient_port=43124" +
+			"\tclient_hostname=client.example.org\tsession=session-1\tuser_agent=Postfix/3.11\tssl=on" +
+			"\tssl_session_id=tls-session\tssl_client_verify=SUCCESS\tssl_client_dn=CN=client,O=Example" +
+			"\tssl_client_cn=client\tssl_issuer=Example CA\tssl_client_notbefore=20260502000000Z" +
+			"\tssl_client_notafter=20270502000000Z\tssl_subject_dn=CN=server,O=Example" +
+			"\tssl_issuer_dn=CN=Example CA,O=Example\tssl_client_subject_dn=CN=client,O=Example" +
+			"\tssl_client_issuer_dn=CN=Example Client CA,O=Example\tssl_protocol=TLSv1.3" +
+			"\tssl_cipher=TLS_AES_256_GCM_SHA384\tssl_serial=01:02:03\tssl_fingerprint=AA:BB:CC" +
+			"\tclient_id=client-x\toidc_cid=oidc-client\tauth_login_attempt=3",
+	)
+	if err != nil {
+		t.Fatalf("DecodeAuthRequest: %v", err)
+	}
+
+	if got.Mechanism != "LOGIN" || got.Service != "smtp" {
+		t.Fatalf("mechanism/service mismatch: %+v", got)
+	}
+
+	if got.LocalIP != "127.0.0.1" || got.RemoteIP != "192.0.2.10" ||
+		got.LocalPort != "587" || got.RemotePort != "43124" {
+		t.Fatalf("address fields mismatch: %+v", got)
+	}
+
+	if got.ClientHostname != "client.example.org" ||
+		got.ExternalSessionID != "session-1" ||
+		got.UserAgent != "Postfix/3.11" {
+		t.Fatalf("identity fields mismatch: %+v", got)
+	}
+
+	if got.SSL != "on" || got.SSLSessionID != "tls-session" || got.SSLClientVerify != "SUCCESS" {
+		t.Fatalf("ssl state mismatch: %+v", got)
+	}
+
+	if got.SSLClientDN != "CN=client,O=Example" ||
+		got.SSLClientCN != "client" ||
+		got.SSLIssuer != "Example CA" ||
+		got.SSLClientNotBefore != "20260502000000Z" ||
+		got.SSLClientNotAfter != "20270502000000Z" {
+		t.Fatalf("ssl client fields mismatch: %+v", got)
+	}
+
+	if got.SSLSubjectDN != "CN=server,O=Example" ||
+		got.SSLIssuerDN != "CN=Example CA,O=Example" ||
+		got.SSLClientSubjectDN != "CN=client,O=Example" ||
+		got.SSLClientIssuerDN != "CN=Example Client CA,O=Example" {
+		t.Fatalf("ssl DN fields mismatch: %+v", got)
+	}
+
+	if got.SSLProtocol != "TLSv1.3" ||
+		got.SSLCipher != "TLS_AES_256_GCM_SHA384" ||
+		got.SSLSerial != "01:02:03" ||
+		got.SSLFingerprint != "AA:BB:CC" {
+		t.Fatalf("ssl protocol/material mismatch: %+v", got)
+	}
+
+	if got.ClientID != "client-x" || got.OIDCCID != "oidc-client" || got.AuthLoginAttempt != 3 {
+		t.Fatalf("client/oidc fields mismatch: %+v", got)
+	}
+}
+
 func TestDovecotDecoderDecodeContRequest(t *testing.T) {
 	decoder := &DovecotDecoder{}
 

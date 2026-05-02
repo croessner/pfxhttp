@@ -218,21 +218,39 @@ func buildGRPCAuthRequest(
 	}
 
 	out := &authv1.AuthRequest{
-		Username:       username,
-		Password:       password,
-		ClientIp:       req.RemoteIP,
-		ClientPort:     req.RemotePort,
-		ClientHostname: req.LocalName,
-		ClientId:       req.ClientID,
-		LocalIp:        req.LocalIP,
-		LocalPort:      cmp.Or(req.LocalPort, defaultLocalPort),
-		Protocol:       req.Service,
-		Method:         req.Mechanism,
-		SslProtocol:    req.SSLProtocol,
-		SslCipher:      req.SSLCipher,
+		Username:           username,
+		Password:           password,
+		ClientIp:           req.RemoteIP,
+		ClientPort:         req.RemotePort,
+		ClientHostname:     cmp.Or(req.ClientHostname, req.LocalName),
+		ClientId:           req.ClientID,
+		ExternalSessionId:  req.ExternalSessionID,
+		UserAgent:          req.UserAgent,
+		LocalIp:            req.LocalIP,
+		LocalPort:          cmp.Or(req.LocalPort, defaultLocalPort),
+		Protocol:           req.Service,
+		Method:             req.Mechanism,
+		Ssl:                req.SSL,
+		SslSessionId:       req.SSLSessionID,
+		SslClientVerify:    req.SSLClientVerify,
+		SslClientDn:        req.SSLClientDN,
+		SslClientCn:        req.SSLClientCN,
+		SslIssuer:          req.SSLIssuer,
+		SslClientNotbefore: req.SSLClientNotBefore,
+		SslClientNotafter:  req.SSLClientNotAfter,
+		SslSubjectDn:       req.SSLSubjectDN,
+		SslIssuerDn:        req.SSLIssuerDN,
+		SslClientSubjectDn: req.SSLClientSubjectDN,
+		SslClientIssuerDn:  req.SSLClientIssuerDN,
+		SslProtocol:        req.SSLProtocol,
+		SslCipher:          req.SSLCipher,
+		SslSerial:          req.SSLSerial,
+		SslFingerprint:     req.SSLFingerprint,
+		OidcCid:            req.OIDCCID,
+		AuthLoginAttempt:   req.AuthLoginAttempt,
 	}
 
-	if req.Secured {
+	if req.Secured && out.Ssl == "" {
 		out.Ssl = "on"
 	}
 

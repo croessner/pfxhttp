@@ -642,6 +642,20 @@ Notes:
 - `transport` defaults to `json`. When set to `grpc`, the `target` HTTP URL
   is no longer required; instead `grpc.address` (`host:port`) becomes
   mandatory.
+- The gRPC `Authenticate` request forwards the same core SASL context as the
+  JSON transport and additionally maps every parsed field that exists in the
+  AuthService contract when Postfix/Dovecot supplies it: `external_session_id`
+  (or `session`), `user_agent`, `ssl_session_id`, `ssl_client_verify`,
+  `ssl_client_dn`, `ssl_client_cn`, `ssl_issuer`, `ssl_client_notbefore`,
+  `ssl_client_notafter`, `ssl_subject_dn`, `ssl_issuer_dn`,
+  `ssl_client_subject_dn`, `ssl_client_issuer_dn`, `ssl_serial`,
+  `ssl_fingerprint`, `oidc_cid`, and `auth_login_attempt`. Direct contract
+  names such as `client_ip`, `local_ip`, `client_port`, `local_port`,
+  `client_hostname`, `protocol`, `method`, `ssl`, and `ssl_protocol` are also
+  accepted; classic Dovecot names such as `rip`, `lip`, and `local_name`
+  remain supported. Fields without an AuthService equivalent, such as
+  `ssl_cipher_bits`, `ssl_pxt_id`, `nologin`, and `no_penalty`, are not sent
+  over gRPC.
 - Caller authorization is derived from existing fields:
   - `backend_oidc_auth.enabled: true` → the OIDC manager fetches a token via
     Client Credentials / `private_key_jwt` and the result is sent as

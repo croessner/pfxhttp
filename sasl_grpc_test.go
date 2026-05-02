@@ -37,17 +37,35 @@ import (
 
 func TestBuildGRPCAuthRequestMapsAllFields(t *testing.T) {
 	req := &DovecotAuthRequest{
-		Service:     "smtp",
-		Mechanism:   "PLAIN",
-		LocalIP:     "127.0.0.1",
-		LocalPort:   "25",
-		RemoteIP:    "10.0.0.1",
-		RemotePort:  "44321",
-		LocalName:   "mx1.example.org",
-		Secured:     true,
-		SSLProtocol: "TLSv1.3",
-		SSLCipher:   "TLS_AES_256_GCM_SHA384",
-		ClientID:    "client-x",
+		Service:            "smtp",
+		Mechanism:          "PLAIN",
+		LocalIP:            "127.0.0.1",
+		LocalPort:          "25",
+		RemoteIP:           "10.0.0.1",
+		RemotePort:         "44321",
+		LocalName:          "mx1.example.org",
+		ClientHostname:     "client.example.org",
+		ExternalSessionID:  "session-1",
+		UserAgent:          "Postfix/3.11",
+		Secured:            true,
+		SSLSessionID:       "tls-session",
+		SSLClientVerify:    "SUCCESS",
+		SSLClientDN:        "CN=client,O=Example",
+		SSLClientCN:        "client",
+		SSLIssuer:          "Example CA",
+		SSLClientNotBefore: "20260502000000Z",
+		SSLClientNotAfter:  "20270502000000Z",
+		SSLSubjectDN:       "CN=server,O=Example",
+		SSLIssuerDN:        "CN=Example CA,O=Example",
+		SSLClientSubjectDN: "CN=client,O=Example",
+		SSLClientIssuerDN:  "CN=Example Client CA,O=Example",
+		SSLProtocol:        "TLSv1.3",
+		SSLCipher:          "TLS_AES_256_GCM_SHA384",
+		SSLSerial:          "01:02:03",
+		SSLFingerprint:     "AA:BB:CC",
+		ClientID:           "client-x",
+		OIDCCID:            "oidc-client",
+		AuthLoginAttempt:   3,
 	}
 
 	got := buildGRPCAuthRequest("alice", "secret", req, "587")
@@ -64,7 +82,7 @@ func TestBuildGRPCAuthRequestMapsAllFields(t *testing.T) {
 		t.Fatalf("client ip/port mismatch: %+v", got)
 	}
 
-	if got.GetClientHostname() != "mx1.example.org" {
+	if got.GetClientHostname() != "client.example.org" {
 		t.Fatalf("client hostname mismatch: %+v", got)
 	}
 
@@ -72,16 +90,49 @@ func TestBuildGRPCAuthRequestMapsAllFields(t *testing.T) {
 		t.Fatalf("local ip/port mismatch: %+v", got)
 	}
 
+	if got.GetExternalSessionId() != "session-1" || got.GetUserAgent() != "Postfix/3.11" {
+		t.Fatalf("session/user-agent mismatch: %+v", got)
+	}
+
 	if got.GetSsl() != "on" {
 		t.Fatalf("ssl flag: got %q want \"on\"", got.GetSsl())
+	}
+
+	if got.GetSslSessionId() != "tls-session" || got.GetSslClientVerify() != "SUCCESS" {
+		t.Fatalf("ssl session/verify mismatch: %+v", got)
+	}
+
+	if got.GetSslClientDn() != "CN=client,O=Example" || got.GetSslClientCn() != "client" {
+		t.Fatalf("ssl client identity mismatch: %+v", got)
+	}
+
+	if got.GetSslIssuer() != "Example CA" ||
+		got.GetSslClientNotbefore() != "20260502000000Z" ||
+		got.GetSslClientNotafter() != "20270502000000Z" {
+		t.Fatalf("ssl issuer/validity mismatch: %+v", got)
+	}
+
+	if got.GetSslSubjectDn() != "CN=server,O=Example" ||
+		got.GetSslIssuerDn() != "CN=Example CA,O=Example" ||
+		got.GetSslClientSubjectDn() != "CN=client,O=Example" ||
+		got.GetSslClientIssuerDn() != "CN=Example Client CA,O=Example" {
+		t.Fatalf("ssl DN mismatch: %+v", got)
 	}
 
 	if got.GetSslProtocol() != "TLSv1.3" || got.GetSslCipher() != "TLS_AES_256_GCM_SHA384" {
 		t.Fatalf("ssl protocol/cipher mismatch: %+v", got)
 	}
 
+	if got.GetSslSerial() != "01:02:03" || got.GetSslFingerprint() != "AA:BB:CC" {
+		t.Fatalf("ssl serial/fingerprint mismatch: %+v", got)
+	}
+
 	if got.GetClientId() != "client-x" {
 		t.Fatalf("client_id mismatch: %q", got.GetClientId())
+	}
+
+	if got.GetOidcCid() != "oidc-client" || got.GetAuthLoginAttempt() != 3 {
+		t.Fatalf("oidc/auth attempt mismatch: %+v", got)
 	}
 }
 

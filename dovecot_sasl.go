@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -129,11 +130,23 @@ type DovecotAuthRequest struct {
 	// LocalName is the local hostname.
 	LocalName string
 
+	// ClientHostname is the remote/client hostname when provided explicitly.
+	ClientHostname string
+
 	// User is the username.
 	User string
 
+	// ExternalSessionID is an optional caller-provided session/correlation ID.
+	ExternalSessionID string
+
+	// UserAgent identifies the upstream client if provided.
+	UserAgent string
+
 	// Secured indicates if the connection is secured (TLS).
 	Secured bool
+
+	// SSL is the backend SSL indicator value when provided directly.
+	SSL string
 
 	// NoLogin indicates the nologin flag was set. This is used by Dovecot's auth
 	// clients (like Postfix) to check if a user exists and is eligible for login
@@ -157,8 +170,53 @@ type DovecotAuthRequest struct {
 	// SSLPXTID is the SSL proxy client ID.
 	SSLPXTID string
 
+	// SSLSessionID is the TLS session ID when provided by the client.
+	SSLSessionID string
+
+	// SSLClientVerify is the TLS client certificate verification result.
+	SSLClientVerify string
+
+	// SSLClientDN is the TLS client certificate DN.
+	SSLClientDN string
+
+	// SSLClientCN is the TLS client certificate common name.
+	SSLClientCN string
+
+	// SSLIssuer is the TLS certificate issuer.
+	SSLIssuer string
+
+	// SSLClientNotBefore is the client certificate not-before timestamp.
+	SSLClientNotBefore string
+
+	// SSLClientNotAfter is the client certificate not-after timestamp.
+	SSLClientNotAfter string
+
+	// SSLSubjectDN is the TLS certificate subject DN.
+	SSLSubjectDN string
+
+	// SSLIssuerDN is the TLS certificate issuer DN.
+	SSLIssuerDN string
+
+	// SSLClientSubjectDN is the client certificate subject DN.
+	SSLClientSubjectDN string
+
+	// SSLClientIssuerDN is the client certificate issuer DN.
+	SSLClientIssuerDN string
+
+	// SSLSerial is the TLS certificate serial number.
+	SSLSerial string
+
+	// SSLFingerprint is the TLS certificate fingerprint.
+	SSLFingerprint string
+
 	// ClientID is the client ID.
 	ClientID string
+
+	// OIDCCID is the OIDC client ID/correlation value when provided.
+	OIDCCID string
+
+	// AuthLoginAttempt counts the current login attempt when provided.
+	AuthLoginAttempt uint32
 }
 
 // DovecotContRequest represents a parsed CONT command from a client.
@@ -258,7 +316,12 @@ func (d *DovecotDecoder) DecodeCPID(args string) (string, error) {
 
 // DecodeAuthRequest parses an AUTH command arguments string into a DovecotAuthRequest.
 // Expected format: "<id>\t<mechanism>\t[param=value\t...]"
-// Parameters include: service=, user=, resp=, lip=, rip=, lport=, rport=, local_name=, secured, nologin, no-penalty, ssl=, ssl_cipher=, ssl_cipher_bits=, ssl_pxt_id=, client_id=
+// Parameters include Dovecot/Postfix names such as service=, user=, resp=,
+// lip=, rip=, lport=, rport=, local_name=, secured, nologin, no-penalty,
+// ssl=, ssl_cipher=, ssl_cipher_bits=, ssl_pxt_id=, client_id=, and direct
+// Nauthilus AuthService names such as client_ip=, local_ip=,
+// external_session_id=, user_agent=, ssl_session_id=, ssl_client_verify=,
+// ssl_client_dn=, oidc_cid=, and auth_login_attempt=.
 //
 // Postfix Source Reference (xsasl_dovecot.c):
 // - xsasl_dovecot_server_first() and xsasl_dovecot_server_next() construct this command.
@@ -279,6 +342,10 @@ func (d *DovecotDecoder) DecodeAuthRequest(args string) (*DovecotAuthRequest, er
 		switch key {
 		case "service":
 			req.Service = value
+		case "protocol":
+			req.Service = value
+		case "method":
+			req.Mechanism = strings.ToUpper(value)
 		case "resp":
 			if hasValue {
 				decoded, err := base64.StdEncoding.DecodeString(value)
@@ -290,16 +357,30 @@ func (d *DovecotDecoder) DecodeAuthRequest(args string) (*DovecotAuthRequest, er
 			}
 		case "lip":
 			req.LocalIP = value
+		case "local_ip":
+			req.LocalIP = value
 		case "rip":
+			req.RemoteIP = value
+		case "client_ip":
 			req.RemoteIP = value
 		case "lport":
 			req.LocalPort = value
+		case "local_port":
+			req.LocalPort = value
 		case "rport":
+			req.RemotePort = value
+		case "client_port":
 			req.RemotePort = value
 		case "local_name":
 			req.LocalName = value
+		case "client_hostname":
+			req.ClientHostname = value
 		case "user":
 			req.User = value
+		case "external_session_id", "session":
+			req.ExternalSessionID = value
+		case "user_agent":
+			req.UserAgent = value
 		case "secured":
 			req.Secured = true
 		case "nologin":
@@ -307,19 +388,70 @@ func (d *DovecotDecoder) DecodeAuthRequest(args string) (*DovecotAuthRequest, er
 		case "no-penalty":
 			req.NoPenalty = true
 		case "ssl":
-			req.SSLProtocol = value
+			if isTLSProtocolName(value) {
+				req.SSLProtocol = value
+			} else {
+				req.SSL = value
+			}
+		case "ssl_session_id":
+			req.SSLSessionID = value
+		case "ssl_client_verify":
+			req.SSLClientVerify = value
+		case "ssl_client_dn":
+			req.SSLClientDN = value
+		case "ssl_client_cn":
+			req.SSLClientCN = value
+		case "ssl_issuer":
+			req.SSLIssuer = value
+		case "ssl_client_notbefore":
+			req.SSLClientNotBefore = value
+		case "ssl_client_notafter":
+			req.SSLClientNotAfter = value
+		case "ssl_subject_dn":
+			req.SSLSubjectDN = value
+		case "ssl_issuer_dn":
+			req.SSLIssuerDN = value
+		case "ssl_client_subject_dn":
+			req.SSLClientSubjectDN = value
+		case "ssl_client_issuer_dn":
+			req.SSLClientIssuerDN = value
 		case "ssl_cipher":
 			req.SSLCipher = value
 		case "ssl_cipher_bits":
 			req.SSLCipherBits = value
 		case "ssl_pxt_id":
 			req.SSLPXTID = value
+		case "ssl_protocol":
+			req.SSLProtocol = value
+		case "ssl_serial":
+			req.SSLSerial = value
+		case "ssl_fingerprint":
+			req.SSLFingerprint = value
 		case "client_id":
 			req.ClientID = value
+		case "oidc_cid":
+			req.OIDCCID = value
+		case "auth_login_attempt":
+			if value == "" {
+				continue
+			}
+
+			attempt, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid auth_login_attempt: %w", err)
+			}
+
+			req.AuthLoginAttempt = uint32(attempt)
 		}
 	}
 
 	return req, nil
+}
+
+func isTLSProtocolName(value string) bool {
+	v := strings.ToUpper(value)
+
+	return strings.HasPrefix(v, "TLS") || strings.HasPrefix(v, "SSL")
 }
 
 // DecodeContRequest parses a CONT command arguments string into a DovecotContRequest.
