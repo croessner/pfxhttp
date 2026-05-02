@@ -135,19 +135,20 @@ type GRPCRequest struct {
 	TLS     GRPCTLS       `mapstructure:"tls" validate:"omitempty"`
 }
 
-// GRPCTLS configures the TLS connection for the gRPC client. CACert pins the
+// GRPCTLS configures the TLS connection for the gRPC client. RootCA pins the
 // trust anchors; ClientCert/ClientKey enable mTLS; ServerName overrides the
 // SNI/SAN used during the handshake. MinVersion selects the lowest accepted
 // TLS protocol version (1.2 or 1.3). The hard floor is 1.2 — anything older
-// is forbidden by validation regardless of YAML input.
+// is forbidden by validation regardless of YAML input. Boolean fields are
+// pointers so defaults merging can distinguish "unset" from explicit false.
 type GRPCTLS struct {
-	Enabled    bool   `mapstructure:"enabled"`
-	CACert     string `mapstructure:"ca_cert" validate:"omitempty,file"`
+	Enabled    *bool  `mapstructure:"enabled"`
+	RootCA     string `mapstructure:"root_ca" validate:"omitempty,file"`
 	ClientCert string `mapstructure:"client_cert" validate:"omitempty,file"`
 	ClientKey  string `mapstructure:"client_key" validate:"omitempty,file"`
 	ServerName string `mapstructure:"server_name" validate:"omitempty"`
 	MinVersion string `mapstructure:"min_tls_version" validate:"omitempty,oneof=1.2 1.3"`
-	SkipVerify bool   `mapstructure:"skip_verify"`
+	SkipVerify *bool  `mapstructure:"skip_verify"`
 }
 
 type Request struct {
@@ -248,12 +249,12 @@ func mergeGRPC(entry *GRPCRequest, defaults GRPCRequest) {
 		entry.Timeout = defaults.Timeout
 	}
 
-	if !entry.TLS.Enabled {
-		entry.TLS.Enabled = defaults.TLS.Enabled
+	if entry.TLS.Enabled == nil && defaults.TLS.Enabled != nil {
+		entry.TLS.Enabled = new(*defaults.TLS.Enabled)
 	}
 
-	if entry.TLS.CACert == "" {
-		entry.TLS.CACert = defaults.TLS.CACert
+	if entry.TLS.RootCA == "" {
+		entry.TLS.RootCA = defaults.TLS.RootCA
 	}
 
 	if entry.TLS.ClientCert == "" {
@@ -272,9 +273,13 @@ func mergeGRPC(entry *GRPCRequest, defaults GRPCRequest) {
 		entry.TLS.MinVersion = defaults.TLS.MinVersion
 	}
 
-	if !entry.TLS.SkipVerify {
-		entry.TLS.SkipVerify = defaults.TLS.SkipVerify
+	if entry.TLS.SkipVerify == nil && defaults.TLS.SkipVerify != nil {
+		entry.TLS.SkipVerify = new(*defaults.TLS.SkipVerify)
 	}
+}
+
+func boolValue(value *bool) bool {
+	return value != nil && *value
 }
 
 // resolveDefaults extracts the optional "defaults" key from a section map,

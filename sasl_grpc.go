@@ -176,18 +176,23 @@ func (a *NauthilusGRPCSASLAuthenticator) attachCallerCredentials(
 }
 
 // findAuthorizationHeader scans the merged custom_headers list for an
-// Authorization entry and returns its raw value. http_auth_basic is folded
-// into custom_headers during config processing, so this also covers the
-// Basic-auth case.
+// Authorization entry and returns its raw value. The last header wins, matching
+// net/http.Header.Set behavior used by the HTTP transport.
 func findAuthorizationHeader(headers []string) (string, bool) {
+	var (
+		value string
+		found bool
+	)
+
 	for _, h := range headers {
 		k, v := splitHeader(h)
 		if strings.EqualFold(k, "Authorization") && v != "" {
-			return v, true
+			value = v
+			found = true
 		}
 	}
 
-	return "", false
+	return value, found
 }
 
 // effectiveLogger guards against nil loggers passed via context. The OIDC
@@ -213,17 +218,18 @@ func buildGRPCAuthRequest(
 	}
 
 	out := &authv1.AuthRequest{
-		Username:    username,
-		Password:    password,
-		ClientIp:    req.RemoteIP,
-		ClientPort:  req.RemotePort,
-		ClientId:    req.ClientID,
-		LocalIp:     req.LocalIP,
-		LocalPort:   cmp.Or(req.LocalPort, defaultLocalPort),
-		Protocol:    req.Service,
-		Method:      req.Mechanism,
-		SslProtocol: req.SSLProtocol,
-		SslCipher:   req.SSLCipher,
+		Username:       username,
+		Password:       password,
+		ClientIp:       req.RemoteIP,
+		ClientPort:     req.RemotePort,
+		ClientHostname: req.LocalName,
+		ClientId:       req.ClientID,
+		LocalIp:        req.LocalIP,
+		LocalPort:      cmp.Or(req.LocalPort, defaultLocalPort),
+		Protocol:       req.Service,
+		Method:         req.Mechanism,
+		SslProtocol:    req.SSLProtocol,
+		SslCipher:      req.SSLCipher,
 	}
 
 	if req.Secured {

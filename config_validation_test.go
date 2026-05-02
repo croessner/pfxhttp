@@ -178,7 +178,7 @@ func TestConfigValidation(t *testing.T) {
 						Transport: transportGRPC,
 						GRPC: GRPCRequest{
 							Address: "nauthilus.example.com:9444",
-							TLS:     GRPCTLS{Enabled: true, MinVersion: "1.3"},
+							TLS:     GRPCTLS{Enabled: new(true), MinVersion: "1.3"},
 						},
 					},
 				},
@@ -203,7 +203,7 @@ func TestConfigValidation(t *testing.T) {
 						Transport: transportGRPC,
 						GRPC: GRPCRequest{
 							Address: "nauthilus.example.com:9444",
-							TLS:     GRPCTLS{Enabled: true, MinVersion: "1.1"},
+							TLS:     GRPCTLS{Enabled: new(true), MinVersion: "1.1"},
 						},
 					},
 				},

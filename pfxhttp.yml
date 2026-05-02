@@ -137,3 +137,17 @@ dovecot_sasl:
     status_code: 200
     # Username is returned via HTTP response header "Auth-User" by the backend.
     # Errors are signaled via HTTP status and the "Auth-Status" header.
+
+  dovecot_sasl_grpc:
+    transport: grpc
+    http_auth_basic: admin:admin-password
+    default_local_port: "587"
+    grpc:
+      address: 127.0.0.1:9444
+      timeout: 5s
+      tls:
+        enabled: false
+        # root_ca: /etc/pfxhttp/nauthilus-ca.pem
+        # server_name: nauthilus.example.org
+        min_tls_version: "1.2"
+        skip_verify: false

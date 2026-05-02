@@ -624,7 +624,7 @@ dovecot_sasl:
       timeout: 5s
       tls:
         enabled: true
-        ca_cert: "/etc/pfxhttp/nauthilus-ca.pem"
+        root_ca: "/etc/pfxhttp/nauthilus-ca.pem"
         # Optional mTLS:
         client_cert: "/etc/pfxhttp/client.pem"
         client_key: "/etc/pfxhttp/client.key"
@@ -651,7 +651,8 @@ Notes:
     gRPC share the same source of truth.
 - The shared connection pool maintains one long-lived `*grpc.ClientConn` per
   `dovecot_sasl` entry. Multiple SASL sessions multiplex over the same HTTP/2
-  connection. SIGHUP-based reloads automatically:
+  connection. Existing Dovecot connections use the reloaded backend settings
+  for the next authentication request. SIGHUP-based reloads automatically:
   - rebuild a connection when the gRPC settings of an entry change,
   - close connections for entries that were removed or switched back to
     the JSON transport,

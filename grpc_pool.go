@@ -119,7 +119,7 @@ func dialGRPC(settings GRPCRequest) (*grpc.ClientConn, error) {
 		grpc.WithDefaultCallOptions(grpc.WaitForReady(false)),
 	}
 
-	if settings.TLS.Enabled {
+	if boolValue(settings.TLS.Enabled) {
 		tlsConfig, err := buildClientTLSConfig(settings.TLS)
 		if err != nil {
 			return nil, err
@@ -148,19 +148,19 @@ func buildClientTLSConfig(cfg GRPCTLS) (*tls.Config, error) {
 
 	tlsConfig := &tls.Config{
 		ServerName:         cfg.ServerName,
-		InsecureSkipVerify: cfg.SkipVerify,
+		InsecureSkipVerify: boolValue(cfg.SkipVerify),
 		MinVersion:         minVersion,
 	}
 
-	if cfg.CACert != "" {
-		pem, err := os.ReadFile(cfg.CACert)
+	if cfg.RootCA != "" {
+		pem, err := os.ReadFile(cfg.RootCA)
 		if err != nil {
-			return nil, fmt.Errorf("read ca_cert: %w", err)
+			return nil, fmt.Errorf("read root_ca: %w", err)
 		}
 
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("ca_cert: no PEM certificates found")
+			return nil, errors.New("root_ca: no PEM certificates found")
 		}
 
 		tlsConfig.RootCAs = pool
@@ -189,11 +189,11 @@ func grpcFingerprint(s GRPCRequest) uint64 {
 	_, _ = fmt.Fprintf(h, "addr=%s|to=%s|tls=%t|sni=%s|skip=%t|min=%s|ca=%s|cert=%s|key=%s",
 		s.Address,
 		s.Timeout,
-		s.TLS.Enabled,
+		boolValue(s.TLS.Enabled),
 		s.TLS.ServerName,
-		s.TLS.SkipVerify,
+		boolValue(s.TLS.SkipVerify),
 		s.TLS.MinVersion,
-		s.TLS.CACert,
+		s.TLS.RootCA,
 		s.TLS.ClientCert,
 		s.TLS.ClientKey,
 	)

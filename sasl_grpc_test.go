@@ -8,10 +8,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +43,7 @@ func TestBuildGRPCAuthRequestMapsAllFields(t *testing.T) {
 		LocalPort:   "25",
 		RemoteIP:    "10.0.0.1",
 		RemotePort:  "44321",
+		LocalName:   "mx1.example.org",
 		Secured:     true,
 		SSLProtocol: "TLSv1.3",
 		SSLCipher:   "TLS_AES_256_GCM_SHA384",
@@ -59,6 +62,10 @@ func TestBuildGRPCAuthRequestMapsAllFields(t *testing.T) {
 
 	if got.GetClientIp() != "10.0.0.1" || got.GetClientPort() != "44321" {
 		t.Fatalf("client ip/port mismatch: %+v", got)
+	}
+
+	if got.GetClientHostname() != "mx1.example.org" {
+		t.Fatalf("client hostname mismatch: %+v", got)
 	}
 
 	if got.GetLocalIp() != "127.0.0.1" || got.GetLocalPort() != "25" {
@@ -199,6 +206,7 @@ func TestFindAuthorizationHeader(t *testing.T) {
 	headers := []string{
 		"Content-Type: application/json",
 		"authorization: Basic Zm9vOmJhcg==",
+		"Authorization: Bearer override",
 		"X-Trace: yes",
 	}
 
@@ -207,7 +215,7 @@ func TestFindAuthorizationHeader(t *testing.T) {
 		t.Fatalf("expected to find Authorization header")
 	}
 
-	if got != "Basic Zm9vOmJhcg==" {
+	if got != "Bearer override" {
 		t.Fatalf("authorization value: got %q", got)
 	}
 }
@@ -386,6 +394,113 @@ func TestNauthilusGRPCSASLAuthenticatorTokenDelegatesToFallback(t *testing.T) {
 	if !fallback.tokenCalled {
 		t.Fatalf("expected fallback.AuthenticateToken to be called")
 	}
+}
+
+func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
+	oldBackend := &fakeAuthServer{
+		response: &authv1.AuthResponse{
+			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+			AccountField: "Auth-User",
+			Attributes: map[string]*authv1.AttributeValues{
+				"Auth-User": {Values: []string{"old@example.com"}},
+			},
+		},
+	}
+	oldAddr, stopOld := startFakeAuthServer(t, oldBackend)
+	defer stopOld()
+
+	newBackend := &fakeAuthServer{
+		response: &authv1.AuthResponse{
+			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+			AccountField: "Auth-User",
+			Attributes: map[string]*authv1.AttributeValues{
+				"Auth-User": {Values: []string{"new@example.com"}},
+			},
+		},
+	}
+	newAddr, stopNew := startFakeAuthServer(t, newBackend)
+	defer stopNew()
+
+	deps := &Deps{
+		Config: &Config{DovecotSASL: map[string]Request{
+			"smtp_auth": {
+				Transport: transportGRPC,
+				GRPC:      GRPCRequest{Address: oldAddr, Timeout: 2 * time.Second},
+			},
+		}},
+		Logger:       slog.New(slog.DiscardHandler),
+		HTTPClient:   &http.Client{Timeout: 2 * time.Second},
+		OIDCManager:  NewOIDCManager(&http.Client{Timeout: 2 * time.Second}),
+		GRPCConnPool: NewGRPCConnPool(),
+	}
+	defer deps.GRPCConnPool.CloseAll()
+
+	server := &MultiServer{name: "smtp_auth", deps: deps, ctx: context.Background()}
+	logger := slog.New(slog.DiscardHandler)
+
+	first := runHandleSASLResultForTest(t, server, logger, "1")
+	if !strings.Contains(first, "user=old@example.com") {
+		t.Fatalf("first response = %q, want old backend user", first)
+	}
+
+	deps.Reload(&Config{DovecotSASL: map[string]Request{
+		"smtp_auth": {
+			Transport: transportGRPC,
+			GRPC:      GRPCRequest{Address: newAddr, Timeout: 2 * time.Second},
+		},
+	}}, deps.Logger, deps.HTTPClient, nil)
+
+	second := runHandleSASLResultForTest(t, server, logger, "2")
+	if !strings.Contains(second, "user=new@example.com") {
+		t.Fatalf("second response = %q, want reloaded backend user", second)
+	}
+
+	if newBackend.callCount.Load() == 0 {
+		t.Fatal("reloaded gRPC backend was not called")
+	}
+}
+
+func runHandleSASLResultForTest(t *testing.T, server *MultiServer, logger *slog.Logger, id string) string {
+	t.Helper()
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = serverConn.Close() }()
+
+		server.handleSASLResult(
+			serverConn,
+			&DovecotEncoder{},
+			logger,
+			"pipe",
+			&DovecotAuthRequest{ID: id, Service: "smtp", Mechanism: "PLAIN"},
+			nil,
+			&SASLAuthResult{Success: true},
+			&SASLCredentials{Username: "alice", Password: "secret"},
+			make(map[string]SASLMechanism),
+			make(map[string]*DovecotAuthRequest),
+		)
+	}()
+
+	if err := clientConn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	line, err := bufio.NewReader(clientConn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read SASL response: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleSASLResult did not return")
+	}
+
+	return line
 }
 
 // recordingAuthenticator is a tiny SASLAuthenticator double for delegation tests.
@@ -589,7 +704,7 @@ func TestResolveTLSMinVersion(t *testing.T) {
 }
 
 func TestBuildClientTLSConfigCAErrors(t *testing.T) {
-	_, err := buildClientTLSConfig(GRPCTLS{CACert: "/nonexistent/file/path/to/ca.pem"})
+	_, err := buildClientTLSConfig(GRPCTLS{RootCA: "/nonexistent/file/path/to/ca.pem"})
 	if err == nil {
 		t.Fatalf("expected error for missing CA file")
 	}
@@ -600,7 +715,7 @@ func TestBuildClientTLSConfigCAErrors(t *testing.T) {
 		t.Fatalf("write bogus pem: %v", writeErr)
 	}
 
-	_, err = buildClientTLSConfig(GRPCTLS{CACert: bogus})
+	_, err = buildClientTLSConfig(GRPCTLS{RootCA: bogus})
 	if err == nil {
 		t.Fatalf("expected error for malformed CA pem")
 	}
