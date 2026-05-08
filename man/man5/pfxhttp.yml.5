@@ -510,6 +510,9 @@ dovecot_sasl:
     grpc:
       address: nauthilus.example.org:9444
       timeout: 5s
+      metadata:
+        accept-language:
+          - de
       tls:
         enabled: true
         root_ca: /etc/pfxhttp/nauthilus-ca.pem
@@ -532,8 +535,10 @@ Direct contract names such as \fBclient_ip\fP, \fBlocal_ip\fP, \fBclient_port\fP
 \fBssl_protocol\fP are also accepted; classic Dovecot names such as \fBrip\fP, \fBlip\fP,
 and \fBlocal_name\fP remain supported. Fields without an AuthService equivalent, such as
 \fBssl_cipher_bits\fP, \fBssl_pxt_id\fP, \fBnologin\fP, and \fBno_penalty\fP, are not sent over gRPC.
-Caller authorization is taken from \fBbackend_oidc_auth\fP or from the effective \fBAuthorization\fP header after
-\fBhttp_auth_basic\fP and \fBcustom_headers\fP have been merged. Existing Dovecot connections pick up reloaded
+Caller authorization is taken from \fBbackend_oidc_auth\fP or from \fBhttp_auth_basic\fP and is sent as
+\fBauthorization\fP gRPC metadata. Additional request metadata is configured under \fBgrpc.metadata\fP; keys are
+normalized to lowercase. The \fBauthorization\fP key, \fBgrpc-\fP prefix and binary \fB-bin\fP metadata are reserved.
+\fBcustom_headers\fP are HTTP-only and are rejected for gRPC entries. Existing Dovecot connections pick up reloaded
 backend settings on the next authentication request; the gRPC connection pool rebuilds connections when transport
 settings change and closes entries removed or switched away from gRPC.
 

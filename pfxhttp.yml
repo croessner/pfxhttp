@@ -145,6 +145,9 @@ dovecot_sasl:
     grpc:
       address: 127.0.0.1:9444
       timeout: 5s
+      metadata:
+        accept-language:
+          - de
       tls:
         enabled: false
         # root_ca: /etc/pfxhttp/nauthilus-ca.pem

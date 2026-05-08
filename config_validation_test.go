@@ -161,6 +161,110 @@ func TestConfigValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "DovecotSASL gRPC rejects HTTP custom headers",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport:     transportGRPC,
+						CustomHeaders: []string{"Accept-Language: de"},
+						GRPC:          GRPCRequest{Address: "nauthilus.example.com:9444"},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"custom_headers", "grpc.metadata"},
+		},
+		{
+			name: "DovecotSASL gRPC rejects reserved authorization metadata",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport: transportGRPC,
+						GRPC: GRPCRequest{
+							Address:  "nauthilus.example.com:9444",
+							Metadata: map[string][]string{"authorization": {"Basic abc"}},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"grpc.metadata", "authorization", "reserved"},
+		},
+		{
+			name: "DovecotSASL gRPC accepts and normalizes request metadata",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport:     transportGRPC,
+						HTTPAuthBasic: "admin:secret",
+						GRPC: GRPCRequest{
+							Address:  "nauthilus.example.com:9444",
+							Metadata: map[string][]string{"Accept-Language": {"de"}},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "HTTP basic auth conflicts with backend OIDC auth",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "socket_map",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    23456,
+						},
+					},
+				},
+				SocketMaps: map[string]Request{
+					"conflict": {
+						Target:        "http://example.com",
+						HTTPAuthBasic: "user:secret",
+						BackendOIDCAuth: BackendOIDCAuth{
+							Enabled:          true,
+							ConfigurationURI: "https://idp.example.com/.well-known/openid-configuration",
+							ClientID:         "pfxhttp",
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"http_auth_basic", "backend_oidc_auth"},
+		},
+		{
 			name: "DovecotSASL gRPC accepts min_tls_version=1.3",
 			cfg: Config{
 				Server: Server{
@@ -228,5 +332,41 @@ func TestConfigValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandleConfigNormalizesGRPCMetadataKeys(t *testing.T) {
+	cfg := Config{
+		Server: Server{
+			Listen: []Listen{
+				{
+					Kind:    "dovecot_sasl",
+					Type:    "tcp",
+					Address: "127.0.0.1",
+					Port:    34000,
+				},
+			},
+		},
+		DovecotSASL: map[string]Request{
+			"smtp_auth": {
+				Transport: transportGRPC,
+				GRPC: GRPCRequest{
+					Address:  "nauthilus.example.com:9444",
+					Metadata: map[string][]string{"Accept-Language": {"de"}},
+				},
+			},
+		},
+	}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig: %v", err)
+	}
+
+	md := cfg.DovecotSASL["smtp_auth"].GRPC.Metadata
+	if _, ok := md["Accept-Language"]; ok {
+		t.Fatalf("metadata key was not normalized: %v", md)
+	}
+	if values := md["accept-language"]; len(values) != 1 || values[0] != "de" {
+		t.Fatalf("accept-language metadata = %v, want [de]", values)
 	}
 }

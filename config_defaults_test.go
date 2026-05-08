@@ -132,6 +132,10 @@ func TestResolveDefaultsMergesGRPCFields(t *testing.T) {
 			Transport: transportGRPC,
 			GRPC: GRPCRequest{
 				Address: "nauthilus.example:9444",
+				Metadata: map[string][]string{
+					"accept-language": {"de"},
+					"x-default":       {"default"},
+				},
 				Timeout: 0,
 				TLS: GRPCTLS{
 					Enabled:    new(true),
@@ -143,6 +147,10 @@ func TestResolveDefaultsMergesGRPCFields(t *testing.T) {
 		"smtp_auth": {},
 		"submission_auth": {
 			GRPC: GRPCRequest{
+				Metadata: map[string][]string{
+					"x-default": {"entry"},
+					"x-entry":   {"yes"},
+				},
 				TLS: GRPCTLS{ServerName: "override.example"},
 			},
 		},
@@ -164,6 +172,9 @@ func TestResolveDefaultsMergesGRPCFields(t *testing.T) {
 	if !boolValue(a.GRPC.TLS.Enabled) || a.GRPC.TLS.RootCA != "/etc/pfxhttp/ca.pem" || a.GRPC.TLS.ServerName != "nauthilus.example" {
 		t.Errorf("smtp_auth TLS fields not inherited: %+v", a.GRPC.TLS)
 	}
+	if !slices.Equal(a.GRPC.Metadata["accept-language"], []string{"de"}) {
+		t.Errorf("smtp_auth.GRPC.Metadata[accept-language] = %v, want [de]", a.GRPC.Metadata["accept-language"])
+	}
 
 	b := result["submission_auth"]
 	if b.Transport != transportGRPC {
@@ -177,6 +188,15 @@ func TestResolveDefaultsMergesGRPCFields(t *testing.T) {
 	}
 	if b.GRPC.TLS.RootCA != "/etc/pfxhttp/ca.pem" {
 		t.Errorf("submission_auth.GRPC.TLS.RootCA = %q, want inherited from defaults", b.GRPC.TLS.RootCA)
+	}
+	if !slices.Equal(b.GRPC.Metadata["accept-language"], []string{"de"}) {
+		t.Errorf("submission_auth.GRPC.Metadata[accept-language] = %v, want inherited [de]", b.GRPC.Metadata["accept-language"])
+	}
+	if !slices.Equal(b.GRPC.Metadata["x-default"], []string{"entry"}) {
+		t.Errorf("submission_auth.GRPC.Metadata[x-default] = %v, want entry override", b.GRPC.Metadata["x-default"])
+	}
+	if !slices.Equal(b.GRPC.Metadata["x-entry"], []string{"yes"}) {
+		t.Errorf("submission_auth.GRPC.Metadata[x-entry] = %v, want [yes]", b.GRPC.Metadata["x-entry"])
 	}
 }
 
@@ -275,7 +295,7 @@ func TestResolveHTTPAuthBasic(t *testing.T) {
 
 	entry := section["test"]
 	if entry.HTTPAuthBasic != "" {
-		t.Error("HTTPAuthBasic should be cleared after resolution")
+		t.Error("HTTPAuthBasic should be cleared after HTTP header resolution")
 	}
 	if len(entry.CustomHeaders) != 2 {
 		t.Fatalf("expected 2 custom headers, got %d", len(entry.CustomHeaders))
@@ -285,6 +305,37 @@ func TestResolveHTTPAuthBasic(t *testing.T) {
 	}
 	if entry.CustomHeaders[1] != "X-Custom: value" {
 		t.Errorf("second header should be X-Custom, got %q", entry.CustomHeaders[1])
+	}
+}
+
+func TestResolveDovecotSASLHTTPAuthBasicLeavesGRPCAuth(t *testing.T) {
+	section := map[string]Request{
+		"json": {
+			Transport:     transportJSON,
+			HTTPAuthBasic: "json:secret",
+		},
+		"grpc": {
+			Transport:     transportGRPC,
+			HTTPAuthBasic: "grpc:secret",
+		},
+	}
+
+	resolveDovecotSASLHTTPBasicAuth(section)
+
+	jsonEntry := section["json"]
+	if jsonEntry.HTTPAuthBasic != "" {
+		t.Fatal("JSON transport should resolve http_auth_basic into an HTTP header")
+	}
+	if len(jsonEntry.CustomHeaders) != 1 || !strings.HasPrefix(jsonEntry.CustomHeaders[0], "Authorization: Basic ") {
+		t.Fatalf("JSON transport Authorization header not generated: %+v", jsonEntry.CustomHeaders)
+	}
+
+	grpcEntry := section["grpc"]
+	if grpcEntry.HTTPAuthBasic != "grpc:secret" {
+		t.Fatalf("gRPC transport must keep http_auth_basic for outgoing metadata, got %q", grpcEntry.HTTPAuthBasic)
+	}
+	if len(grpcEntry.CustomHeaders) != 0 {
+		t.Fatalf("gRPC transport must not synthesize HTTP custom headers, got %+v", grpcEntry.CustomHeaders)
 	}
 }
 
@@ -389,7 +440,7 @@ func TestDefaultsInheritanceEndToEnd(t *testing.T) {
 	if !rd.HTTPResponseCompression {
 		t.Error("relay_domains.HTTPResponseCompression should be true")
 	}
-	// HTTPAuthBasic should be resolved into Authorization header
+	// HTTPAuthBasic should be resolved into Authorization header for HTTP targets.
 	if rd.HTTPAuthBasic != "" {
 		t.Error("HTTPAuthBasic should be cleared")
 	}

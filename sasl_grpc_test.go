@@ -253,21 +253,10 @@ func TestClassifyGRPCError(t *testing.T) {
 	}
 }
 
-func TestFindAuthorizationHeader(t *testing.T) {
-	headers := []string{
-		"Content-Type: application/json",
-		"authorization: Basic Zm9vOmJhcg==",
-		"Authorization: Bearer override",
-		"X-Trace: yes",
-	}
-
-	got, ok := findAuthorizationHeader(headers)
-	if !ok {
-		t.Fatalf("expected to find Authorization header")
-	}
-
-	if got != "Bearer override" {
-		t.Fatalf("authorization value: got %q", got)
+func TestBasicAuthorizationValue(t *testing.T) {
+	got := basicAuthorizationValue("admin:s")
+	if got != "Basic YWRtaW46cw==" {
+		t.Fatalf("basic auth value: got %q", got)
 	}
 }
 
@@ -278,6 +267,7 @@ type fakeAuthServer struct {
 
 	wantAuth  string
 	authSeen  atomic.Value // string, captured authorization metadata
+	mdSeen    atomic.Value // metadata.MD, captured incoming metadata
 	response  *authv1.AuthResponse
 	rpcErr    error
 	callCount atomic.Int64
@@ -287,6 +277,7 @@ func (f *fakeAuthServer) Authenticate(ctx context.Context, req *authv1.AuthReque
 	f.callCount.Add(1)
 
 	md, _ := metadata.FromIncomingContext(ctx)
+	f.mdSeen.Store(md.Copy())
 	values := md.Get("authorization")
 	if len(values) > 0 {
 		f.authSeen.Store(values[0])
@@ -347,11 +338,15 @@ func TestNauthilusGRPCSASLAuthenticatorPasswordSuccess(t *testing.T) {
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
 			"smtp_auth": {
-				Transport: transportGRPC,
-				CustomHeaders: []string{
-					"Authorization: " + expectedAuth,
+				Transport:     transportGRPC,
+				HTTPAuthBasic: "admin:s",
+				GRPC: GRPCRequest{
+					Address: addr,
+					Timeout: 2 * time.Second,
+					Metadata: map[string][]string{
+						"accept-language": {"de"},
+					},
 				},
-				GRPC: GRPCRequest{Address: addr, Timeout: 2 * time.Second},
 			},
 		},
 	}
@@ -378,6 +373,11 @@ func TestNauthilusGRPCSASLAuthenticatorPasswordSuccess(t *testing.T) {
 	if got, _ := fake.authSeen.Load().(string); got != expectedAuth {
 		t.Fatalf("authorization metadata not propagated: got %q", got)
 	}
+
+	md, _ := fake.mdSeen.Load().(metadata.MD)
+	if got := md.Get("accept-language"); len(got) != 1 || got[0] != "de" {
+		t.Fatalf("accept-language metadata not propagated: got %v", got)
+	}
 }
 
 func TestNauthilusGRPCSASLAuthenticatorRejectsBadCallerAuth(t *testing.T) {
@@ -389,11 +389,9 @@ func TestNauthilusGRPCSASLAuthenticatorRejectsBadCallerAuth(t *testing.T) {
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
 			"smtp_auth": {
-				Transport: transportGRPC,
-				CustomHeaders: []string{
-					"Authorization: Basic wrong",
-				},
-				GRPC: GRPCRequest{Address: addr, Timeout: 2 * time.Second},
+				Transport:     transportGRPC,
+				HTTPAuthBasic: "wrong",
+				GRPC:          GRPCRequest{Address: addr, Timeout: 2 * time.Second},
 			},
 		},
 	}
@@ -887,7 +885,13 @@ func TestNauthilusGRPCSASLAuthenticatorOIDCBearer(t *testing.T) {
 					ClientSecret:     "shh",
 					AuthMethod:       "client_secret_basic",
 				},
-				GRPC: GRPCRequest{Address: addr, Timeout: 2 * time.Second},
+				GRPC: GRPCRequest{
+					Address: addr,
+					Timeout: 2 * time.Second,
+					Metadata: map[string][]string{
+						"accept-language": {"de"},
+					},
+				},
 			},
 		},
 	}
@@ -917,5 +921,10 @@ func TestNauthilusGRPCSASLAuthenticatorOIDCBearer(t *testing.T) {
 	got, _ := fake.authSeen.Load().(string)
 	if got != "Bearer "+issuedToken {
 		t.Fatalf("expected Bearer metadata to match issued token, got %q", got)
+	}
+
+	md, _ := fake.mdSeen.Load().(metadata.MD)
+	if got := md.Get("accept-language"); len(got) != 1 || got[0] != "de" {
+		t.Fatalf("expected accept-language metadata beside bearer auth, got %v", got)
 	}
 }

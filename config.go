@@ -125,14 +125,14 @@ const (
 )
 
 // GRPCRequest holds gRPC-specific transport settings used when
-// dovecot_sasl.<name>.transport is set to "grpc". The application-level
-// authorization (Basic/Bearer) is derived from the surrounding Request
-// (http_auth_basic / backend_oidc_auth) so the same credentials work for
-// both HTTP and gRPC transports.
+// dovecot_sasl.<name>.transport is set to "grpc". Caller authorization
+// (Basic/Bearer) is derived from the surrounding Request (http_auth_basic /
+// backend_oidc_auth); arbitrary request metadata lives here.
 type GRPCRequest struct {
-	Address string        `mapstructure:"address" validate:"omitempty,hostname_port"`
-	Timeout time.Duration `mapstructure:"timeout" validate:"omitempty,min=1ms,max=1h"`
-	TLS     GRPCTLS       `mapstructure:"tls" validate:"omitempty"`
+	Address  string              `mapstructure:"address" validate:"omitempty,hostname_port"`
+	Timeout  time.Duration       `mapstructure:"timeout" validate:"omitempty,min=1ms,max=1h"`
+	Metadata map[string][]string `mapstructure:"metadata" validate:"omitempty"`
+	TLS      GRPCTLS             `mapstructure:"tls" validate:"omitempty"`
 }
 
 // GRPCTLS configures the TLS connection for the gRPC client. RootCA pins the
@@ -249,6 +249,8 @@ func mergeGRPC(entry *GRPCRequest, defaults GRPCRequest) {
 		entry.Timeout = defaults.Timeout
 	}
 
+	entry.Metadata = mergeStringSliceMap(defaults.Metadata, entry.Metadata)
+
 	if entry.TLS.Enabled == nil && defaults.TLS.Enabled != nil {
 		entry.TLS.Enabled = new(*defaults.TLS.Enabled)
 	}
@@ -276,6 +278,49 @@ func mergeGRPC(entry *GRPCRequest, defaults GRPCRequest) {
 	if entry.TLS.SkipVerify == nil && defaults.TLS.SkipVerify != nil {
 		entry.TLS.SkipVerify = new(*defaults.TLS.SkipVerify)
 	}
+}
+
+// mergeStringSliceMap merges default keyed string-slice values with entry
+// values, replacing whole keys when an entry defines the same key.
+func mergeStringSliceMap(defaults, entry map[string][]string) map[string][]string {
+	if len(defaults) == 0 {
+		return cloneStringSliceMap(entry)
+	}
+
+	merged := cloneStringSliceMap(defaults)
+	for key, values := range entry {
+		merged[key] = slicesClone(values)
+	}
+
+	return merged
+}
+
+// cloneStringSliceMap returns a deep copy of a map whose values are string
+// slices so later normalization cannot mutate the original config data.
+func cloneStringSliceMap(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		out[key] = slicesClone(values)
+	}
+
+	return out
+}
+
+// slicesClone returns a copy of the provided string slice, preserving nil as
+// nil so unset values remain distinguishable from empty-but-set values.
+func slicesClone(in []string) []string {
+	if in == nil {
+		return nil
+	}
+
+	out := make([]string, len(in))
+	copy(out, in)
+
+	return out
 }
 
 func boolValue(value *bool) bool {
@@ -330,9 +375,15 @@ func validateDovecotSASLEndpoints(section map[string]Request) error {
 			if entry.GRPC.Address == "" {
 				return fmt.Errorf("entry '%s' in 'dovecot_sasl' uses transport 'grpc' and is missing a required 'grpc.address'", name)
 			}
+			if len(entry.CustomHeaders) > 0 {
+				return fmt.Errorf("entry '%s' in 'dovecot_sasl' uses transport 'grpc' but custom_headers are HTTP-only; use grpc.metadata", name)
+			}
 		case transportJSON, "":
 			if entry.Target == "" {
 				return fmt.Errorf("entry '%s' in 'dovecot_sasl' is missing a required 'target' URL", name)
+			}
+			if len(entry.GRPC.Metadata) > 0 {
+				return fmt.Errorf("entry '%s' in 'dovecot_sasl' configures grpc.metadata but does not use transport 'grpc'", name)
 			}
 		default:
 			return fmt.Errorf("entry '%s' in 'dovecot_sasl' has unsupported transport %q", name, entry.Transport)
@@ -340,6 +391,117 @@ func validateDovecotSASLEndpoints(section map[string]Request) error {
 	}
 
 	return nil
+}
+
+// validateAuthSourceConflicts rejects entries that configure both static Basic
+// caller auth and backend OIDC caller auth, because both would write the same
+// Authorization channel.
+func validateAuthSourceConflicts(cfg *Config) error {
+	check := func(sectionName string, section map[string]Request) error {
+		for name, entry := range maps.All(section) {
+			if entry.HTTPAuthBasic != "" && entry.BackendOIDCAuth.Enabled {
+				return fmt.Errorf("entry '%s' in '%s' configures both 'http_auth_basic' and 'backend_oidc_auth'", name, sectionName)
+			}
+		}
+
+		return nil
+	}
+
+	if err := check("socket_maps", cfg.SocketMaps); err != nil {
+		return err
+	}
+	if err := check("policy_services", cfg.PolicyServices); err != nil {
+		return err
+	}
+	if err := check("dovecot_sasl", cfg.DovecotSASL); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// normalizeDovecotSASLGRPCMetadata normalizes gRPC metadata for every
+// dovecot_sasl entry and writes the canonical form back into the section map.
+func normalizeDovecotSASLGRPCMetadata(section map[string]Request) error {
+	for name, entry := range maps.All(section) {
+		if len(entry.GRPC.Metadata) == 0 {
+			continue
+		}
+
+		normalized, err := normalizeGRPCMetadata(entry.GRPC.Metadata)
+		if err != nil {
+			return fmt.Errorf("entry '%s' in 'dovecot_sasl' has invalid grpc.metadata: %w", name, err)
+		}
+
+		entry.GRPC.Metadata = normalized
+		section[name] = entry
+	}
+
+	return nil
+}
+
+// normalizeGRPCMetadata validates static outgoing gRPC metadata and returns a
+// canonical lowercase-key map suitable for metadata.AppendToOutgoingContext.
+func normalizeGRPCMetadata(raw map[string][]string) (map[string][]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	normalized := make(map[string][]string, len(raw))
+	for rawKey, values := range raw {
+		key := strings.ToLower(strings.TrimSpace(rawKey))
+		if key == "" {
+			return nil, fmt.Errorf("metadata key must not be empty")
+		}
+		if key == "authorization" {
+			return nil, fmt.Errorf("metadata key %q is reserved for http_auth_basic/backend_oidc_auth", key)
+		}
+		if strings.HasPrefix(key, "grpc-") {
+			return nil, fmt.Errorf("metadata key %q uses the reserved grpc- prefix", key)
+		}
+		if strings.HasSuffix(key, "-bin") {
+			return nil, fmt.Errorf("binary metadata key %q is not supported", key)
+		}
+		for _, r := range key {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+				return nil, fmt.Errorf("metadata key %q contains invalid character %q", rawKey, r)
+			}
+		}
+		if _, exists := normalized[key]; exists {
+			return nil, fmt.Errorf("metadata key %q is duplicated after normalization", key)
+		}
+		if len(values) == 0 {
+			return nil, fmt.Errorf("metadata key %q must define at least one value", key)
+		}
+
+		copied := make([]string, 0, len(values))
+		for _, value := range values {
+			if value == "" {
+				return nil, fmt.Errorf("metadata key %q contains an empty value", key)
+			}
+			if !isPrintableASCII(value) {
+				return nil, fmt.Errorf("metadata key %q contains a non-printable or non-ASCII value", key)
+			}
+
+			copied = append(copied, value)
+		}
+
+		normalized[key] = copied
+	}
+
+	return normalized, nil
+}
+
+// isPrintableASCII reports whether value can be sent as non-binary gRPC
+// metadata without using the reserved "-bin" binary metadata form.
+func isPrintableASCII(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r > 0x7e {
+			return false
+		}
+	}
+
+	return true
 }
 
 // validateNoReservedKeys checks that no listener references the reserved "defaults" key.
@@ -358,12 +520,39 @@ func validateNoReservedKeys(cfg *Config) error {
 func resolveHTTPAuthBasic(section map[string]Request) {
 	for name, entry := range maps.All(section) {
 		if entry.HTTPAuthBasic != "" {
-			encoded := base64.StdEncoding.EncodeToString([]byte(entry.HTTPAuthBasic))
-			entry.CustomHeaders = append([]string{"Authorization: Basic " + encoded}, entry.CustomHeaders...)
+			entry.CustomHeaders = append([]string{basicAuthorizationHeader(entry.HTTPAuthBasic)}, entry.CustomHeaders...)
 			entry.HTTPAuthBasic = ""
 			section[name] = entry
 		}
 	}
+}
+
+// resolveDovecotSASLHTTPBasicAuth converts http_auth_basic into an HTTP header
+// only for JSON-backed SASL entries; gRPC entries keep it for metadata auth.
+func resolveDovecotSASLHTTPBasicAuth(section map[string]Request) {
+	for name, entry := range maps.All(section) {
+		if entry.Transport == transportGRPC || entry.HTTPAuthBasic == "" {
+			continue
+		}
+
+		entry.CustomHeaders = append([]string{basicAuthorizationHeader(entry.HTTPAuthBasic)}, entry.CustomHeaders...)
+		entry.HTTPAuthBasic = ""
+		section[name] = entry
+	}
+}
+
+// basicAuthorizationHeader renders credentials as a full HTTP Authorization
+// header entry for custom_headers.
+func basicAuthorizationHeader(credentials string) string {
+	return "Authorization: " + basicAuthorizationValue(credentials)
+}
+
+// basicAuthorizationValue renders credentials as the value portion used by
+// HTTP Authorization and gRPC authorization metadata.
+func basicAuthorizationValue(credentials string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(credentials))
+
+	return "Basic " + encoded
 }
 
 func (cfg *Config) HandleConfig() error {
@@ -383,10 +572,18 @@ func (cfg *Config) HandleConfig() error {
 	cfg.PolicyServices = resolveDefaults(cfg.PolicyServices)
 	cfg.DovecotSASL = resolveDefaults(cfg.DovecotSASL)
 
-	// Resolve http_auth_basic into Authorization headers
+	if err := validateAuthSourceConflicts(cfg); err != nil {
+		return err
+	}
+
+	if err := normalizeDovecotSASLGRPCMetadata(cfg.DovecotSASL); err != nil {
+		return err
+	}
+
+	// Resolve http_auth_basic into Authorization headers for HTTP transports.
 	resolveHTTPAuthBasic(cfg.SocketMaps)
 	resolveHTTPAuthBasic(cfg.PolicyServices)
-	resolveHTTPAuthBasic(cfg.DovecotSASL)
+	resolveDovecotSASLHTTPBasicAuth(cfg.DovecotSASL)
 
 	// Validate that all entries have a target after defaults merge
 	if err := validateTargets(cfg.SocketMaps, "socket_maps"); err != nil {

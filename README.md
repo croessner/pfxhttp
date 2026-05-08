@@ -290,7 +290,8 @@ dovecot_sasl:
 
 Each section (`socket_maps`, `policy_services`, `dovecot_sasl`) supports an optional `defaults` block. Values defined in `defaults` are automatically inherited by all entries in that section. Explicit values in an entry override the inherited defaults.
 
-- **Additive merge for `custom_headers`**: Headers from `defaults` are prepended to entry-specific headers (not replaced).
+- **Additive merge for `custom_headers`**: Headers from `defaults` are prepended to entry-specific headers (not replaced). `custom_headers` are HTTP-only and are rejected for `transport: grpc` entries.
+- **Keyed merge for `grpc.metadata`**: Metadata from `defaults` is inherited by gRPC entries; entry-specific keys override default keys.
 - The `defaults` key is **reserved** and cannot be used as a listener name.
 - `defaults` is optional — existing configurations without it continue to work unchanged.
 
@@ -332,7 +333,7 @@ Instead of manually adding an `Authorization: Basic ...` header, you can use the
 http_auth_basic: "user:password"
 ```
 
-The value is automatically Base64-encoded and set as an `Authorization: Basic <base64>` header. This field can be used both in `defaults` and in individual entries.
+The value is automatically Base64-encoded and set as an `Authorization: Basic <base64>` header for HTTP transports. For `dovecot_sasl` gRPC entries, the same value is sent as `authorization: Basic <base64>` gRPC metadata. This field can be used both in `defaults` and in individual entries.
 
 ### Response Cache
 
@@ -622,6 +623,9 @@ dovecot_sasl:
     grpc:
       address: "nauthilus.example.org:9444"
       timeout: 5s
+      metadata:
+        accept-language:
+          - "de"
       tls:
         enabled: true
         root_ca: "/etc/pfxhttp/nauthilus-ca.pem"
@@ -660,9 +664,14 @@ Notes:
   - `backend_oidc_auth.enabled: true` → the OIDC manager fetches a token via
     Client Credentials / `private_key_jwt` and the result is sent as
     `authorization: Bearer <token>` metadata.
-  - Otherwise an `Authorization` header from `custom_headers` (typically
-    populated by `http_auth_basic`) is reused as gRPC metadata so HTTP and
-    gRPC share the same source of truth.
+  - Otherwise `http_auth_basic: "user:secret"` is encoded and sent as
+    `authorization: Basic <base64>` metadata.
+- Additional gRPC request metadata is configured explicitly under
+  `grpc.metadata`. Keys are normalized to lowercase. The `authorization` key,
+  `grpc-` prefix and binary `-bin` metadata are reserved; use
+  `http_auth_basic` or `backend_oidc_auth` for caller authorization.
+- `custom_headers` are HTTP-only. Entries using `transport: grpc` must use
+  `grpc.metadata` instead.
 - The shared connection pool maintains one long-lived `*grpc.ClientConn` per
   `dovecot_sasl` entry. Multiple SASL sessions multiplex over the same HTTP/2
   connection. Existing Dovecot connections use the reloaded backend settings

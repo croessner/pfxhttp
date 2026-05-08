@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	authv1 "PostfixToHTTP/proto/auth/v1"
 
@@ -103,7 +102,7 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 	authCtx, cancel := context.WithTimeout(ctx, effectiveGRPCTimeout(settings.GRPC))
 	defer cancel()
 
-	authCtx, err = a.attachCallerCredentials(authCtx, settings, logger)
+	authCtx, err = a.attachOutgoingMetadata(authCtx, settings, logger)
 	if err != nil {
 		return &SASLAuthResult{Success: false, Reason: err.Error(), Temporary: true}, nil
 	}
@@ -145,16 +144,32 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticateToken(
 
 var _ SASLAuthenticator = (*NauthilusGRPCSASLAuthenticator)(nil)
 
-// attachCallerCredentials adds an `authorization` gRPC metadata entry. When
-// backend OIDC auth is enabled the value is `Bearer <token>` retrieved via
-// the OIDC manager. Otherwise an existing `Authorization: ...` entry from
-// custom_headers (populated from http_auth_basic) is reused so HTTP and gRPC
-// share the same authentication source.
-func (a *NauthilusGRPCSASLAuthenticator) attachCallerCredentials(
+// attachOutgoingMetadata adds configured gRPC metadata plus caller
+// authorization. Static Basic auth is sourced from http_auth_basic; OIDC bearer
+// auth is sourced from backend_oidc_auth. custom_headers are intentionally not
+// used on the gRPC transport.
+func (a *NauthilusGRPCSASLAuthenticator) attachOutgoingMetadata(
 	ctx context.Context,
 	settings Request,
 	logger *slog.Logger,
 ) (context.Context, error) {
+	if len(settings.CustomHeaders) > 0 {
+		return ctx, errors.New("custom_headers are HTTP-only for gRPC; use grpc.metadata")
+	}
+	if settings.BackendOIDCAuth.Enabled && settings.HTTPAuthBasic != "" {
+		return ctx, errors.New("http_auth_basic and backend_oidc_auth cannot both be configured")
+	}
+
+	configuredMetadata, err := normalizeGRPCMetadata(settings.GRPC.Metadata)
+	if err != nil {
+		return ctx, fmt.Errorf("invalid grpc.metadata: %w", err)
+	}
+	for key, values := range configuredMetadata {
+		for _, value := range values {
+			ctx = metadata.AppendToOutgoingContext(ctx, key, value)
+		}
+	}
+
 	if settings.BackendOIDCAuth.Enabled {
 		if a.oidcManager == nil {
 			return ctx, errors.New("OIDC manager not initialized")
@@ -168,31 +183,11 @@ func (a *NauthilusGRPCSASLAuthenticator) attachCallerCredentials(
 		return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token), nil
 	}
 
-	if header, ok := findAuthorizationHeader(settings.CustomHeaders); ok {
-		return metadata.AppendToOutgoingContext(ctx, "authorization", header), nil
+	if settings.HTTPAuthBasic != "" {
+		return metadata.AppendToOutgoingContext(ctx, "authorization", basicAuthorizationValue(settings.HTTPAuthBasic)), nil
 	}
 
 	return ctx, nil
-}
-
-// findAuthorizationHeader scans the merged custom_headers list for an
-// Authorization entry and returns its raw value. The last header wins, matching
-// net/http.Header.Set behavior used by the HTTP transport.
-func findAuthorizationHeader(headers []string) (string, bool) {
-	var (
-		value string
-		found bool
-	)
-
-	for _, h := range headers {
-		k, v := splitHeader(h)
-		if strings.EqualFold(k, "Authorization") && v != "" {
-			value = v
-			found = true
-		}
-	}
-
-	return value, found
 }
 
 // effectiveLogger guards against nil loggers passed via context. The OIDC
