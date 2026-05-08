@@ -19,6 +19,9 @@ server:
       type: "tcp"
       address: "0.0.0.0"
       port: 23451
+      # Optional. When set, pfxhttp consumes a systemd-activated listener with
+      # this FileDescriptorName instead of creating the socket itself.
+      # systemd_socket_name: "policy"
 
     - kind: "policy_service"
       name: "oidc_policy"

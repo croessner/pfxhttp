@@ -17,6 +17,9 @@ RestartSec=2s
 # - The service starts as root to bind privileged ports or create Unix sockets
 #   in protected directories (e.g. Postfix spool). The application then drops
 #   privileges internally to the user/group configured in pfxhttp.yml.
+# - For optional systemd socket activation, enable one or more .socket units
+#   with Accept=no and set systemd_socket_name on the matching listener. The
+#   native net.Listen path remains the default when systemd_socket_name is not set.
 # - If chroot is enabled in pfxhttp.yml, the chroot directory must contain
 #   etc/resolv.conf, etc/hosts, and etc/nsswitch.conf for DNS resolution.
 # - We deliberately avoid over-hardening here to keep /etc visible and allow

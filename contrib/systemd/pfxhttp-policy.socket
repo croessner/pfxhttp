@@ -1,0 +1,14 @@
+[Unit]
+Description=PfxHTTP Postfix policy service socket
+
+[Socket]
+ListenStream=/var/spool/postfix/private/pfxhttp-policy
+FileDescriptorName=policy
+Accept=no
+SocketMode=0660
+SocketUser=postfix
+SocketGroup=postfix
+Service=pfxhttp.service
+
+[Install]
+WantedBy=sockets.target

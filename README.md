@@ -115,6 +115,54 @@ sudo systemctl enable pfxhttp
 sudo systemctl start pfxhttp
 ```
 
+#### Optional systemd socket activation
+
+Pfxhttp can also consume sockets created by systemd. This mode is optional and
+per listener: if `systemd_socket_name` is omitted, the listener uses the native
+`net.Listen` path exactly as before. If `systemd_socket_name` is set, pfxhttp
+expects systemd to provide a matching `FileDescriptorName` via `LISTEN_FDS`.
+
+Use `Accept=no` in the `.socket` unit. Systemd owns the listen socket, but
+pfxhttp still accepts connections itself and continues to use the configured
+worker pools.
+
+Example socket unit for one Postfix policy-service socket:
+
+```ini
+[Unit]
+Description=PfxHTTP policy service socket
+
+[Socket]
+ListenStream=/var/spool/postfix/private/pfxhttp-policy
+FileDescriptorName=policy
+Accept=no
+SocketMode=0660
+SocketUser=postfix
+SocketGroup=postfix
+Service=pfxhttp.service
+
+[Install]
+WantedBy=sockets.target
+```
+
+Matching listener configuration:
+
+```yaml
+server:
+  listen:
+    - kind: "policy_service"
+      name: "policy"
+      type: "unix"
+      address: "/var/spool/postfix/private/pfxhttp-policy"
+      systemd_socket_name: "policy"
+```
+
+For backend-only configuration changes, `SIGHUP` reloads continue to work. If a
+reload would add, remove, or change a systemd-activated listener, pfxhttp keeps
+the current configuration and logs that a service restart is required. With the
+`.socket` unit active, `systemctl restart pfxhttp.service` keeps the listen
+socket available while the process is replaced.
+
 ### Command-line Options
 
 Pfxhttp provides the following command-line flags:
@@ -153,6 +201,7 @@ The `server` section contains global options, including:
 - **OIDC Authentication**: Configure OIDC authentication (Client Credentials Flow) for HTTP requests with automatic token management.
 - **Response Cache**: Optional in-memory cache to serve responses when the backend is unavailable.
 - **Worker Pool**: Controlled performance by limiting the number of concurrent connections and providing back-pressure via a job queue.
+- **Systemd Socket Activation**: Optionally bind a listener to a named systemd `FileDescriptorName` via `systemd_socket_name`.
 
 Below is a detailed example configuration for `pfxhttp.yml`:
 
@@ -174,6 +223,7 @@ server:
       type: "tcp"
       address: "[::]"
       port: 23451
+      # systemd_socket_name: "example_policy"
 
     - kind: "dovecot_sasl"
       name: "dovecot_sasl"
@@ -440,6 +490,10 @@ All TCP listeners are bound **before** the chroot and privilege drop. Privileged
 Unix socket listeners are created **before** the chroot. The socket paths in the configuration refer to the real filesystem. After chroot, the process can still accept connections on these existing sockets because the file descriptors remain open. Postfix (or any other client) connects to the socket path on the real filesystem — no change is needed on the client side.
 
 After a SIGHUP reload, any new or changed Unix socket listener paths are resolved relative to the chroot root. For example, a configured path `/run/pfxhttp/new.sock` becomes `/var/lib/pfxhttp/run/pfxhttp/new.sock` on the real filesystem. The corresponding directories must exist inside the chroot and be writable by the unprivileged user.
+
+When `systemd_socket_name` is configured, systemd creates the socket before
+pfxhttp starts. The socket path, mode, user, and group should be managed in the
+`.socket` unit; pfxhttp only consumes the already-open file descriptor.
 
 **DNS resolution**
 The Go runtime requires certain files for name resolution. The chroot directory **must** contain:

@@ -11,7 +11,7 @@ import (
 
 // listenKey returns a unique identifier for a listener based on its network endpoint.
 func listenKey(l Listen) string {
-	if l.Type == "unix" {
+	if l.Type == listenTypeUnix {
 		return fmt.Sprintf("%s://%s", l.Type, l.Address)
 	}
 
@@ -20,11 +20,12 @@ func listenKey(l Listen) string {
 
 // ListenerEntry tracks a running listener along with its configuration snapshot.
 type ListenerEntry struct {
-	Config  Listen
-	Server  GenericServer
-	Handler func(conn net.Conn)
-	Cancel  context.CancelFunc
-	Done    chan struct{}
+	Config    Listen
+	Server    GenericServer
+	Handler   func(conn net.Conn)
+	Cancel    context.CancelFunc
+	Done      chan struct{}
+	Activated bool
 }
 
 // ListenerRegistry manages active listeners and supports diffing on reload.
@@ -88,6 +89,36 @@ func (r *ListenerRegistry) Register(l Listen, entry *ListenerEntry) {
 	r.entries[listenKey(l)] = entry
 }
 
+// DiffTouchesSystemdSockets reports whether a reload diff changes any systemd-activated listener.
+func (r *ListenerRegistry) DiffTouchesSystemdSockets(diff DiffResult) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, key := range diff.Removed {
+		if entry, ok := r.entries[key]; ok && entry.Config.SystemdSocketName != "" {
+			return true
+		}
+	}
+
+	for _, cfg := range diff.Changed {
+		if cfg.SystemdSocketName != "" {
+			return true
+		}
+
+		if entry, ok := r.entries[listenKey(cfg)]; ok && entry.Config.SystemdSocketName != "" {
+			return true
+		}
+	}
+
+	for _, cfg := range diff.Added {
+		if cfg.SystemdSocketName != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Remove stops and removes a listener entry by key.
 func (r *ListenerRegistry) Remove(key string) {
 	r.mu.Lock()
@@ -123,12 +154,23 @@ func (r *ListenerRegistry) startListener(
 	deps *Deps,
 	instance Listen,
 	globalWorkerPool WorkerPool,
+	systemdSockets *SystemdSocketSet,
 	logger *slog.Logger,
 ) error {
 	listenerCtx, listenerCancel := context.WithCancel(parentCtx)
 
+	activatedListener, activated, err := systemdSockets.ClaimListener(instance)
+	if err != nil {
+		listenerCancel()
+
+		return err
+	}
+
 	srv := NewMultiServer(listenerCtx, deps, globalWorkerPool)
-	if err := srv.Listen(instance); err != nil {
+	if err := srv.Listen(instance, activatedListener); err != nil {
+		if activatedListener != nil {
+			_ = activatedListener.Close()
+		}
 		listenerCancel()
 
 		return fmt.Errorf("failed to listen %s: %w", listenKey(instance), err)
@@ -137,9 +179,9 @@ func (r *ListenerRegistry) startListener(
 	var handler func(conn net.Conn)
 
 	switch instance.Kind {
-	case "socket_map":
+	case listenKindSocketMap:
 		handler = srv.HandleNetStringConnection
-	case "policy_service":
+	case listenKindPolicyService:
 		if instance.Name == "" {
 			listenerCancel()
 
@@ -147,7 +189,7 @@ func (r *ListenerRegistry) startListener(
 		}
 
 		handler = srv.HandlePolicyServiceConnection
-	case "dovecot_sasl":
+	case listenKindDovecotSASL:
 		if instance.Name == "" {
 			listenerCancel()
 
@@ -164,11 +206,12 @@ func (r *ListenerRegistry) startListener(
 	done := make(chan struct{})
 
 	entry := &ListenerEntry{
-		Config:  instance,
-		Server:  srv,
-		Handler: handler,
-		Cancel:  listenerCancel,
-		Done:    done,
+		Config:    instance,
+		Server:    srv,
+		Handler:   handler,
+		Cancel:    listenerCancel,
+		Done:      done,
+		Activated: activated,
 	}
 
 	r.Register(instance, entry)

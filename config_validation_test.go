@@ -72,6 +72,24 @@ func TestConfigValidation(t *testing.T) {
 			errContains: []string{"field 'port' (struct field: 'Port') failed on the 'max' validation rule"},
 		},
 		{
+			name: "Invalid systemd socket name",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:              "socket_map",
+							Type:              "tcp",
+							Address:           "127.0.0.1",
+							Port:              23456,
+							SystemdSocketName: "map:extra",
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"systemd_socket_name"},
+		},
+		{
 			name: "OIDC Auth Missing ConfigurationURI",
 			cfg: Config{
 				Server: Server{

@@ -55,12 +55,17 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 
 	registry := NewListenerRegistry()
 
+	systemdSockets, err := NewSystemdSocketSet(deps.GetLogger())
+	if err != nil {
+		deps.GetLogger().Error("Failed to initialize systemd socket activation", slog.String("error", err.Error()))
+
+		return
+	}
+
 	// Resolve user/group credentials before chroot (needs /etc/passwd and /etc/group)
 	var creds *Credentials
 
 	if cfg.Server.RunAsUser != "" || cfg.Server.RunAsGroup != "" {
-		var err error
-
 		creds, err = ResolveCredentials(cfg.Server.RunAsUser, cfg.Server.RunAsGroup)
 		if err != nil {
 			deps.GetLogger().Error("Failed to resolve credentials", slog.String("error", err.Error()))
@@ -78,7 +83,7 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 
 	// Start initial listeners
 	for _, instance := range cfg.Server.Listen {
-		if err := registry.startListener(ctx, deps, instance, globalWorkerPool, deps.GetLogger()); err != nil {
+		if err := registry.startListener(ctx, deps, instance, globalWorkerPool, systemdSockets, deps.GetLogger()); err != nil {
 			deps.GetLogger().Error("Failed to start listener", slog.String("error", err.Error()))
 
 			registry.StopAll()
@@ -131,13 +136,13 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 			return
 
 		case <-sighup:
-			handleReload(ctx, deps, registry, globalWorkerPool)
+			handleReload(ctx, deps, registry, globalWorkerPool, systemdSockets)
 		}
 	}
 }
 
 // handleReload re-reads configuration and applies changes to listeners and settings.
-func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, globalWorkerPool WorkerPool) {
+func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, globalWorkerPool WorkerPool, systemdSockets *SystemdSocketSet) {
 	logger := deps.GetLogger()
 	logger.Info("Received SIGHUP, reloading configuration...")
 
@@ -158,6 +163,12 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 		slog.Int("unchanged", len(diff.Unchanged)),
 	)
 
+	if registry.DiffTouchesSystemdSockets(diff) {
+		logger.Error("SIGHUP reload cannot add, remove, or change systemd-activated listeners; keeping current configuration. Restart the service while the .socket units stay active to apply listener changes.")
+
+		return
+	}
+
 	// Stop removed listeners
 	for _, key := range diff.Removed {
 		logger.Info("Stopping removed listener", slog.String("listener", key))
@@ -171,33 +182,12 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 		registry.Remove(key)
 	}
 
-	// Apply new settings (config, logger, HTTP client, response cache)
-	newLogger := ProvideLogger(newCfg)
-	newHTTPClient := ProvideHTTPClient(newCfg)
-	newRespCache := ProvideResponseCache(newCfg)
-
-	deps.Reload(newCfg, newLogger, newHTTPClient, newRespCache)
-
-	// Drop pooled gRPC connections for entries that no longer exist or are
-	// no longer using the gRPC transport.
-	if pool := deps.GetGRPCConnPool(); pool != nil {
-		keep := make(map[string]struct{}, len(newCfg.DovecotSASL))
-
-		for name, entry := range newCfg.DovecotSASL {
-			if entry.Transport == transportGRPC {
-				keep[name] = struct{}{}
-			}
-		}
-
-		pool.RetainOnly(keep)
-	}
-
-	// Use the new logger from now on
-	logger = newLogger
+	logger = reloadDependencies(deps, newCfg)
+	retainReloadedGRPCConnections(deps, newCfg)
 
 	// Start changed listeners with new config
 	for _, listenCfg := range diff.Changed {
-		if err := registry.startListener(ctx, deps, listenCfg, globalWorkerPool, logger); err != nil {
+		if err := registry.startListener(ctx, deps, listenCfg, globalWorkerPool, systemdSockets, logger); err != nil {
 			logger.Error("Failed to restart changed listener", slog.String("listener", listenKey(listenCfg)), slog.String("error", err.Error()))
 		}
 	}
@@ -206,7 +196,7 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 	for _, listenCfg := range diff.Added {
 		logger.Info("Starting new listener", slog.String("listener", listenKey(listenCfg)))
 
-		if err := registry.startListener(ctx, deps, listenCfg, globalWorkerPool, logger); err != nil {
+		if err := registry.startListener(ctx, deps, listenCfg, globalWorkerPool, systemdSockets, logger); err != nil {
 			logger.Error("Failed to start new listener", slog.String("listener", listenKey(listenCfg)), slog.String("error", err.Error()))
 		}
 	}
@@ -217,4 +207,32 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 	}
 
 	logger.Info("Configuration reload complete")
+}
+
+// reloadDependencies rebuilds reloadable dependencies and swaps them into the shared dependency holder.
+func reloadDependencies(deps *Deps, cfg *Config) *slog.Logger {
+	logger := ProvideLogger(cfg)
+	httpClient := ProvideHTTPClient(cfg)
+	respCache := ProvideResponseCache(cfg)
+
+	deps.Reload(cfg, logger, httpClient, respCache)
+
+	return logger
+}
+
+// retainReloadedGRPCConnections drops pooled gRPC connections for entries no longer backed by gRPC.
+func retainReloadedGRPCConnections(deps *Deps, cfg *Config) {
+	pool := deps.GetGRPCConnPool()
+	if pool == nil {
+		return
+	}
+
+	keep := make(map[string]struct{}, len(cfg.DovecotSASL))
+	for name, entry := range cfg.DovecotSASL {
+		if entry.Transport == transportGRPC {
+			keep[name] = struct{}{}
+		}
+	}
+
+	pool.RetainOnly(keep)
 }

@@ -36,7 +36,7 @@ func generateSessionID() string {
 // GenericServer defines an interface for managing a TCP server with methods to start and stop the server.
 type GenericServer interface {
 	// Listen initializes the listener for the server based on the provided configuration.
-	Listen(instance Listen) error
+	Listen(instance Listen, activatedListener net.Listener) error
 
 	// Start starts the accept loop for the server using the provided handler.
 	Start(handler func(conn net.Conn)) error
@@ -85,84 +85,17 @@ func NewMultiServer(ctx context.Context, deps *Deps, wp WorkerPool) GenericServe
 }
 
 // Listen initializes the listener for the MultiServer based on the provided configuration.
-func (s *MultiServer) Listen(instance Listen) error {
-	var (
-		mode     int64
-		conn     net.Conn
-		fileInfo os.FileInfo
-		err      error
-	)
-
-	if instance.Type != "unix" {
-		s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
-	} else {
-		s.address = instance.Address
-	}
-
-	conn, err = net.DialTimeout(instance.Type, s.address, 1*time.Second)
-	if err == nil {
-		_ = conn.Close()
-
-		return fmt.Errorf("address %s is already in use", s.address)
-	}
-
-	if instance.Type == "unix" {
-		if fileInfo, err = os.Stat(instance.Address); err == nil && fileInfo.Mode()&os.ModeSocket != 0 {
-			if err = os.Remove(instance.Address); err != nil {
-				return err
-			}
-		}
-
-		oldMask := syscall.Umask(0)
-		defer syscall.Umask(oldMask)
-	}
+func (s *MultiServer) Listen(instance Listen, activatedListener net.Listener) error {
+	s.setEndpoint(instance)
 
 	if instance.Name != "" {
 		s.name = instance.Name
 	}
 
-	s.listener, err = net.Listen(instance.Type, s.address)
-	if err != nil {
-		return fmt.Errorf("could not start server: %w", err)
-	}
-
-	if instance.Type == "unix" && instance.Mode != "" {
-		mode, err = strconv.ParseInt(instance.Mode, 8, 64)
-		if err != nil {
-			s.deps.GetLogger().Error("Could not parse socket mode", slog.String("error", err.Error()))
-		}
-
-		if err = os.Chmod(instance.Address, os.FileMode(mode)); err != nil {
-			s.deps.GetLogger().Error("Could not set permissions on socket", slog.String("error", err.Error()))
-		}
-	}
-
-	if instance.Type == "unix" && (instance.User != "" || instance.Group != "") {
-		uid, gid := -1, -1
-
-		if instance.User != "" {
-			u, err := user.Lookup(instance.User)
-			if err != nil {
-				s.deps.GetLogger().Error("Could not lookup user", slog.String("user", instance.User), slog.String("error", err.Error()))
-			} else {
-				uid, _ = strconv.Atoi(u.Uid)
-			}
-		}
-
-		if instance.Group != "" {
-			g, err := user.LookupGroup(instance.Group)
-			if err != nil {
-				s.deps.GetLogger().Error("Could not lookup group", slog.String("group", instance.Group), slog.String("error", err.Error()))
-			} else {
-				gid, _ = strconv.Atoi(g.Gid)
-			}
-		}
-
-		if uid != -1 || gid != -1 {
-			if err = os.Chown(instance.Address, uid, gid); err != nil {
-				s.deps.GetLogger().Error("Could not set ownership on socket", slog.String("error", err.Error()))
-			}
-		}
+	if activatedListener != nil {
+		s.listener = activatedListener
+	} else if err := s.listenNative(instance); err != nil {
+		return err
 	}
 
 	s.deps.GetLogger().Info("Server is listening", slog.String("type", instance.Type), slog.String("address", s.address), slog.String("name", s.name), slog.String("kind", instance.Kind))
@@ -172,6 +105,126 @@ func (s *MultiServer) Listen(instance Listen) error {
 	}
 
 	return nil
+}
+
+// setEndpoint derives the concrete network address used for binding and logging.
+func (s *MultiServer) setEndpoint(instance Listen) {
+	if instance.Type == listenTypeUnix {
+		s.address = instance.Address
+
+		return
+	}
+
+	s.address = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
+}
+
+// listenNative creates a listener directly from the configured endpoint.
+func (s *MultiServer) listenNative(instance Listen) error {
+	if err := ensureEndpointAvailable(instance.Type, s.address); err != nil {
+		return err
+	}
+
+	if instance.Type == listenTypeUnix {
+		if err := prepareUnixSocket(instance.Address); err != nil {
+			return err
+		}
+
+		oldMask := syscall.Umask(0)
+		defer syscall.Umask(oldMask)
+	}
+
+	listener, err := net.Listen(instance.Type, s.address)
+	if err != nil {
+		return fmt.Errorf("could not start server: %w", err)
+	}
+
+	s.listener = listener
+
+	s.applyUnixSocketMode(instance)
+	s.applyUnixSocketOwnership(instance)
+
+	return nil
+}
+
+// ensureEndpointAvailable fails fast when another service already accepts connections on the endpoint.
+func ensureEndpointAvailable(network, address string) error {
+	conn, err := net.DialTimeout(network, address, 1*time.Second)
+	if err != nil {
+		return nil
+	}
+
+	_ = conn.Close()
+
+	return fmt.Errorf("address %s is already in use", address)
+}
+
+// prepareUnixSocket removes a stale Unix socket path before a native bind.
+func prepareUnixSocket(address string) error {
+	fileInfo, err := os.Stat(address)
+	if err != nil || fileInfo.Mode()&os.ModeSocket == 0 {
+		return nil
+	}
+
+	return os.Remove(address)
+}
+
+// applyUnixSocketMode applies configured filesystem permissions to a native Unix socket.
+func (s *MultiServer) applyUnixSocketMode(instance Listen) {
+	if instance.Type != listenTypeUnix || instance.Mode == "" {
+		return
+	}
+
+	mode, err := strconv.ParseInt(instance.Mode, 8, 64)
+	if err != nil {
+		s.deps.GetLogger().Error("Could not parse socket mode", slog.String("error", err.Error()))
+
+		return
+	}
+
+	if err = os.Chmod(instance.Address, os.FileMode(mode)); err != nil {
+		s.deps.GetLogger().Error("Could not set permissions on socket", slog.String("error", err.Error()))
+	}
+}
+
+// applyUnixSocketOwnership applies configured ownership to a native Unix socket.
+func (s *MultiServer) applyUnixSocketOwnership(instance Listen) {
+	if instance.Type != listenTypeUnix || (instance.User == "" && instance.Group == "") {
+		return
+	}
+
+	uid, gid := lookupSocketOwner(instance, s.deps.GetLogger())
+	if uid == -1 && gid == -1 {
+		return
+	}
+
+	if err := os.Chown(instance.Address, uid, gid); err != nil {
+		s.deps.GetLogger().Error("Could not set ownership on socket", slog.String("error", err.Error()))
+	}
+}
+
+// lookupSocketOwner resolves configured Unix socket user and group names to numeric IDs.
+func lookupSocketOwner(instance Listen, logger *slog.Logger) (int, int) {
+	uid, gid := -1, -1
+
+	if instance.User != "" {
+		u, err := user.Lookup(instance.User)
+		if err != nil {
+			logger.Error("Could not lookup user", slog.String("user", instance.User), slog.String("error", err.Error()))
+		} else {
+			uid, _ = strconv.Atoi(u.Uid)
+		}
+	}
+
+	if instance.Group != "" {
+		g, err := user.LookupGroup(instance.Group)
+		if err != nil {
+			logger.Error("Could not lookup group", slog.String("group", instance.Group), slog.String("error", err.Error()))
+		} else {
+			gid, _ = strconv.Atoi(g.Gid)
+		}
+	}
+
+	return uid, gid
 }
 
 // Start starts the accept loop for the MultiServer using the provided handler.

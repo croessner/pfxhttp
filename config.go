@@ -40,15 +40,17 @@ type Server struct {
 }
 
 type Listen struct {
-	Kind       string           `mapstructure:"kind" validate:"required,oneof=socket_map policy_service dovecot_sasl"`
-	Name       string           `mapstructure:"name" validate:"omitempty,alphanumunicode|alphanum_underscore,excludesall= "`
-	Type       string           `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
-	Address    string           `mapstructure:"address" validate:"required"`
-	Port       int              `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
-	Mode       string           `mapstructure:"mode" validate:"omitempty,octal_mode"`
-	User       string           `mapstructure:"user" validate:"omitempty"`
-	Group      string           `mapstructure:"group" validate:"omitempty"`
-	WorkerPool WorkerPoolConfig `mapstructure:"worker_pool" validate:"omitempty"`
+	Kind    string `mapstructure:"kind" validate:"required,oneof=socket_map policy_service dovecot_sasl"`
+	Name    string `mapstructure:"name" validate:"omitempty,alphanumunicode|alphanum_underscore,excludesall= "`
+	Type    string `mapstructure:"type" validate:"required,oneof=tcp tcp6 unix"`
+	Address string `mapstructure:"address" validate:"required"`
+	Port    int    `mapstructure:"port" validate:"omitempty,min=1,max=65535"`
+	Mode    string `mapstructure:"mode" validate:"omitempty,octal_mode"`
+	User    string `mapstructure:"user" validate:"omitempty"`
+	Group   string `mapstructure:"group" validate:"omitempty"`
+	// SystemdSocketName selects a systemd FileDescriptorName to consume instead of creating a native listener.
+	SystemdSocketName string           `mapstructure:"systemd_socket_name" validate:"omitempty,printascii"`
+	WorkerPool        WorkerPoolConfig `mapstructure:"worker_pool" validate:"omitempty"`
 }
 
 type WorkerPoolConfig struct {
@@ -117,6 +119,24 @@ type SASLOIDCAuth struct {
 
 // reservedConfigKey is the key name reserved for section-level defaults.
 const reservedConfigKey = "defaults"
+
+const (
+	// listenKindSocketMap identifies Postfix socket map listener entries.
+	listenKindSocketMap = "socket_map"
+	// listenKindPolicyService identifies Postfix policy service listener entries.
+	listenKindPolicyService = "policy_service"
+	// listenKindDovecotSASL identifies Dovecot SASL listener entries.
+	listenKindDovecotSASL = "dovecot_sasl"
+)
+
+const (
+	// listenTypeTCP identifies IPv4 or dual-stack TCP listener entries.
+	listenTypeTCP = "tcp"
+	// listenTypeTCP6 identifies IPv6 TCP listener entries.
+	listenTypeTCP6 = "tcp6"
+	// listenTypeUnix identifies Unix domain socket listener entries.
+	listenTypeUnix = "unix"
+)
 
 // Transport names accepted on dovecot_sasl entries.
 const (
@@ -504,6 +524,26 @@ func isPrintableASCII(value string) bool {
 	return true
 }
 
+// validateSystemdSocketNames rejects names that cannot be safely matched through LISTEN_FDNAMES.
+func validateSystemdSocketNames(listeners []Listen) error {
+	for _, listen := range listeners {
+		name := listen.SystemdSocketName
+		if name == "" {
+			continue
+		}
+
+		if strings.TrimSpace(name) != name {
+			return fmt.Errorf("listener %s has invalid systemd_socket_name %q: value must not contain leading or trailing whitespace", listenKey(listen), name)
+		}
+
+		if strings.Contains(name, ":") {
+			return fmt.Errorf("listener %s has invalid systemd_socket_name %q: value must not contain ':'", listenKey(listen), name)
+		}
+	}
+
+	return nil
+}
+
 // validateNoReservedKeys checks that no listener references the reserved "defaults" key.
 func validateNoReservedKeys(cfg *Config) error {
 	for _, listen := range cfg.Server.Listen {
@@ -559,6 +599,10 @@ func (cfg *Config) HandleConfig() error {
 
 	err := viper.Unmarshal(cfg)
 	if err != nil {
+		return err
+	}
+
+	if err := validateSystemdSocketNames(cfg.Server.Listen); err != nil {
 		return err
 	}
 

@@ -34,6 +34,7 @@ server:
       type: "tcp"
       address: "0.0.0.0"
       port: 23450
+      # systemd_socket_name: "map"
   logging:
     json: false
     level: debug
@@ -92,6 +93,8 @@ The startup order is: resolve user/group credentials, bind listeners, chroot, dr
 .IP
 \fBUnix sockets:\fP Unix socket listeners are created before the chroot. The socket paths refer to the real filesystem. After chroot, existing sockets continue to work via their open file descriptors. After a SIGHUP reload, any new or changed Unix socket listener paths are resolved relative to the chroot root. The corresponding directories must exist inside the chroot and be writable by the unprivileged user.
 .IP
+\fBSystemd socket activation:\fP If \fBsystemd_socket_name\fP is configured for a listener, \fBpfxhttp\fP consumes the named \fBFileDescriptorName\fP passed by systemd instead of creating the socket itself. The corresponding .socket unit should use \fBAccept=no\fP. Socket path, mode, user, and group are managed by systemd for activated Unix sockets.
+.IP
 \fBTLS certificates:\fP The \fBroot_ca\fP file is loaded before the chroot. However, if the HTTP client is re-initialized during a SIGHUP reload, the file must be accessible inside the chroot (e.g., \fB/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt\fP). It is recommended to always place CA files inside the chroot. The same applies to \fBcert\fP and \fBkey\fP files.
 .IP
 \fBOIDC private key files:\fP If \fBprivate_key_file\fP is configured for \fBprivate_key_jwt\fP authentication, the key file is read at token fetch time (not at startup). After chroot, the path must be accessible inside the jail.
@@ -124,6 +127,9 @@ Applicable only for \fBunix\fP sockets. Sets the socket's owner (username or UID
 .IP \[bu] 2
 .B group:
 Applicable only for \fBunix\fP sockets. Sets the socket's group (groupname or GID). Requires \fBCAP_CHOWN\fP.
+.IP \[bu] 2
+.B systemd_socket_name:
+Optional. When set, the listener uses the systemd-activated socket whose \fBFileDescriptorName\fP matches this value. When omitted, \fBpfxhttp\fP uses the native listener path and creates the socket itself.
 .RE
 
 .TP
