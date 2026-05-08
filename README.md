@@ -750,6 +750,16 @@ If Pfxhttp fails to start, verify the following:
 
 Contributions are welcome! Feel free to submit pull requests or issues to improve the project. The project is distributed under the **MIT License**.
 
+Before committing code changes, run the local quality gate:
+
+```bash
+make guardrails
+```
+
+This requires `golangci-lint` v2.12.1 or a compatible v2 release on `PATH`.
+
+Dependency updates should be followed by `go mod tidy` and `go mod vendor` so the vendored build remains reproducible.
+
 ---
 
 ## References

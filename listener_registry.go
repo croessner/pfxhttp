@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"sync"
 )
@@ -106,9 +107,7 @@ func (r *ListenerRegistry) Remove(key string) {
 func (r *ListenerRegistry) StopAll() {
 	r.mu.Lock()
 	entries := make(map[string]*ListenerEntry, len(r.entries))
-	for k, v := range r.entries {
-		entries[k] = v
-	}
+	maps.Copy(entries, r.entries)
 	clear(r.entries)
 	r.mu.Unlock()
 

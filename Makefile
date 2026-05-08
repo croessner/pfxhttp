@@ -6,6 +6,9 @@ PREFIX := /usr/local
 MAN5_DIR := $(PREFIX)/share/man/man5
 MAN8_DIR := $(PREFIX)/share/man/man8
 BIN_DIR := $(PREFIX)/sbin
+GOLANGCI_NEW_FROM_REV ?= HEAD
+
+export GOEXPERIMENT := runtimesecret
 
 # Default target
 all: build
@@ -13,6 +16,10 @@ all: build
 # Build target
 build:
 	go build -mod=vendor -trimpath $(LDFLAGS) -o $(APP_NAME)
+
+# Build check target
+build-check:
+	go build -mod=vendor ./...
 
 # Install target
 install: build
@@ -34,8 +41,23 @@ clean:
 	rm -f $(APP_NAME)
 
 # Test targets
+fix:
+	go fix ./...
+
+vet:
+	go vet ./...
+
+lint:
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not found. Install it and rerun make guardrails"; exit 1; }
+	golangci-lint run --new-from-rev=$(GOLANGCI_NEW_FROM_REV) ./...
+
 test:
-	GOEXPERIMENT=runtimesecret go test -v ./...
+	go test -v ./...
+
+race:
+	go test -race -short $$(go list ./... | grep -v /vendor/)
+
+guardrails: fix vet lint test race build-check
 
 # Print version
 version:
@@ -49,4 +71,4 @@ generate-grpc:
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		proto/auth/v1/auth.proto
 
-.PHONY: all build clean version install uninstall test generate-grpc
+.PHONY: all build build-check clean version install uninstall fix vet lint test race guardrails generate-grpc
