@@ -15,6 +15,14 @@ These rules are mandatory for coding changes in this repository.
 - MUST: Add focused regression coverage for bug fixes when a reproducer is
   practical.
 - MUST: Write code comments and technical documentation in English.
+- MUST: Write commit messages as `Prefix: Concise headline`, using only the
+  approved prefixes `Add`, `Change`, `Fix`, `Remove`, `Refactor`, `Test`,
+  `Docs`, `Build`, `Ci`, `Vendor`, `Security`, and `Chore`.
+- MUST: Use the commit subject as a headline for what was fundamentally done,
+  then use the body as a short bullet list of the essential implementation,
+  validation, operator-facing, packaging, or dependency details.
+- MUST: Split unrelated work into separate commits when no single approved
+  prefix and headline describes the change cleanly.
 
 ## Definition Of Done
 
@@ -23,3 +31,5 @@ These rules are mandatory for coding changes in this repository.
 - [ ] `golangci-lint` findings are fixed or intentionally documented.
 - [ ] New or changed code has focused test coverage where appropriate.
 - [ ] Comments and technical docs introduced by the change are English-only.
+- [ ] Commit messages use the approved prefix, headline, and bullet-list body
+      format.
