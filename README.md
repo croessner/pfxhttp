@@ -147,6 +147,32 @@ Service=pfxhttp.service
 WantedBy=sockets.target
 ```
 
+For several listeners that follow the same naming scheme, the repository also
+ships a template unit as `contrib/systemd/pfxhttp@.socket`. The instance name is
+used both as the systemd `FileDescriptorName` and as the socket path suffix:
+
+```ini
+[Socket]
+ListenStream=/var/spool/postfix/private/pfxhttp-%i
+FileDescriptorName=%i
+Accept=no
+Service=pfxhttp.service
+```
+
+For example, enabling `pfxhttp@policy.socket` creates
+`/var/spool/postfix/private/pfxhttp-policy` and passes it to `pfxhttp.service`
+as `FileDescriptorName=policy`. Multiple template instances can point to the
+same `pfxhttp.service`; systemd passes all sockets for that service to the
+process when it starts. Use explicit `.socket` units instead if a listener needs
+a path or descriptor name that does not fit the template. Enable either the
+template instance or a concrete `.socket` unit for a listener, not both.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now pfxhttp@policy.socket
+sudo systemctl restart pfxhttp.service
+```
+
 Matching listener configuration:
 
 ```yaml

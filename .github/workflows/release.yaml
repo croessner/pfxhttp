@@ -48,7 +48,7 @@ jobs:
           assets="${{ env.APP_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p "dist/${assets}/contrib/systemd" "dist/${assets}/man/man5" "dist/${assets}/man/man8"
           cp "${{ env.APP_NAME }}" README.md pfxhttp.yml "dist/${assets}/"
-          cp contrib/systemd/pfxhttp.service contrib/systemd/pfxhttp-policy.socket "dist/${assets}/contrib/systemd/"
+          cp contrib/systemd/pfxhttp.service contrib/systemd/pfxhttp-policy.socket contrib/systemd/pfxhttp@.socket "dist/${assets}/contrib/systemd/"
           cp man/man5/pfxhttp.yml.5 "dist/${assets}/man/man5/"
           cp man/man8/pfxhttp.8 "dist/${assets}/man/man8/"
           (
@@ -184,7 +184,7 @@ jobs:
 
             cp "${{ env.APP_NAME }}" "${pkg}/usr/local/sbin/"
             cp pfxhttp.yml "${pkg}/etc/pfxhttp/"
-            cp contrib/systemd/pfxhttp.service contrib/systemd/pfxhttp-policy.socket "${pkg}/usr/lib/systemd/system/"
+            cp contrib/systemd/pfxhttp.service contrib/systemd/pfxhttp-policy.socket contrib/systemd/pfxhttp@.socket "${pkg}/usr/lib/systemd/system/"
             cp man/man5/pfxhttp.yml.5 "${pkg}/usr/share/man/man5/"
             cp man/man8/pfxhttp.8 "${pkg}/usr/share/man/man8/"
             cp README.md "${pkg}/usr/share/doc/${{ env.APP_NAME }}/"

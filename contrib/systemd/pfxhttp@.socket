@@ -1,0 +1,14 @@
+[Unit]
+Description=PfxHTTP Postfix listener socket %i
+
+[Socket]
+ListenStream=/var/spool/postfix/private/pfxhttp-%i
+FileDescriptorName=%i
+Accept=no
+SocketMode=0660
+SocketUser=postfix
+SocketGroup=postfix
+Service=pfxhttp.service
+
+[Install]
+WantedBy=sockets.target

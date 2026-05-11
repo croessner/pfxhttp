@@ -93,7 +93,14 @@ The startup order is: resolve user/group credentials, bind listeners, chroot, dr
 .IP
 \fBUnix sockets:\fP Unix socket listeners are created before the chroot. The socket paths refer to the real filesystem. After chroot, existing sockets continue to work via their open file descriptors. After a SIGHUP reload, any new or changed Unix socket listener paths are resolved relative to the chroot root. The corresponding directories must exist inside the chroot and be writable by the unprivileged user.
 .IP
-\fBSystemd socket activation:\fP If \fBsystemd_socket_name\fP is configured for a listener, \fBpfxhttp\fP consumes the named \fBFileDescriptorName\fP passed by systemd instead of creating the socket itself. The corresponding .socket unit should use \fBAccept=no\fP. Socket path, mode, user, and group are managed by systemd for activated Unix sockets.
+\fBSystemd socket activation:\fP If \fBsystemd_socket_name\fP is configured
+for a listener, \fBpfxhttp\fP consumes the named \fBFileDescriptorName\fP passed
+by systemd instead of creating the socket itself. The corresponding .socket
+unit should use \fBAccept=no\fP. Socket path, mode, user, and group are managed
+by systemd for activated Unix sockets. The packaged \fBpfxhttp@.socket\fP
+template maps the instance name to both \fBFileDescriptorName\fP and
+\fI/var/spool/postfix/private/pfxhttp-\fP\fIname\fP; for example,
+\fBpfxhttp@policy.socket\fP matches \fBsystemd_socket_name: "policy"\fP.
 .IP
 \fBTLS certificates:\fP The \fBroot_ca\fP file is loaded before the chroot. However, if the HTTP client is re-initialized during a SIGHUP reload, the file must be accessible inside the chroot (e.g., \fB/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt\fP). It is recommended to always place CA files inside the chroot. The same applies to \fBcert\fP and \fBkey\fP files.
 .IP
