@@ -104,7 +104,7 @@ func TestMapClient_RequestAndResponseCompression(t *testing.T) {
 		},
 	}
 
-	httpClient := InitializeHttpClient(cfg)
+	httpClient := InitializeHTTPClient(cfg)
 
 	deps := &Deps{
 		Config:     cfg,
@@ -159,7 +159,7 @@ func TestPolicyClient_RequestCompression_ResponsePlain(t *testing.T) {
 		},
 	}
 
-	httpClient := InitializeHttpClient(cfg)
+	httpClient := InitializeHTTPClient(cfg)
 
 	deps := &Deps{
 		Config:     cfg,

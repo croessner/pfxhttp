@@ -26,6 +26,7 @@ import (
 
 	authv1 "PostfixToHTTP/proto/auth/v1"
 
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -380,6 +381,102 @@ func TestNauthilusGRPCSASLAuthenticatorPasswordSuccess(t *testing.T) {
 	}
 }
 
+func TestNauthilusGRPCSASLAuthenticatorPropagatesTraceContext(t *testing.T) {
+	obs, recorder := newTraceTestObservability(t)
+	fake, auth := newTracedGRPCAuthFixture(t)
+
+	ctx, parentSpan := obs.StartSpanWithKind(t.Context(), dovecotSASLSpanName("smtp_auth"), oteltrace.SpanKindServer)
+	ctx = ContextWithObservability(ctx, obs)
+
+	res, err := auth.AuthenticatePassword(ctx, "alice", "secret",
+		&DovecotAuthRequest{Service: "smtp", Mechanism: "PLAIN"})
+	if err != nil {
+		t.Fatalf("AuthenticatePassword: %v", err)
+	}
+
+	parentSpan.End()
+
+	if !res.Success {
+		t.Fatalf("expected success, got %+v", res)
+	}
+
+	md, _ := fake.mdSeen.Load().(metadata.MD)
+	if got := md.Get("traceparent"); len(got) != 1 || got[0] == "" {
+		t.Fatalf("traceparent metadata not propagated: got %v", got)
+	}
+
+	parent, ok := recorder.findSpan(dovecotSASLSpanName("smtp_auth"))
+	if !ok {
+		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName("smtp_auth"))
+	}
+
+	child, ok := recorder.findSpan(grpcClientSpanName("Authenticate"))
+	if !ok {
+		t.Fatalf("child span %q not recorded", grpcClientSpanName("Authenticate"))
+	}
+
+	if child.traceID != parent.traceID {
+		t.Fatalf("child trace ID = %s, want %s", child.traceID, parent.traceID)
+	}
+
+	if child.parent.SpanID() != parent.spanID {
+		t.Fatalf("child parent span ID = %s, want %s", child.parent.SpanID(), parent.spanID)
+	}
+
+	for _, name := range []string{"gRPC connection", "gRPC metadata", "gRPC request build"} {
+		assertPreparationSpan(t, recorder, parent, name)
+	}
+}
+
+func assertPreparationSpan(t *testing.T, recorder *spanRecorder, parent recordedSpan, name string) {
+	t.Helper()
+
+	prepareSpan, ok := recorder.findSpan(name)
+	if !ok {
+		t.Fatalf("preparation span %q not recorded", name)
+	}
+
+	if prepareSpan.traceID != parent.traceID {
+		t.Fatalf("preparation span %q trace ID = %s, want %s", name, prepareSpan.traceID, parent.traceID)
+	}
+
+	if prepareSpan.parent.SpanID() != parent.spanID {
+		t.Fatalf("preparation span %q parent span ID = %s, want %s", name, prepareSpan.parent.SpanID(), parent.spanID)
+	}
+}
+
+// newTracedGRPCAuthFixture starts a fake gRPC AuthService and returns a matching authenticator.
+func newTracedGRPCAuthFixture(t *testing.T) (*fakeAuthServer, SASLAuthenticator) {
+	t.Helper()
+
+	fake := &fakeAuthServer{
+		response: &authv1.AuthResponse{
+			Ok:       true,
+			Decision: authv1.AuthDecision_AUTH_DECISION_OK,
+		},
+	}
+
+	addr, stop := startFakeAuthServer(t, fake)
+	t.Cleanup(stop)
+
+	pool := NewGRPCConnPool()
+	t.Cleanup(pool.CloseAll)
+
+	cfg := &Config{
+		DovecotSASL: map[string]Request{
+			"smtp_auth": {
+				Transport: transportGRPC,
+				GRPC: GRPCRequest{
+					Address: addr,
+					Timeout: 2 * time.Second,
+				},
+			},
+		},
+	}
+
+	return fake, NewNauthilusGRPCSASLAuthenticator(cfg, "smtp_auth", pool, nil, nil)
+}
+
 func TestNauthilusGRPCSASLAuthenticatorRejectsBadCallerAuth(t *testing.T) {
 	fake := &fakeAuthServer{wantAuth: "Basic correct"}
 
@@ -509,6 +606,47 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 	}
 }
 
+func TestHandleSASLResultKeepsContinuationSpanOpen(t *testing.T) {
+	obs, recorder := newTraceTestObservability(t)
+	server := &MultiServer{
+		name: "smtp_auth",
+		deps: &Deps{
+			Logger:        slog.New(slog.DiscardHandler),
+			Observability: obs,
+		},
+		ctx: context.Background(),
+	}
+	logger := slog.New(slog.DiscardHandler)
+	authReq := &DovecotAuthRequest{ID: "1", Service: "smtp", Mechanism: new(LoginMechanism).Name()}
+	activeMechanisms := make(map[string]SASLMechanism)
+	activeAuthRequests := make(map[string]*DovecotAuthRequest)
+	activeObservabilityStates := make(map[string]*saslObservabilityState)
+
+	first := runObservedHandleSASLResultForTest(t, server, logger, authReq, &SASLAuthResult{
+		NeedContinuation:      true,
+		ContinuationChallenge: []byte("Password:"),
+	}, nil, activeMechanisms, activeAuthRequests, activeObservabilityStates)
+	if !strings.HasPrefix(first, "CONT\t1\t") {
+		t.Fatalf("first response = %q, want CONT", first)
+	}
+
+	if got := recorder.countSpans(dovecotSASLSpanName("smtp_auth")); got != 0 {
+		t.Fatalf("ended Dovecot SASL spans after CONT = %d, want 0", got)
+	}
+
+	second := runObservedHandleSASLResultForTest(t, server, logger, authReq, &SASLAuthResult{
+		Success: false,
+		Reason:  "denied",
+	}, nil, activeMechanisms, activeAuthRequests, activeObservabilityStates)
+	if !strings.HasPrefix(second, "FAIL\t1\t") {
+		t.Fatalf("second response = %q, want FAIL", second)
+	}
+
+	if got := recorder.countSpans(dovecotSASLSpanName("smtp_auth")); got != 1 {
+		t.Fatalf("ended Dovecot SASL spans after final result = %d, want 1", got)
+	}
+}
+
 func runHandleSASLResultForTest(t *testing.T, server *MultiServer, logger *slog.Logger, id string) string {
 	t.Helper()
 
@@ -531,6 +669,61 @@ func runHandleSASLResultForTest(t *testing.T, server *MultiServer, logger *slog.
 			&SASLCredentials{Username: "alice", Password: "secret"},
 			make(map[string]SASLMechanism),
 			make(map[string]*DovecotAuthRequest),
+			make(map[string]*saslObservabilityState),
+		)
+	}()
+
+	if err := clientConn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	line, err := bufio.NewReader(clientConn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read SASL response: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleSASLResult did not return")
+	}
+
+	return line
+}
+
+func runObservedHandleSASLResultForTest(
+	t *testing.T,
+	server *MultiServer,
+	logger *slog.Logger,
+	authReq *DovecotAuthRequest,
+	result *SASLAuthResult,
+	creds *SASLCredentials,
+	activeMechanisms map[string]SASLMechanism,
+	activeAuthRequests map[string]*DovecotAuthRequest,
+	activeObservabilityStates map[string]*saslObservabilityState,
+) string {
+	t.Helper()
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = serverConn.Close() }()
+
+		server.handleSASLResult(
+			serverConn,
+			&DovecotEncoder{},
+			logger,
+			"pipe",
+			authReq,
+			nil,
+			result,
+			creds,
+			activeMechanisms,
+			activeAuthRequests,
+			activeObservabilityStates,
 		)
 	}()
 

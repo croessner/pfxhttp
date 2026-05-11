@@ -11,6 +11,50 @@ import (
 	"time"
 )
 
+const (
+	oidcDiscoveryPath = "/.well-known/openid-configuration"
+	oidcTestTokenPath = "/token"
+	tracedOIDCToken   = "traced-token"
+	tracedTokenType   = "Bearer"
+)
+
+func writeOIDCTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Errorf("encode OIDC test response: %v", err)
+	}
+}
+
+func newTracedOIDCTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case oidcDiscoveryPath:
+			resp := OIDCDiscoveryResponse{
+				Issuer:        "http://" + r.Host,
+				TokenEndpoint: "http://" + r.Host + oidcTestTokenPath,
+			}
+			writeOIDCTestJSON(t, w, resp)
+		case oidcTestTokenPath:
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+
+			resp := OIDCTokenResponse{
+				AccessToken: tracedOIDCToken,
+				TokenType:   tracedTokenType,
+				ExpiresIn:   3600,
+			}
+			writeOIDCTestJSON(t, w, resp)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
 func TestOIDCManager(t *testing.T) {
 	// Mock OIDC Server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +95,7 @@ func TestOIDCManager(t *testing.T) {
 	}))
 	defer server.Close()
 
-	httpClient := InitializeHttpClient(&Config{})
+	httpClient := InitializeHTTPClient(&Config{})
 	mgr := NewOIDCManager(httpClient)
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	ctx := context.Background()
@@ -95,6 +139,49 @@ func TestOIDCManager(t *testing.T) {
 	}
 }
 
+func TestOIDCManagerEmitsTokenPreparationSpans(t *testing.T) {
+	obs, recorder := newTraceTestObservability(t)
+
+	server := newTracedOIDCTestServer(t)
+	defer server.Close()
+
+	httpClient := InitializeHTTPClient(&Config{})
+	obs.InstrumentHTTPClient(httpClient)
+	mgr := NewOIDCManager(httpClient)
+
+	ctx, parentSpan := obs.StartSpan(t.Context(), "OIDC parent")
+	ctx = ContextWithObservability(ctx, obs)
+
+	token, err := mgr.GetToken(ctx, slog.New(slog.DiscardHandler), BackendOIDCAuth{
+		Enabled:          true,
+		ConfigurationURI: server.URL + oidcDiscoveryPath,
+		ClientID:         "client-id",
+	})
+	if err != nil {
+		t.Fatalf("GetToken() error = %v", err)
+	}
+
+	parentSpan.End()
+
+	if token != tracedOIDCToken {
+		t.Fatalf("token = %q, want %s", token, tracedOIDCToken)
+	}
+
+	for _, name := range []string{
+		"OIDC token",
+		"OIDC token cache wait",
+		"OIDC token fetch",
+		"OIDC discovery",
+		"OIDC discovery cache wait",
+		httpClientSpanName(http.MethodGet),
+		httpClientSpanName(http.MethodPost),
+	} {
+		if got := recorder.countSpans(name); got == 0 {
+			t.Fatalf("span %q was not recorded", name)
+		}
+	}
+}
+
 func TestOIDCManagerExpiration(t *testing.T) {
 	tokenCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +202,7 @@ func TestOIDCManagerExpiration(t *testing.T) {
 	}))
 	defer server.Close()
 
-	httpClient := InitializeHttpClient(&Config{})
+	httpClient := InitializeHTTPClient(&Config{})
 	mgr := NewOIDCManager(httpClient)
 	logger := slog.New(slog.DiscardHandler)
 	ctx := context.Background()

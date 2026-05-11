@@ -19,6 +19,10 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const LogKeyClient = "client"
@@ -61,6 +65,7 @@ type GenericServer interface {
 // It manages connections, reads incoming NetStrings, and sends processed responses back to clients.
 type MultiServer struct {
 	name    string
+	kind    string
 	address string
 
 	deps       *Deps
@@ -87,6 +92,7 @@ func NewMultiServer(ctx context.Context, deps *Deps, wp WorkerPool) GenericServe
 // Listen initializes the listener for the MultiServer based on the provided configuration.
 func (s *MultiServer) Listen(instance Listen, activatedListener net.Listener) error {
 	s.setEndpoint(instance)
+	s.kind = instance.Kind
 
 	if instance.Name != "" {
 		s.name = instance.Name
@@ -245,7 +251,15 @@ func (s *MultiServer) Start(handler func(conn net.Conn)) error {
 		if err != nil {
 			s.deps.GetLogger().Error("Error accepting connection", slog.String("error", err.Error()))
 
+			if obs := s.deps.GetObservability(); obs != nil {
+				obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventAccept, resultError, 0)
+			}
+
 			continue
+		}
+
+		if obs := s.deps.GetObservability(); obs != nil {
+			obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventAccept, resultOK, 1)
 		}
 
 		s.wg.Add(1)
@@ -258,6 +272,11 @@ func (s *MultiServer) Start(handler func(conn net.Conn)) error {
 
 			if !s.workerPool.Submit(job) {
 				_ = conn.Close()
+
+				if obs := s.deps.GetObservability(); obs != nil {
+					obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventQueueFull, resultError, -1)
+				}
+
 				s.wg.Done()
 			}
 		} else {
@@ -292,6 +311,7 @@ var _ GenericServer = (*MultiServer)(nil)
 func (s *MultiServer) setupConnection(conn net.Conn) (clientAddr string, sessionLogger func() *slog.Logger, cleanup func()) {
 	clientAddr = conn.RemoteAddr().String()
 	sessionID := generateSessionID()
+	start := time.Now()
 
 	sessionLogger = func() *slog.Logger {
 		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
@@ -303,6 +323,11 @@ func (s *MultiServer) setupConnection(conn net.Conn) (clientAddr string, session
 		sessionLogger().Info("Connection closed", slog.String(LogKeyClient, clientAddr))
 
 		_ = conn.Close()
+
+		if obs := s.deps.GetObservability(); obs != nil {
+			obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventClose, resultOK, -1)
+			obs.ObserveListenerDuration(s.ctx, s.kind, safeMetricName(s.name), resultOK, time.Since(start))
+		}
 
 		s.wg.Done()
 	}
@@ -353,24 +378,40 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 			client := NewMapClient(s.deps, reqLogger)
 			client.SetReceiver(received)
 
-			err = client.SendAndReceive()
+			requestCtx, obs, span := s.startApplicationSpan(componentSocketMap, received.GetName(), clientAddr)
+			start := time.Now()
+
+			err = client.SendAndReceiveContext(requestCtx)
 			if err != nil {
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+				}
 				reqLogger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, received.GetName(), outcomeError, start)
 
 				return
 			}
 
+			outcome := outcomeFromSender(client.GetSender())
 			responseData := client.GetSender().String()
 			response := NewNetStringFromString(responseData)
 
 			err = s.writeNetString(conn, response)
 			if err != nil {
+				outcome = outcomeError
+
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+				}
+
 				reqLogger.Error("Error writing response", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, received.GetName(), outcome, start)
 
 				return
 			}
 
 			reqLogger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
+			s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, received.GetName(), outcome, start)
 		}
 	}
 }
@@ -407,17 +448,31 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 			client := NewPolicyClient(s.deps, reqLogger)
 			client.SetReceiver(received)
 
-			err = client.SendAndReceive()
+			requestCtx, obs, span := s.startApplicationSpan(componentPolicyService, received.GetName(), clientAddr)
+			start := time.Now()
+
+			err = client.SendAndReceiveContext(requestCtx)
 			if err != nil {
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+				}
 				reqLogger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcomeError, start)
 
 				return
 			}
 
+			outcome := outcomeFromSender(client.GetSender())
 			responseData := fmt.Sprintf("action=%s\n\n", strings.TrimSpace(client.GetSender().String()))
 
 			err = s.writePolicyResult(conn, responseData)
 			if err != nil {
+				outcome = outcomeError
+
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+				}
+
 				if errors.Is(err, os.ErrDeadlineExceeded) {
 					reqLogger.Warn("Write deadline exceeded, closing connection", slog.String(LogKeyClient, conn.RemoteAddr().String()))
 				} else if strings.Contains(err.Error(), "broken pipe") {
@@ -426,16 +481,26 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 					reqLogger.Error("Error writing response", slog.String(LogKeyClient, conn.RemoteAddr().String()), slog.String("error", err.Error()))
 				}
 
+				s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcome, start)
+
 				return
 			}
 
 			reqLogger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
+			s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcome, start)
 		}
 	}
 }
 
 // dovecotCUIDCounter is a global atomic counter for generating unique connection IDs in the Dovecot SASL protocol.
 var dovecotCUIDCounter atomic.Uint64
+
+type saslObservabilityState struct {
+	ctx   context.Context
+	obs   *Observability
+	span  trace.Span
+	start time.Time
+}
 
 // generateCookie generates a random hex cookie for the Dovecot SASL handshake.
 func generateCookie() string {
@@ -450,11 +515,14 @@ func generateCookie() string {
 func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 	sessionID := generateSessionID()
+	connectionStart := time.Now()
 
 	// Helper that always returns a fresh logger with the session ID attached.
 	sessionLogger := func() *slog.Logger {
 		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
 	}
+
+	var activeObservabilityStates map[string]*saslObservabilityState
 
 	config := s.deps.GetConfig()
 
@@ -463,6 +531,17 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	defer func() {
 		sessionLogger().Info("Dovecot SASL connection closed", slog.String(LogKeyClient, clientAddr))
 		_ = conn.Close()
+
+		if obs := s.deps.GetObservability(); obs != nil {
+			obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventClose, resultOK, -1)
+			obs.ObserveListenerDuration(s.ctx, s.kind, safeMetricName(s.name), resultOK, time.Since(connectionStart))
+		}
+
+		for id, state := range activeObservabilityStates {
+			sessionLogger().Warn("Dovecot SASL authentication abandoned", slog.String("id", id), slog.String(LogKeyClient, clientAddr))
+			s.finishApplicationSpan(state.ctx, state.obs, state.span, componentDovecotSASL, s.name, outcomeError, state.start)
+		}
+
 		s.wg.Done()
 	}()
 
@@ -542,6 +621,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	// Track active mechanism sessions for multi-step auth (keyed by request ID)
 	activeMechanisms := make(map[string]SASLMechanism)
 	activeAuthRequests := make(map[string]*DovecotAuthRequest)
+	activeObservabilityStates = make(map[string]*saslObservabilityState)
 
 	// Process AUTH and CONT commands
 	for {
@@ -602,7 +682,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				}
 
 				result, creds := mech.Start(authReq.InitialResponse)
-				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests, activeObservabilityStates)
 
 			case DovecotCmdCont:
 				contReq, err := decoder.DecodeContRequest(args)
@@ -621,7 +701,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 
 				authReq := activeAuthRequests[contReq.ID]
 				result, creds := mech.Continue(contReq.Data)
-				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests)
+				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests, activeObservabilityStates)
 
 			default:
 				reqLogger.Warn("Unknown command", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
@@ -682,11 +762,46 @@ func (s *MultiServer) handleSASLResult(
 	creds *SASLCredentials,
 	activeMechanisms map[string]SASLMechanism,
 	activeAuthRequests map[string]*DovecotAuthRequest,
+	activeObservabilityStates map[string]*saslObservabilityState,
 ) {
+	if activeObservabilityStates == nil {
+		activeObservabilityStates = make(map[string]*saslObservabilityState)
+	}
+
+	state := activeObservabilityStates[authReq.ID]
+	if state == nil {
+		authCtx, obs, span := s.startApplicationSpan(componentDovecotSASL, s.name, clientAddr)
+		state = &saslObservabilityState{
+			ctx:   authCtx,
+			obs:   obs,
+			span:  span,
+			start: time.Now(),
+		}
+	}
+
+	authCtx := state.ctx
+	obs := state.obs
+	span := state.span
+	authCtx = context.WithValue(authCtx, loggerKey, logger)
+	state.ctx = authCtx
+	outcome := outcomeFromSASLResult(result, nil)
+	finishSpan := true
+
+	defer func() {
+		if !finishSpan {
+			return
+		}
+
+		delete(activeObservabilityStates, authReq.ID)
+		s.finishApplicationSpan(state.ctx, state.obs, state.span, componentDovecotSASL, s.name, outcome, state.start)
+	}()
+
 	// If mechanism needs continuation, send CONT and store state
 	if result != nil && result.NeedContinuation {
 		activeMechanisms[authReq.ID] = mech
 		activeAuthRequests[authReq.ID] = authReq
+		activeObservabilityStates[authReq.ID] = state
+		finishSpan = false
 
 		resp := encoder.EncodeCont(authReq.ID, result.ContinuationChallenge)
 		logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
@@ -713,9 +828,9 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeMechanisms, authReq.ID)
 		delete(activeAuthRequests, authReq.ID)
 
-		authCtx := context.WithValue(s.ctx, loggerKey, logger)
 		currentConfig := s.deps.GetConfig()
 		if currentConfig == nil {
+			outcome = outcomeTempfail
 			logger.Error("Authentication error",
 				slog.String(LogKeyClient, clientAddr),
 				slog.String("username", creds.Username),
@@ -737,7 +852,12 @@ func (s *MultiServer) handleSASLResult(
 			authResult, err = authenticator.AuthenticatePassword(authCtx, creds.Username, creds.Password, authReq)
 		}
 
+		outcome = outcomeFromSASLResult(authResult, err)
+
 		if err != nil {
+			if obs != nil {
+				obs.RecordSpanError(span, err)
+			}
 			logger.Error("Authentication error",
 				slog.String(LogKeyClient, clientAddr),
 				slog.String("username", creds.Username),
@@ -779,6 +899,58 @@ func (s *MultiServer) handleSASLResult(
 
 			sendDovecotFail(conn, encoder, logger, clientAddr, authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
 		}
+	}
+}
+
+// startApplicationSpan creates a protocol request context and server span.
+func (s *MultiServer) startApplicationSpan(component, name, clientAddr string) (context.Context, *Observability, trace.Span) {
+	ctx := s.ctx
+
+	obs := s.deps.GetObservability()
+	if obs == nil {
+		return ctx, nil, trace.SpanFromContext(ctx)
+	}
+
+	ctx = ContextWithObservability(ctx, obs)
+	spanName := applicationSpanName(component, name)
+	ctx, span := obs.StartSpanWithKind(ctx,
+		spanName,
+		trace.SpanKindServer,
+		attribute.String("pfxhttp.component", component),
+		attribute.String("pfxhttp.name", safeMetricName(name)),
+		attribute.String("network.peer.address", clientAddr),
+	)
+
+	return ctx, obs, span
+}
+
+// finishApplicationSpan records protocol request metrics and completes the span.
+func (s *MultiServer) finishApplicationSpan(ctx context.Context, obs *Observability, span trace.Span, component, name, outcome string, start time.Time) {
+	if obs == nil {
+		return
+	}
+
+	span.SetAttributes(attribute.String(labelOutcome, outcome))
+
+	if outcome == outcomeError || outcome == outcomeTempfail {
+		span.SetStatus(codes.Error, outcome)
+	}
+
+	obs.ObserveApplicationRequest(ctx, component, safeMetricName(name), safeMetricName(s.name), outcome, time.Since(start))
+	span.End()
+}
+
+// applicationSpanName returns the low-cardinality server span name for one protocol request.
+func applicationSpanName(component, name string) string {
+	switch component {
+	case componentSocketMap:
+		return socketMapSpanName(name)
+	case componentPolicyService:
+		return policyServiceSpanName(name)
+	case componentDovecotSASL:
+		return dovecotSASLSpanName(name)
+	default:
+		return component + " " + safeMetricName(name)
 	}
 }
 

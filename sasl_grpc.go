@@ -13,12 +13,22 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	authv1 "PostfixToHTTP/proto/auth/v1"
 
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+)
+
+const (
+	grpcCallerAuthModeBasic = "basic"
+	grpcCallerAuthModeNone  = "none"
+	grpcCallerAuthModeOIDC  = "oidc"
 )
 
 // newSASLAuthenticatorForEntry returns the SASLAuthenticator that matches the
@@ -87,7 +97,14 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 
 	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
 
+	_, connSpanObs, connSpan := startInternalSpanFromContext(ctx,
+		"gRPC connection",
+		attribute.String("server.address", settings.GRPC.Address),
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.name", a.name),
+	)
 	conn, err := a.pool.Get(a.name, settings.GRPC)
+	finishObservedSpan(connSpanObs, connSpan, err)
 	if err != nil {
 		if logger != nil {
 			logger.Error("Failed to obtain gRPC connection",
@@ -102,12 +119,34 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 	authCtx, cancel := context.WithTimeout(ctx, effectiveGRPCTimeout(settings.GRPC))
 	defer cancel()
 
-	authCtx, err = a.attachOutgoingMetadata(authCtx, settings, logger)
+	metadataParentSpan := trace.SpanFromContext(authCtx)
+	metadataCtx, metadataSpanObs, metadataSpan := startInternalSpanFromContext(authCtx,
+		"gRPC metadata",
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.name", a.name),
+		attribute.String("pfxhttp.auth.mode", grpcCallerAuthMode(settings)),
+		attribute.Int("pfxhttp.grpc.metadata.entries", grpcMetadataEntryCount(settings.GRPC.Metadata)),
+	)
+	metadataCtx, err = a.attachOutgoingMetadata(metadataCtx, settings, logger)
+	finishObservedSpan(metadataSpanObs, metadataSpan, err)
 	if err != nil {
 		return &SASLAuthResult{Success: false, Reason: err.Error(), Temporary: true}, nil
 	}
 
+	if metadataSpan != nil {
+		authCtx = trace.ContextWithSpan(metadataCtx, metadataParentSpan)
+	} else {
+		authCtx = metadataCtx
+	}
+
+	_, requestSpanObs, requestSpan := startInternalSpanFromContext(authCtx,
+		"gRPC request build",
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.name", a.name),
+	)
 	grpcReq := buildGRPCAuthRequest(username, password, req, settings.DefaultLocalPort)
+
+	finishObservedSpan(requestSpanObs, requestSpan, nil)
 
 	if logger != nil {
 		logger.Debug("Outgoing Nauthilus gRPC Authenticate request",
@@ -119,9 +158,46 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 
 	client := authv1.NewAuthServiceClient(conn)
 
+	obs := ObservabilityFromContext(ctx)
+	grpcStart := time.Now()
+	grpcStatus := string(DovecotCmdOK)
+	grpcResult := resultOK
+
+	var span trace.Span
+
+	if obs != nil {
+		authCtx, span = obs.StartSpanWithKind(authCtx,
+			grpcClientSpanName("Authenticate"),
+			trace.SpanKindClient,
+			attribute.String("rpc.system", "grpc"),
+			attribute.String("rpc.service", "nauthilus.auth.v1.AuthService"),
+			attribute.String("rpc.method", "Authenticate"),
+			attribute.String("server.address", settings.GRPC.Address),
+			attribute.String("pfxhttp.component", componentDovecotSASL),
+			attribute.String("pfxhttp.name", a.name),
+		)
+		defer span.End()
+
+		authCtx = InjectGRPCTraceContext(authCtx)
+	}
+
 	resp, err := client.Authenticate(authCtx, grpcReq)
 	if err != nil {
+		grpcStatus = status.Code(err).String()
+		grpcResult = resultError
+
+		if obs != nil {
+			obs.RecordSpanError(span, err)
+			span.SetStatus(otelcodes.Error, err.Error())
+			obs.ObserveBackendGRPCRequest(authCtx, componentDovecotSASL, a.name, "Authenticate", grpcStatus, grpcResult, time.Since(grpcStart))
+		}
+
 		return classifyGRPCError(err, logger), nil
+	}
+
+	if obs != nil {
+		span.SetAttributes(attribute.String(labelStatus, grpcStatus), attribute.String(labelResult, grpcResult))
+		obs.ObserveBackendGRPCRequest(authCtx, componentDovecotSASL, a.name, "Authenticate", grpcStatus, grpcResult, time.Since(grpcStart))
 	}
 
 	return mapAuthResponse(resp), nil
@@ -188,6 +264,26 @@ func (a *NauthilusGRPCSASLAuthenticator) attachOutgoingMetadata(
 	}
 
 	return ctx, nil
+}
+
+func grpcCallerAuthMode(settings Request) string {
+	switch {
+	case settings.BackendOIDCAuth.Enabled:
+		return grpcCallerAuthModeOIDC
+	case settings.HTTPAuthBasic != "":
+		return grpcCallerAuthModeBasic
+	default:
+		return grpcCallerAuthModeNone
+	}
+}
+
+func grpcMetadataEntryCount(values map[string][]string) int {
+	count := 0
+	for _, entryValues := range values {
+		count += len(entryValues)
+	}
+
+	return count
 }
 
 // effectiveLogger guards against nil loggers passed via context. The OIDC

@@ -27,6 +27,12 @@ func RunServer(lc fx.Lifecycle, deps *Deps) {
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
+			if obs := deps.GetObservability(); obs != nil {
+				if err := obs.StartPrometheusServer(); err != nil {
+					return err
+				}
+			}
+
 			go func() {
 				defer close(done)
 				runServerLoop(serverCtx, deps)
@@ -41,6 +47,10 @@ func RunServer(lc fx.Lifecycle, deps *Deps) {
 
 			if pool := deps.GetGRPCConnPool(); pool != nil {
 				pool.CloseAll()
+			}
+
+			if obs := deps.GetObservability(); obs != nil {
+				return obs.Shutdown(ctx)
 			}
 
 			return nil
@@ -212,7 +222,7 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 // reloadDependencies rebuilds reloadable dependencies and swaps them into the shared dependency holder.
 func reloadDependencies(deps *Deps, cfg *Config) *slog.Logger {
 	logger := ProvideLogger(cfg)
-	httpClient := ProvideHTTPClient(cfg)
+	httpClient := InitializeHTTPClient(cfg, deps.GetObservability())
 	respCache := ProvideResponseCache(cfg)
 
 	deps.Reload(cfg, logger, httpClient, respCache)

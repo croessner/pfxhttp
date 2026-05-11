@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // OIDCDiscoveryResponse represents the response from the OpenID configuration endpoint
@@ -46,6 +47,14 @@ type OIDCToken struct {
 	ExpiresAt   time.Time
 }
 
+const (
+	oidcAuthMethodAuto              = "auto"
+	oidcAuthMethodClientSecretBasic = "client_secret_basic"
+	oidcAuthMethodClientSecretPost  = "client_secret_post"
+	oidcAuthMethodNone              = "none"
+	oidcAuthMethodPrivateKeyJWT     = "private_key_jwt"
+)
+
 // OIDCManager handles fetching and caching of OIDC tokens
 type OIDCManager struct {
 	httpClient *http.Client
@@ -68,8 +77,20 @@ func NewOIDCManager(httpClient *http.Client) *OIDCManager {
 }
 
 // GetToken returns a valid OIDC token for the given configuration
-func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth BackendOIDCAuth) (string, error) {
+func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth BackendOIDCAuth) (accessToken string, err error) {
 	cacheKey := fmt.Sprintf("%s|%s", auth.ConfigurationURI, auth.ClientID)
+
+	ctx, spanObs, span := startInternalSpanFromContext(ctx,
+		"OIDC token",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.client_id", auth.ClientID),
+		attribute.String("pfxhttp.oidc.configuration_uri", auth.ConfigurationURI),
+		attribute.String("pfxhttp.oidc.auth_method", oidcAuthMethodLabel(auth.AuthMethod)),
+		attribute.Int("pfxhttp.oidc.scope_count", len(auth.Scopes)),
+	)
+	defer func() {
+		finishObservedSpan(spanObs, span, err)
+	}()
 
 	// Check cache
 	m.mu.RLock()
@@ -77,48 +98,114 @@ func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth Ba
 	m.mu.RUnlock()
 
 	if ok && time.Now().Before(token.ExpiresAt.Add(-30*time.Second)) {
+		setSpanAttributes(span,
+			attribute.Bool("pfxhttp.oidc.cache_hit", true),
+			attribute.String("pfxhttp.oidc.cache_stage", "read"),
+		)
 		return token.AccessToken, nil
 	}
 
 	// Fetch new token
+	_, waitSpanObs, waitSpan := startInternalSpanFromContext(ctx,
+		"OIDC token cache wait",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.client_id", auth.ClientID),
+	)
 	m.mu.Lock()
+	finishObservedSpan(waitSpanObs, waitSpan, nil)
 	defer m.mu.Unlock()
 
 	// Double check cache after acquiring lock
 	token, ok = m.tokens[cacheKey]
 	if ok && time.Now().Before(token.ExpiresAt.Add(-30*time.Second)) {
+		setSpanAttributes(span,
+			attribute.Bool("pfxhttp.oidc.cache_hit", true),
+			attribute.String("pfxhttp.oidc.cache_stage", "locked"),
+		)
 		return token.AccessToken, nil
 	}
 
-	logger.Debug("Fetching new OIDC token", "client_id", auth.ClientID)
+	setSpanAttributes(span,
+		attribute.Bool("pfxhttp.oidc.cache_hit", false),
+		attribute.String("pfxhttp.oidc.cache_stage", "miss"),
+	)
+
+	effectiveLogger(logger).Debug("Fetching new OIDC token", "client_id", auth.ClientID)
 
 	newToken, err := m.fetchToken(ctx, auth)
 	if err != nil {
 		return "", err
 	}
 
+	setSpanAttributes(span, attribute.Int64("pfxhttp.oidc.expires_in_seconds", int64(time.Until(newToken.ExpiresAt).Seconds())))
 	m.tokens[cacheKey] = newToken
 
 	return newToken.AccessToken, nil
 }
 
-func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (*OIDCDiscoveryResponse, error) {
+func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (discovery *OIDCDiscoveryResponse, err error) {
+	ctx, spanObs, span := startInternalSpanFromContext(ctx,
+		"OIDC discovery",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.discovery_uri", uri),
+	)
+	defer func() {
+		finishObservedSpan(spanObs, span, err)
+	}()
+
 	m.discMu.RLock()
 	disc, ok := m.discovery[uri]
 	m.discMu.RUnlock()
 
 	if ok {
+		setSpanAttributes(span,
+			attribute.Bool("pfxhttp.oidc.cache_hit", true),
+			attribute.String("pfxhttp.oidc.cache_stage", "read"),
+		)
 		return disc, nil
 	}
 
+	_, waitSpanObs, waitSpan := startInternalSpanFromContext(ctx,
+		"OIDC discovery cache wait",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.discovery_uri", uri),
+	)
 	m.discMu.Lock()
+	finishObservedSpan(waitSpanObs, waitSpan, nil)
 	defer m.discMu.Unlock()
 
 	// Double check
 	if disc, ok = m.discovery[uri]; ok {
+		setSpanAttributes(span,
+			attribute.Bool("pfxhttp.oidc.cache_hit", true),
+			attribute.String("pfxhttp.oidc.cache_stage", "locked"),
+		)
 		return disc, nil
 	}
 
+	setSpanAttributes(span,
+		attribute.Bool("pfxhttp.oidc.cache_hit", false),
+		attribute.String("pfxhttp.oidc.cache_stage", "miss"),
+	)
+
+	d, err := m.fetchDiscoveryDocument(ctx, uri)
+	if err != nil {
+		return nil, err
+	}
+
+	m.discovery[uri] = d
+	setSpanAttributes(span,
+		attribute.String("pfxhttp.oidc.issuer", d.Issuer),
+		attribute.Bool("pfxhttp.oidc.has_token_endpoint", d.TokenEndpoint != ""),
+		attribute.Bool("pfxhttp.oidc.has_introspection_endpoint", d.IntrospectionEndpoint != ""),
+		attribute.Bool("pfxhttp.oidc.has_jwks_uri", d.JWKSURI != ""),
+	)
+
+	return d, nil
+}
+
+func (m *OIDCManager) fetchDiscoveryDocument(ctx context.Context, uri string) (*OIDCDiscoveryResponse, error) {
+	ctx = ContextWithBackendOperation(ctx, componentOIDC, "discovery")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create discovery request: %w", err)
@@ -148,12 +235,19 @@ func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (*OIDCDiscov
 		return nil, fmt.Errorf("failed to decode discovery response: %w", err)
 	}
 
-	m.discovery[uri] = &d
-
 	return &d, nil
 }
 
-func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (*OIDCToken, error) {
+func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (token *OIDCToken, err error) {
+	ctx, spanObs, span := startInternalSpanFromContext(ctx,
+		"OIDC token fetch",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.client_id", auth.ClientID),
+	)
+	defer func() {
+		finishObservedSpan(spanObs, span, err)
+	}()
+
 	disc, err := m.getDiscovery(ctx, auth.ConfigurationURI)
 	if err != nil {
 		return nil, err
@@ -162,58 +256,32 @@ func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (*OI
 		return nil, errors.New("discovery response missing token_endpoint")
 	}
 
-	data := url.Values{}
-	data.Set("grant_type", "client_credentials")
-	if len(auth.Scopes) > 0 {
-		data.Set("scope", strings.Join(auth.Scopes, " "))
+	setSpanAttributes(span, attribute.String("pfxhttp.oidc.token_endpoint", disc.TokenEndpoint))
+
+	data, authMethod, err := m.prepareTokenRequestData(ctx, auth, disc.TokenEndpoint)
+	if err != nil {
+		return nil, err
 	}
 
-	// Decide authentication method (respect config defaults from HandleConfig)
-	authMethod := auth.AuthMethod
-	switch authMethod {
-	case "private_key_jwt":
-		assertion, err := m.createAssertion(auth.ClientID, disc.TokenEndpoint, auth.PrivateKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create assertion: %w", err)
-		}
-		data.Set("client_id", auth.ClientID)
-		data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
-		data.Set("client_assertion", assertion)
-	case "client_secret_post":
-		data.Set("client_id", auth.ClientID)
-		data.Set("client_secret", auth.ClientSecret)
-	case "client_secret_basic":
-		// handled after request creation via SetBasicAuth
-	case "none":
-		if auth.ClientID != "" {
-			data.Set("client_id", auth.ClientID)
-		}
-	default:
-		// Fallback to defaults
-		if auth.PrivateKeyFile != "" {
-			assertion, err := m.createAssertion(auth.ClientID, disc.TokenEndpoint, auth.PrivateKeyFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create assertion: %w", err)
-			}
-			data.Set("client_id", auth.ClientID)
-			data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
-			data.Set("client_assertion", assertion)
-		} else if auth.ClientSecret != "" {
-			authMethod = "client_secret_basic"
-		} else if auth.ClientID != "" {
-			data.Set("client_id", auth.ClientID)
-		}
-	}
+	setSpanAttributes(span, attribute.String("pfxhttp.oidc.auth_method", oidcAuthMethodLabel(authMethod)))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, disc.TokenEndpoint, strings.NewReader(data.Encode()))
+	return m.doTokenRequest(ctx, disc.TokenEndpoint, data, auth, authMethod)
+}
+
+func (m *OIDCManager) doTokenRequest(ctx context.Context, tokenEndpoint string, data url.Values, auth BackendOIDCAuth, authMethod string) (*OIDCToken, error) {
+	ctx = ContextWithBackendOperation(ctx, componentOIDC, "token")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
+
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	// Ensure no conflicting Authorization header is present
 	req.Header.Del("Authorization")
-	if authMethod == "client_secret_basic" {
+
+	if authMethod == oidcAuthMethodClientSecretBasic {
 		req.SetBasicAuth(auth.ClientID, auth.ClientSecret)
 	}
 
@@ -252,7 +320,87 @@ func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (*OI
 	}, nil
 }
 
-func (m *OIDCManager) createAssertion(clientID, tokenEndpoint, keyFile string) (string, error) {
+func (m *OIDCManager) prepareTokenRequestData(ctx context.Context, auth BackendOIDCAuth, tokenEndpoint string) (url.Values, string, error) {
+	data := url.Values{}
+	data.Set("grant_type", "client_credentials")
+
+	if len(auth.Scopes) > 0 {
+		data.Set("scope", strings.Join(auth.Scopes, " "))
+	}
+
+	authMethod := auth.AuthMethod
+	switch authMethod {
+	case oidcAuthMethodPrivateKeyJWT:
+		if err := m.addClientAssertion(ctx, data, auth, tokenEndpoint); err != nil {
+			return nil, "", err
+		}
+	case oidcAuthMethodClientSecretPost:
+		data.Set("client_id", auth.ClientID)
+		data.Set("client_secret", auth.ClientSecret)
+	case oidcAuthMethodClientSecretBasic:
+		// handled after request creation via SetBasicAuth
+	case oidcAuthMethodNone:
+		addClientID(data, auth.ClientID)
+	default:
+		method, err := m.applyDefaultTokenAuth(ctx, data, auth, tokenEndpoint)
+		if err != nil {
+			return nil, "", err
+		}
+
+		authMethod = method
+	}
+
+	return data, authMethod, nil
+}
+
+func (m *OIDCManager) applyDefaultTokenAuth(ctx context.Context, data url.Values, auth BackendOIDCAuth, tokenEndpoint string) (string, error) {
+	switch {
+	case auth.PrivateKeyFile != "":
+		if err := m.addClientAssertion(ctx, data, auth, tokenEndpoint); err != nil {
+			return "", err
+		}
+
+		return oidcAuthMethodPrivateKeyJWT, nil
+	case auth.ClientSecret != "":
+		return oidcAuthMethodClientSecretBasic, nil
+	case auth.ClientID != "":
+		addClientID(data, auth.ClientID)
+
+		return oidcAuthMethodNone, nil
+	default:
+		return oidcAuthMethodAuto, nil
+	}
+}
+
+func (m *OIDCManager) addClientAssertion(ctx context.Context, data url.Values, auth BackendOIDCAuth, tokenEndpoint string) error {
+	assertion, err := m.createAssertion(ctx, auth.ClientID, tokenEndpoint, auth.PrivateKeyFile)
+	if err != nil {
+		return fmt.Errorf("failed to create assertion: %w", err)
+	}
+
+	data.Set("client_id", auth.ClientID)
+	data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+	data.Set("client_assertion", assertion)
+
+	return nil
+}
+
+func addClientID(data url.Values, clientID string) {
+	if clientID != "" {
+		data.Set("client_id", clientID)
+	}
+}
+
+func (m *OIDCManager) createAssertion(ctx context.Context, clientID, tokenEndpoint, keyFile string) (assertion string, err error) {
+	_, spanObs, span := startInternalSpanFromContext(ctx,
+		"OIDC client assertion",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.client_id", clientID),
+	)
+	defer func() {
+		finishObservedSpan(spanObs, span, err)
+	}()
+
 	keyBytes, err := os.ReadFile(keyFile)
 	if err != nil {
 		return "", fmt.Errorf("failed to read private key file: %w", err)
@@ -297,6 +445,8 @@ func (m *OIDCManager) createAssertion(clientID, tokenEndpoint, keyFile string) (
 		return "", fmt.Errorf("unsupported private key type: %T", privKey)
 	}
 
+	setSpanAttributes(span, attribute.String("pfxhttp.oidc.jwt_alg", method.Alg()))
+
 	token := jwt.NewWithClaims(method, claims)
 	return token.SignedString(privKey)
 }
@@ -330,16 +480,43 @@ var (
 	errNoJWKSURI   = errors.New("jwks_uri not provided by discovery")
 )
 
-func (m *OIDCManager) getJWKS(ctx context.Context, jwksURI string, ttl time.Duration) (JWKS, error) {
+func oidcAuthMethodLabel(method string) string {
+	if method == "" {
+		return oidcAuthMethodAuto
+	}
+
+	return method
+}
+
+func (m *OIDCManager) getJWKS(ctx context.Context, jwksURI string, ttl time.Duration) (set JWKS, err error) {
+	ctx, spanObs, span := startInternalSpanFromContext(ctx,
+		"OIDC JWKS",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.jwks_uri", jwksURI),
+	)
+	defer func() {
+		finishObservedSpan(spanObs, span, err)
+	}()
+
 	// Check cache
 	m.jwksMu.RLock()
 	c, ok := m.jwks[jwksURI]
 	m.jwksMu.RUnlock()
 	if ok && time.Now().Before(c.expiresAt) {
+		setSpanAttributes(span,
+			attribute.Bool("pfxhttp.oidc.cache_hit", true),
+			attribute.String("pfxhttp.oidc.cache_stage", "read"),
+		)
 		return c.set, nil
 	}
 
+	setSpanAttributes(span,
+		attribute.Bool("pfxhttp.oidc.cache_hit", false),
+		attribute.String("pfxhttp.oidc.cache_stage", "miss"),
+	)
+
 	// Fetch
+	ctx = ContextWithBackendOperation(ctx, componentOIDC, "jwks")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURI, nil)
 	if err != nil {
 		return JWKS{}, fmt.Errorf("failed to create JWKS request: %w", err)
@@ -361,15 +538,18 @@ func (m *OIDCManager) getJWKS(ctx context.Context, jwksURI string, ttl time.Dura
 	if err != nil {
 		return JWKS{}, fmt.Errorf("failed to read JWKS: %w", err)
 	}
-	var set JWKS
-	if err := json.Unmarshal(body, &set); err != nil {
+
+	var fetched JWKS
+	if err := json.Unmarshal(body, &fetched); err != nil {
 		return JWKS{}, fmt.Errorf("failed to decode JWKS: %w", err)
 	}
 
 	m.jwksMu.Lock()
-	m.jwks[jwksURI] = &cachedJWKS{set: set, expiresAt: time.Now().Add(ttl)}
+	m.jwks[jwksURI] = &cachedJWKS{set: fetched, expiresAt: time.Now().Add(ttl)}
 	m.jwksMu.Unlock()
-	return set, nil
+	setSpanAttributes(span, attribute.Int("pfxhttp.oidc.jwks.keys", len(fetched.Keys)))
+
+	return fetched, nil
 }
 
 func (j JWK) publicKey() (any, error) {
@@ -433,7 +613,17 @@ func (j JWK) publicKey() (any, error) {
 	}
 }
 
-func (m *OIDCManager) VerifyJWTWithJWKS(ctx context.Context, configurationURI, tokenStr string, ttl time.Duration) (map[string]any, error) {
+func (m *OIDCManager) VerifyJWTWithJWKS(ctx context.Context, configurationURI, tokenStr string, ttl time.Duration) (claims map[string]any, err error) {
+	ctx, spanObs, span := startInternalSpanFromContext(ctx,
+		"OIDC JWT validation",
+		attribute.String("pfxhttp.component", componentOIDC),
+		attribute.String("pfxhttp.oidc.configuration_uri", configurationURI),
+		attribute.String("pfxhttp.oidc.validation", "jwks"),
+	)
+	defer func() {
+		finishObservedSpan(spanObs, span, err)
+	}()
+
 	if strings.Count(tokenStr, ".") != 2 {
 		return nil, errTokenNotJWT
 	}
@@ -450,66 +640,93 @@ func (m *OIDCManager) VerifyJWTWithJWKS(ctx context.Context, configurationURI, t
 	}
 
 	keyfunc := func(t *jwt.Token) (any, error) {
-		kidAny, _ := t.Header["kid"]
-		kid, _ := kidAny.(string)
-		if kid != "" {
-			for _, k := range set.Keys {
-				if k.Kid == kid {
-					return k.publicKey()
-				}
-			}
-		}
-		// Fallback: if only one key, try it
-		if len(set.Keys) == 1 {
-			return set.Keys[0].publicKey()
-		}
-		return nil, fmt.Errorf("no matching JWK for kid '%s'", kid)
+		kid, _ := t.Header["kid"].(string)
+		setSpanAttributes(span, attribute.Bool("pfxhttp.oidc.jwt_has_kid", kid != ""))
+
+		return jwksPublicKeyForToken(set, t)
 	}
 
-	claims := jwt.MapClaims{}
-	parsed, err := jwt.ParseWithClaims(tokenStr, &claims, keyfunc)
+	jwtClaims := jwt.MapClaims{}
+
+	parsed, err := jwt.ParseWithClaims(tokenStr, &jwtClaims, keyfunc)
 	if err != nil {
 		return nil, errInvalidSig
 	}
 	if !parsed.Valid {
 		return nil, errInvalidSig
 	}
-	// Basic time checks
-	if expAny, ok := claims["exp"]; ok {
-		switch v := expAny.(type) {
-		case float64:
-			if time.Now().Unix() >= int64(v) {
-				return nil, errors.New("token expired")
-			}
-		case json.Number:
-			iv, _ := v.Int64()
-			if time.Now().Unix() >= iv {
-				return nil, errors.New("token expired")
-			}
-		}
+
+	setSpanAttributes(span, attribute.Bool("pfxhttp.oidc.jwt_valid", true))
+
+	if err := validateJWTTimeClaims(jwtClaims); err != nil {
+		return nil, err
 	}
-	if nbfAny, ok := claims["nbf"]; ok {
-		switch v := nbfAny.(type) {
-		case float64:
-			if time.Now().Unix() < int64(v) {
-				return nil, errors.New("token not yet valid")
-			}
-		case json.Number:
-			iv, _ := v.Int64()
-			if time.Now().Unix() < iv {
-				return nil, errors.New("token not yet valid")
-			}
-		}
-	}
-	// Optional issuer match when discovery provides it
-	if disc.Issuer != "" {
-		if iss, _ := claims["iss"].(string); iss != "" && iss != disc.Issuer {
-			return nil, fmt.Errorf("issuer mismatch: %s", iss)
-		}
+
+	if err := validateJWTIssuer(jwtClaims, disc.Issuer); err != nil {
+		return nil, err
 	}
 
 	// return raw map[string]any
-	return claims, nil
+	return jwtClaims, nil
+}
+
+func jwksPublicKeyForToken(set JWKS, token *jwt.Token) (any, error) {
+	kid, _ := token.Header["kid"].(string)
+	if kid != "" {
+		for _, key := range set.Keys {
+			if key.Kid == kid {
+				return key.publicKey()
+			}
+		}
+	}
+
+	if len(set.Keys) == 1 {
+		return set.Keys[0].publicKey()
+	}
+
+	return nil, fmt.Errorf("no matching JWK for kid '%s'", kid)
+}
+
+func validateJWTTimeClaims(claims jwt.MapClaims) error {
+	now := time.Now().Unix()
+	if expAny, ok := claims["exp"]; ok {
+		if expired, ok := claimUnixTimeReached(expAny, now); ok && expired {
+			return errors.New("token expired")
+		}
+	}
+
+	if nbfAny, ok := claims["nbf"]; ok {
+		if reached, ok := claimUnixTimeReached(nbfAny, now); ok && !reached {
+			return errors.New("token not yet valid")
+		}
+	}
+
+	return nil
+}
+
+func claimUnixTimeReached(value any, now int64) (bool, bool) {
+	switch v := value.(type) {
+	case float64:
+		return now >= int64(v), true
+	case json.Number:
+		iv, _ := v.Int64()
+
+		return now >= iv, true
+	default:
+		return false, false
+	}
+}
+
+func validateJWTIssuer(claims jwt.MapClaims, issuer string) error {
+	if issuer == "" {
+		return nil
+	}
+
+	if iss, _ := claims["iss"].(string); iss != "" && iss != issuer {
+		return fmt.Errorf("issuer mismatch: %s", iss)
+	}
+
+	return nil
 }
 
 // getIntrospectionDiscovery fetches the OIDC discovery document and returns it if it contains

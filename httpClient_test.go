@@ -19,7 +19,7 @@ func TestHttpClientConfiguration(t *testing.T) {
 		},
 	}
 
-	client := InitializeHttpClient(cfg)
+	client := InitializeHTTPClient(cfg)
 
 	if client.Timeout != 15*time.Second {
 		t.Errorf("Expected timeout 15s, got %v", client.Timeout)
@@ -45,7 +45,7 @@ func TestHttpClientConfiguration(t *testing.T) {
 
 func TestHttpClientDefaultTimeout(t *testing.T) {
 	cfg := &Config{}
-	client := InitializeHttpClient(cfg)
+	client := InitializeHTTPClient(cfg)
 
 	if client.Timeout != 60*time.Second {
 		t.Errorf("Expected default timeout 60s, got %v", client.Timeout)
@@ -62,7 +62,7 @@ func TestHttpClientProxyConfiguration(t *testing.T) {
 		},
 	}
 
-	client := InitializeHttpClient(cfg)
+	client := InitializeHTTPClient(cfg)
 
 	rt, ok := client.Transport.(*userAgentRoundTripper)
 	if !ok {

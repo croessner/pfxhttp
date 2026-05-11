@@ -502,6 +502,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 		bodyReader = bytes.NewBuffer(jsonPayload)
 	}
 
+	ctx = ContextWithBackendOperation(ctx, componentDovecotSASL, a.name)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, settings.Target, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
@@ -726,6 +727,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		}
 	}
 
+	ctx = ContextWithBackendOperation(ctx, componentOIDC, "introspection")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, introspectionEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create introspection request: %w", err)

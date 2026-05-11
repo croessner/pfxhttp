@@ -21,6 +21,7 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
     * [HTTP Basic Authentication](#http-basic-authentication)
     * [Response Cache](#response-cache)
     * [Worker Pool](#worker-pool)
+    * [Observability](#observability)
     * [Privilege Dropping & Chroot](#privilege-dropping--chroot)
       * [Privilege Dropping](#privilege-dropping)
       * [Chroot](#chroot)
@@ -47,6 +48,7 @@ Pfxhttp allows you to:
 
 - **Perform dynamic lookups** via socket maps, such as resolving virtual mailboxes or domains.
 - **Implement custom mail policy checks** through HTTP-based policy services.
+- **Export optional observability** through Prometheus metrics and OpenTelemetry OTLP HTTP traces/metrics.
 
 The application is configured using a YAML file, specifying HTTP endpoints, the format of requests, and field mappings. It supports key Postfix features like query lookups and policy service hooks.
 
@@ -230,6 +232,7 @@ The `server` section contains global options, including:
 - **Response Cache**: Optional in-memory cache to serve responses when the backend is unavailable.
 - **Worker Pool**: Controlled performance by limiting the number of concurrent connections and providing back-pressure via a job queue.
 - **Systemd Socket Activation**: Optionally bind a listener to a named systemd `FileDescriptorName` via `systemd_socket_name`.
+- **Observability**: Optional Prometheus endpoint and OpenTelemetry OTLP HTTP export for listener, request, HTTP backend, gRPC backend, and OIDC activity.
 
 Below is a detailed example configuration for `pfxhttp.yml`:
 
@@ -281,6 +284,23 @@ server:
   response_cache:
     enabled: true
     ttl: 5m  # cache lifetime per entry
+
+  observability:
+    prometheus_enabled: false
+    prometheus_address: "127.0.0.1"
+    prometheus_port: 9464
+    prometheus_path: "/metrics"
+    prometheus_runtime_metrics: false
+    otel_enabled: false
+    otel_traces_enabled: false
+    otel_metrics_enabled: false
+    otel_service_name: "pfxhttp"
+    # otel_service_version defaults to the binary version.
+    # otel_exporter_otlp_endpoint: "http://127.0.0.1:4318"
+    # otel_exporter_otlp_headers:
+    #   authorization: "Bearer token"
+    otel_exporter_otlp_insecure: false
+    otel_sample_ratio: 1.0
 
 socket_maps:
   demo_map:
@@ -469,6 +489,67 @@ Behavior:
 - **Back-Pressure**: When the queue is full, the server will wait until a worker becomes available before accepting more connections. This naturally slows down the sender (Postfix).
 - **Precedence**: A worker pool defined in the `listen` section takes precedence over the global `worker_pool` in the `server` section.
 - **Defaults**: If no `worker_pool` is configured in the `server` section, Pfxhttp automatically initializes a global worker pool with `max_workers` set to `2 * GOMAXPROCS` and `max_queue` set to `10 * max_workers`.
+
+### Observability
+
+Observability is disabled by default. When enabled, Pfxhttp records listener connection events, protocol-level requests, outgoing HTTP backend requests, outgoing gRPC `Authenticate` calls, and OIDC discovery/token/JWKS/introspection traffic. Request contexts are delegated through these paths so outbound HTTP headers and gRPC metadata receive the active W3C trace context.
+
+gRPC-backed SASL traces also split the pre-call preparation into `gRPC connection`, `gRPC metadata`, and `gRPC request build` spans. When OIDC caller authentication is enabled, token cache lookups, cache-lock waits, discovery, token fetches, client assertions, and JWKS validation are traced as child spans without recording secrets or token values.
+
+Application request metrics keep the request-side name in the `name` label and add the configured listener name in the `listener` label. This lets dashboards show ingress latency per listener while still preserving map/backend-specific views for the outbound side.
+
+Prometheus uses a dedicated HTTP endpoint:
+
+```yaml
+server:
+  observability:
+    prometheus_enabled: true
+    prometheus_address: "127.0.0.1"
+    prometheus_port: 9464
+    prometheus_path: "/metrics"
+    prometheus_runtime_metrics: false
+```
+
+Scrape example:
+
+```bash
+curl http://127.0.0.1:9464/metrics
+```
+
+OpenTelemetry uses OTLP over HTTP. `otel_enabled` is the master switch; traces and metrics remain separate opt-in controls:
+
+```yaml
+server:
+  observability:
+    otel_enabled: true
+    otel_traces_enabled: true
+    otel_metrics_enabled: true
+    otel_service_name: "pfxhttp"
+    otel_exporter_otlp_endpoint: "http://127.0.0.1:4318"
+    otel_exporter_otlp_insecure: true
+    otel_sample_ratio: 1.0
+```
+
+Configuration keys:
+
+| Key                           | Default       | Description                                                  |
+|-------------------------------|---------------|--------------------------------------------------------------|
+| `prometheus_enabled`          | `false`       | Starts the Prometheus HTTP endpoint.                         |
+| `prometheus_address`          | `127.0.0.1`   | Bind address for the metrics endpoint.                       |
+| `prometheus_port`             | `9464`        | Bind port for the metrics endpoint.                          |
+| `prometheus_path`             | `/metrics`    | HTTP path for Prometheus scraping.                           |
+| `prometheus_runtime_metrics`  | `false`       | Adds Go runtime and process collectors.                      |
+| `otel_enabled`                | `false`       | Enables OpenTelemetry export.                                |
+| `otel_traces_enabled`         | `false`       | Exports traces when OTel is enabled.                         |
+| `otel_metrics_enabled`        | `false`       | Exports OTel metrics when OTel is enabled.                   |
+| `otel_service_name`           | `pfxhttp`     | Sets the `service.name` resource attribute.                  |
+| `otel_service_version`        | build version | Sets the `service.version` resource attribute.               |
+| `otel_exporter_otlp_endpoint` | empty         | OTLP HTTP collector endpoint; required when OTel is enabled. |
+| `otel_exporter_otlp_headers`  | empty         | Map of headers for the OTLP HTTP exporter.                   |
+| `otel_exporter_otlp_insecure` | `false`       | Uses insecure transport for OTLP HTTP.                       |
+| `otel_sample_ratio`           | `1.0`         | Parent-based trace sampling ratio from `0.0` to `1.0`.       |
+
+If `otel_enabled` is true, at least one of `otel_traces_enabled` or `otel_metrics_enabled` must also be true, and `otel_exporter_otlp_endpoint` must be set. Observability is initialized at process startup; change Prometheus bind settings or OTLP exporter settings with a service restart, not SIGHUP reload.
 
 ### Privilege Dropping & Chroot
 

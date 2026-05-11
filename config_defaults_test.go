@@ -42,6 +42,76 @@ func TestWorkerPoolDefaults(t *testing.T) {
 	}
 }
 
+func TestObservabilityDefaultsAreOptIn(t *testing.T) {
+	cfg := &Config{
+		Server: Server{
+			Listen: []Listen{
+				{
+					Kind:    "socket_map",
+					Name:    "test",
+					Type:    "tcp",
+					Address: "127.0.0.1",
+					Port:    23450,
+				},
+			},
+		},
+	}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	if cfg.Server.Observability.PrometheusEnabled {
+		t.Fatal("prometheus_enabled must default to false")
+	}
+
+	if cfg.Server.Observability.PrometheusRuntimeMetrics {
+		t.Fatal("prometheus_runtime_metrics must default to false")
+	}
+
+	if cfg.Server.Observability.OTelEnabled {
+		t.Fatal("otel_enabled must default to false")
+	}
+
+	if cfg.Server.Observability.OTelTracesEnabled {
+		t.Fatal("otel_traces_enabled must default to false")
+	}
+
+	if cfg.Server.Observability.OTelMetricsEnabled {
+		t.Fatal("otel_metrics_enabled must default to false")
+	}
+
+	if cfg.Server.Observability.PrometheusAddress != defaultPrometheusAddress {
+		t.Fatalf("PrometheusAddress = %q, want %q", cfg.Server.Observability.PrometheusAddress, defaultPrometheusAddress)
+	}
+
+	if cfg.Server.Observability.PrometheusPort != defaultPrometheusPort {
+		t.Fatalf("PrometheusPort = %d, want %d", cfg.Server.Observability.PrometheusPort, defaultPrometheusPort)
+	}
+
+	if cfg.Server.Observability.PrometheusPath != defaultPrometheusPath {
+		t.Fatalf("PrometheusPath = %q, want %q", cfg.Server.Observability.PrometheusPath, defaultPrometheusPath)
+	}
+}
+
+func TestObservabilityPreservesExplicitZeroSampleRatio(t *testing.T) {
+	zeroRatio := 0.0
+	cfg := normalizeObservabilityConfig(ObservabilityConfig{
+		OTelEnabled:       true,
+		OTelTracesEnabled: true,
+		OTLPEndpoint:      "http://127.0.0.1:4318",
+		OTelSampleRatio:   &zeroRatio,
+	}, "test")
+
+	if got := defaultedOTelSampleRatio(cfg); got != 0 {
+		t.Fatalf("OTelSampleRatio = %v, want 0", got)
+	}
+
+	if err := validateObservabilityConfig(cfg); err != nil {
+		t.Fatalf("validateObservabilityConfig() error = %v", err)
+	}
+}
+
 func TestResolveDefaultsMergesAllFields(t *testing.T) {
 	raw := map[string]Request{
 		"defaults": {

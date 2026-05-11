@@ -9,13 +9,14 @@ import (
 // Deps bundles all shared application dependencies for injection via UberFX.
 // Fields are protected by mu for safe concurrent access during reload.
 type Deps struct {
-	mu           sync.RWMutex
-	Config       *Config
-	Logger       *slog.Logger
-	HTTPClient   *http.Client
-	OIDCManager  *OIDCManager
-	RespCache    ResponseCache
-	GRPCConnPool *GRPCConnPool
+	mu            sync.RWMutex
+	Config        *Config
+	Logger        *slog.Logger
+	HTTPClient    *http.Client
+	OIDCManager   *OIDCManager
+	RespCache     ResponseCache
+	GRPCConnPool  *GRPCConnPool
+	Observability *Observability
 }
 
 // GetConfig returns the current Config in a thread-safe manner.
@@ -66,6 +67,14 @@ func (d *Deps) GetGRPCConnPool() *GRPCConnPool {
 	defer d.mu.RUnlock()
 
 	return d.GRPCConnPool
+}
+
+// GetObservability returns the process observability runtime.
+func (d *Deps) GetObservability() *Observability {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	return d.Observability
 }
 
 // Reload updates all mutable dependencies atomically under a write lock.

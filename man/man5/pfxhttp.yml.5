@@ -59,6 +59,18 @@ server:
   worker_pool:
     max_workers: 10
     max_queue: 100
+  observability:
+    prometheus_enabled: false
+    prometheus_address: "127.0.0.1"
+    prometheus_port: 9464
+    prometheus_path: "/metrics"
+    prometheus_runtime_metrics: false
+    otel_enabled: false
+    otel_traces_enabled: false
+    otel_metrics_enabled: false
+    otel_service_name: "pfxhttp"
+    otel_exporter_otlp_insecure: false
+    otel_sample_ratio: 1.0
 .fi
 .RE
 
@@ -226,6 +238,56 @@ Maximum number of concurrent workers. If not configured in the \fBserver\fP sect
 .B max_queue:
 Maximum number of connections waiting in the queue. If not configured, it defaults to \fB10 * max_workers\fP.
 .RE
+
+.TP
+.B observability
+Optional Prometheus and OpenTelemetry configuration. All boolean options are opt-in and default to \fBfalse\fP.
+.RS
+.IP \[bu] 2
+.B prometheus_enabled:
+Starts a dedicated Prometheus HTTP endpoint when \fBtrue\fP.
+.IP \[bu] 2
+.B prometheus_address:
+Bind address for the Prometheus endpoint. Default: \fB127.0.0.1\fP.
+.IP \[bu] 2
+.B prometheus_port:
+Bind port for the Prometheus endpoint. Default: \fB9464\fP.
+.IP \[bu] 2
+.B prometheus_path:
+HTTP path for metrics. Default: \fB/metrics\fP.
+.IP \[bu] 2
+.B prometheus_runtime_metrics:
+Adds Go runtime and process collectors when explicitly enabled.
+.IP \[bu] 2
+.B otel_enabled:
+Enables OpenTelemetry OTLP HTTP export. At least one of \fBotel_traces_enabled\fP or \fBotel_metrics_enabled\fP must also be true.
+.IP \[bu] 2
+.B otel_traces_enabled:
+Exports traces when OpenTelemetry is enabled.
+.IP \[bu] 2
+.B otel_metrics_enabled:
+Exports OpenTelemetry metrics when OpenTelemetry is enabled.
+.IP \[bu] 2
+.B otel_service_name:
+Sets the OpenTelemetry \fBservice.name\fP resource attribute. Default: \fBpfxhttp\fP.
+.IP \[bu] 2
+.B otel_service_version:
+Sets the OpenTelemetry \fBservice.version\fP resource attribute. Defaults to the binary version.
+.IP \[bu] 2
+.B otel_exporter_otlp_endpoint:
+OTLP HTTP collector endpoint. Required when \fBotel_enabled\fP is true.
+.IP \[bu] 2
+.B otel_exporter_otlp_headers:
+Map of HTTP headers sent to the OTLP exporter.
+.IP \[bu] 2
+.B otel_exporter_otlp_insecure:
+Uses insecure OTLP HTTP transport when \fBtrue\fP.
+.IP \[bu] 2
+.B otel_sample_ratio:
+Parent-based trace sampling ratio from \fB0.0\fP to \fB1.0\fP. Default: \fB1.0\fP.
+.RE
+.IP
+Pfxhttp records listener connection events, protocol-level socket map, policy service and Dovecot SASL requests, outgoing HTTP backend requests, outgoing gRPC AuthService calls, and OIDC discovery/token/JWKS/introspection traffic. Request contexts are propagated into outbound HTTP headers and gRPC metadata. Observability bind/export settings are initialized at startup; restart the service to change them.
 
 .SS SOCKET_MAPS
 The \fBsocket_maps\fP section defines services used by Postfix to perform dynamic lookups. This functionality is commonly used for querying an external service to map a key (e.g., an email address or domain) to a value.

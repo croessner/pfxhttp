@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -34,21 +35,35 @@ func (rt *userAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	return rt.base.RoundTrip(req)
 }
 
-// InitializeHttpClient configures and initializes the HTTP client based on the provided configuration.
-func InitializeHttpClient(cfg *Config) *http.Client {
-	var proxyFunc func(*http.Request) (*url.URL, error)
-
-	if cfg.Server.HTTPClient.Proxy != "" {
-		proxyURL, err := url.Parse(cfg.Server.HTTPClient.Proxy)
-		if err != nil {
-			proxyFunc = http.ProxyFromEnvironment
-		} else {
-			proxyFunc = http.ProxyURL(proxyURL)
-		}
-	} else {
-		proxyFunc = http.ProxyFromEnvironment
+// InitializeHTTPClient configures and initializes the HTTP client based on the provided configuration.
+func InitializeHTTPClient(cfg *Config, observability ...*Observability) *http.Client {
+	client := &http.Client{
+		Timeout:   configuredHTTPClientTimeout(cfg),
+		Transport: &userAgentRoundTripper{base: buildHTTPTransport(cfg), ua: fmt.Sprintf("PostfixToHTTP/%s", version)},
 	}
 
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	if len(observability) > 0 && observability[0] != nil {
+		observability[0].InstrumentHTTPClient(client)
+	}
+
+	return client
+}
+
+// configuredHTTPClientTimeout returns the configured timeout or the default client timeout.
+func configuredHTTPClientTimeout(cfg *Config) time.Duration {
+	if cfg.Server.HTTPClient.Timeout > 0 {
+		return cfg.Server.HTTPClient.Timeout
+	}
+
+	return 60 * time.Second
+}
+
+// buildHTTPTransport creates the shared outbound HTTP transport.
+func buildHTTPTransport(cfg *Config) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 10 * time.Second,
@@ -57,65 +72,69 @@ func InitializeHttpClient(cfg *Config) *http.Client {
 	transport := &http.Transport{
 		DialContext:         dialer.DialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
-		Proxy:               proxyFunc,
+		Proxy:               proxyFuncFromConfig(cfg.Server.HTTPClient.Proxy),
 		MaxConnsPerHost:     cfg.Server.HTTPClient.MaxConnsPerHost,
 		MaxIdleConns:        cfg.Server.HTTPClient.MaxIdleConns,
 		MaxIdleConnsPerHost: cfg.Server.HTTPClient.MaxIdleConnsPerHost,
 		IdleConnTimeout:     cfg.Server.HTTPClient.IdleConnTimeout,
-		// Disable automatic gzip so we can control it per-target
-		DisableCompression: true,
+		DisableCompression:  true,
 	}
 
 	if cfg.Server.TLS.Enabled {
-		tlsConfig := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-
-		if cfg.Server.TLS.SkipVerify {
-			tlsConfig.InsecureSkipVerify = true
-		}
-
-		if cfg.Server.TLS.Cert != "" && cfg.Server.TLS.Key != "" {
-			cert, err := tls.LoadX509KeyPair(cfg.Server.TLS.Cert, cfg.Server.TLS.Key)
-			if err != nil {
-				panic(fmt.Sprintf("failed to load client certificate: %v", err))
-			}
-
-			tlsConfig.Certificates = []tls.Certificate{cert}
-		}
-
-		if cfg.Server.TLS.RootCA != "" {
-			caCert, err := os.ReadFile(cfg.Server.TLS.RootCA)
-			if err != nil {
-				panic(fmt.Sprintf("failed to read root CA file: %v", err))
-			}
-
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				panic("failed to append root CA certificate")
-			}
-
-			tlsConfig.RootCAs = caCertPool
-		}
-
-		transport.TLSClientConfig = tlsConfig
+		transport.TLSClientConfig = buildHTTPClientTLSConfig(cfg.Server.TLS)
 	}
 
-	clientTimeout := 60 * time.Second
-	if cfg.Server.HTTPClient.Timeout > 0 {
-		clientTimeout = cfg.Server.HTTPClient.Timeout
+	return transport
+}
+
+// proxyFuncFromConfig returns the configured proxy or the environment proxy fallback.
+func proxyFuncFromConfig(proxy string) func(*http.Request) (*url.URL, error) {
+	if proxy == "" {
+		return http.ProxyFromEnvironment
 	}
 
-	client := &http.Client{
-		Timeout:   clientTimeout,
-		Transport: &userAgentRoundTripper{base: transport, ua: fmt.Sprintf("PostfixToHTTP/%s", version)},
+	proxyURL, err := url.Parse(proxy)
+	if err != nil {
+		return http.ProxyFromEnvironment
 	}
 
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
+	return http.ProxyURL(proxyURL)
+}
+
+// buildHTTPClientTLSConfig converts the TLS config into a client-side TLS configuration.
+func buildHTTPClientTLSConfig(cfg TLS) *tls.Config {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
 	}
 
-	return client
+	if cfg.SkipVerify {
+		tlsConfig.InsecureSkipVerify = true
+	}
+
+	if cfg.Cert != "" && cfg.Key != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
+		if err != nil {
+			panic(fmt.Sprintf("failed to load client certificate: %v", err))
+		}
+
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	if cfg.RootCA != "" {
+		caCert, err := os.ReadFile(cfg.RootCA)
+		if err != nil {
+			panic(fmt.Sprintf("failed to read root CA file: %v", err))
+		}
+
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			panic("failed to append root CA certificate")
+		}
+
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	return tlsConfig
 }
 
 // splitHeader splits a header string into a key and value pair, separating by the first colon.
@@ -214,19 +233,23 @@ type GenericClient interface {
 	// SendAndReceive initiates the request-response process
 	// by sending data with the Sender and receiving a response with the Receiver.
 	SendAndReceive() error
+
+	// SendAndReceiveContext sends data while preserving the caller's request context.
+	SendAndReceiveContext(context.Context) error
 }
 
 // MapClient represents a client capable of handling data flow between a receiver and sender within a configurable setup.
 // It uses a configuration object to manage operations and leverages Receiver and Sender interfaces to facilitate communication.
 // Receives data via a Receiver, processes it using defined logic, and sends results through a Sender.
 type MapClient struct {
-	config      *Config
-	logger      *slog.Logger
-	httpClient  *http.Client
-	oidcManager *OIDCManager
-	respCache   ResponseCache
-	receiver    Receiver
-	sender      Sender
+	config        *Config
+	logger        *slog.Logger
+	httpClient    *http.Client
+	oidcManager   *OIDCManager
+	respCache     ResponseCache
+	observability *Observability
+	receiver      Receiver
+	sender        Sender
 }
 
 // SetReceiver assigns the specified Receiver to the MapClient for handling incoming data operations.
@@ -261,13 +284,72 @@ func (c *MapClient) RenderTemplate(tmpl string) (string, error) {
 	return rendered.String(), nil
 }
 
+// buildOutboundJSONRequest creates a context-aware JSON POST request for a configured backend.
+func buildOutboundJSONRequest(ctx context.Context, component, name string, settings Request, renderedPayload string) (*http.Request, error) {
+	bodyReader, err := backendRequestBody(settings, renderedPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx = ContextWithBackendOperation(ctx, component, name)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, settings.Target, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	applyBackendRequestHeaders(req, settings)
+
+	return req, nil
+}
+
+// backendRequestBody returns the optionally compressed backend request body.
+func backendRequestBody(settings Request, renderedPayload string) (io.Reader, error) {
+	if !settings.HTTPRequestCompression {
+		return bytes.NewBuffer([]byte(renderedPayload)), nil
+	}
+
+	compressed, err := gzipCompressor.Compress([]byte(renderedPayload))
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewBuffer(compressed), nil
+}
+
+// applyBackendRequestHeaders applies common JSON, compression, and custom headers.
+func applyBackendRequestHeaders(req *http.Request, settings Request) {
+	req.Header.Set("Content-Type", "application/json")
+
+	if settings.HTTPRequestCompression {
+		req.Header.Set("Content-Encoding", gzipCompressor.Name())
+	}
+
+	if settings.HTTPResponseCompression {
+		req.Header.Set("Accept-Encoding", gzipCompressor.Name())
+	}
+
+	for _, header := range settings.CustomHeaders {
+		headerKey, headerValue := splitHeader(header)
+		if headerKey != "" && headerValue != "" {
+			req.Header.Set(headerKey, headerValue)
+		}
+	}
+}
+
 // SendAndReceive handles the data flow by sending a POST request with rendered payload and processes the response.
 // It retrieves the target and payload template from the configuration, renders the template, and sends the request.
 // Custom headers can be included if specified in the settings. Timeout and other errors update the sender's status.
 // Validates the response against expected status and value fields, updating the sender's status accordingly.
 // Returns an error if request creation, template rendering, or response handling fails.
 func (c *MapClient) SendAndReceive() error {
+	return c.SendAndReceiveContext(context.Background())
+}
+
+// SendAndReceiveContext handles the data flow using the supplied request context.
+func (c *MapClient) SendAndReceiveContext(ctx context.Context) error {
 	c.sender = NewPostfixSender()
+	ctx = ContextWithObservability(ctx, c.observability)
 
 	settings, ok := c.config.SocketMaps[c.receiver.GetName()]
 	if !ok {
@@ -283,40 +365,9 @@ func (c *MapClient) SendAndReceive() error {
 		return err
 	}
 
-	var bodyReader io.Reader
-
-	if settings.HTTPRequestCompression {
-		compressed, err := gzipCompressor.Compress([]byte(renderedPayload))
-		if err != nil {
-			return err
-		}
-
-		bodyReader = bytes.NewBuffer(compressed)
-	} else {
-		bodyReader = bytes.NewBuffer([]byte(renderedPayload))
-	}
-
-	req, err := http.NewRequest("POST", settings.Target, bodyReader)
+	req, err := buildOutboundJSONRequest(ctx, componentSocketMap, c.receiver.GetName(), settings, renderedPayload)
 	if err != nil {
 		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if settings.HTTPRequestCompression {
-		req.Header.Set("Content-Encoding", gzipCompressor.Name())
-	}
-
-	if settings.HTTPResponseCompression {
-		req.Header.Set("Accept-Encoding", gzipCompressor.Name())
-	}
-
-	if len(settings.CustomHeaders) != 0 {
-		for _, header := range settings.CustomHeaders {
-			headerKey, headerValue := splitHeader(header)
-			if headerKey != "" && headerValue != "" {
-				req.Header.Set(headerKey, headerValue)
-			}
-		}
 	}
 
 	// Add OIDC token if enabled
@@ -336,43 +387,9 @@ func (c *MapClient) SendAndReceive() error {
 	}
 
 	if err != nil {
-		// On backend errors, try cache first if available
-		if c.respCache != nil {
-			if entry, ok := c.respCache.Get(c.receiver.GetName(), c.receiver.GetKey()); ok {
-				if c.logger != nil {
-					c.logger.Error("Backend request failed, serving cached response",
-						"component", "socket_map",
-						"name", c.receiver.GetName(),
-						"key", c.receiver.GetKey(),
-						"error", err.Error())
-				}
+		c.handleBackendError(err)
 
-				c.sender.SetStatus(entry.Status)
-				c.sender.SetData(entry.Data)
-
-				return nil
-			}
-		}
-
-		if c.logger != nil {
-			c.logger.Error("Backend request failed, no cache entry",
-				"component", "socket_map",
-				"name", c.receiver.GetName(),
-				"key", c.receiver.GetKey(),
-				"error", err.Error())
-		}
-
-		if errors.Is(err, http.ErrHandlerTimeout) {
-			c.sender.SetStatus("TIMEOUT")
-			c.sender.SetData("request timed out")
-
-			return nil
-		} else {
-			c.sender.SetStatus("TEMP")
-			c.sender.SetData(err.Error())
-
-			return nil
-		}
+		return nil
 	}
 
 	if resp == nil {
@@ -383,17 +400,61 @@ func (c *MapClient) SendAndReceive() error {
 	}
 
 	err = c.handleResponse(resp, settings)
+	c.cacheSuccessfulResponse(err)
 
-	// Cache only on successful definitive result
-	if err == nil && c.respCache != nil {
-		if ps, ok := c.sender.(*PostfixSender); ok && ps.status == "OK" {
-			respEntry := CachedResponse{Status: ps.status, Data: ps.data}
+	return err
+}
 
-			c.respCache.Set(c.receiver.GetName(), c.receiver.GetKey(), respEntry)
+// handleBackendError maps socket-map backend errors to cache hits or Postfix statuses.
+func (c *MapClient) handleBackendError(err error) {
+	if c.respCache != nil {
+		if entry, ok := c.respCache.Get(c.receiver.GetName(), c.receiver.GetKey()); ok {
+			c.logBackendError("Backend request failed, serving cached response", err)
+			c.sender.SetStatus(entry.Status)
+			c.sender.SetData(entry.Data)
+
+			return
 		}
 	}
 
-	return err
+	c.logBackendError("Backend request failed, no cache entry", err)
+
+	if errors.Is(err, http.ErrHandlerTimeout) {
+		c.sender.SetStatus("TIMEOUT")
+		c.sender.SetData("request timed out")
+
+		return
+	}
+
+	c.sender.SetStatus("TEMP")
+	c.sender.SetData(err.Error())
+}
+
+// logBackendError writes a socket-map backend error with stable log fields.
+func (c *MapClient) logBackendError(message string, err error) {
+	if c.logger == nil {
+		return
+	}
+
+	c.logger.Error(message,
+		"component", componentSocketMap,
+		"name", c.receiver.GetName(),
+		"key", c.receiver.GetKey(),
+		"error", err.Error())
+}
+
+// cacheSuccessfulResponse stores definitive socket-map successes for later backend outages.
+func (c *MapClient) cacheSuccessfulResponse(err error) {
+	if err != nil || c.respCache == nil {
+		return
+	}
+
+	ps, ok := c.sender.(*PostfixSender)
+	if !ok || ps.status != string(DovecotCmdOK) {
+		return
+	}
+
+	c.respCache.Set(c.receiver.GetName(), c.receiver.GetKey(), CachedResponse{Status: ps.status, Data: ps.data})
 }
 
 var _ GenericClient = (*MapClient)(nil)
@@ -476,23 +537,25 @@ func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 // NewMapClient creates and returns a new instance of MapClient configured using the provided dependencies.
 func NewMapClient(deps *Deps, logger *slog.Logger) GenericClient {
 	return &MapClient{
-		config:      deps.GetConfig(),
-		logger:      logger,
-		httpClient:  deps.GetHTTPClient(),
-		oidcManager: deps.GetOIDCManager(),
-		respCache:   deps.GetRespCache(),
+		config:        deps.GetConfig(),
+		logger:        logger,
+		httpClient:    deps.GetHTTPClient(),
+		oidcManager:   deps.GetOIDCManager(),
+		respCache:     deps.GetRespCache(),
+		observability: deps.GetObservability(),
 	}
 }
 
 // PolicyClient is a client structure for managing communication processes between senders and receivers.
 type PolicyClient struct {
-	config      *Config
-	logger      *slog.Logger
-	httpClient  *http.Client
-	oidcManager *OIDCManager
-	respCache   ResponseCache
-	receiver    Receiver
-	sender      Sender
+	config        *Config
+	logger        *slog.Logger
+	httpClient    *http.Client
+	oidcManager   *OIDCManager
+	respCache     ResponseCache
+	observability *Observability
+	receiver      Receiver
+	sender        Sender
 }
 
 var _ GenericClient = (*PolicyClient)(nil)
@@ -531,7 +594,13 @@ func (p *PolicyClient) RenderTemplate(tmpl string) (string, error) {
 
 // SendAndReceive sends an HTTP request based on receiver settings and handles the response, updating the sender's status and data.
 func (p *PolicyClient) SendAndReceive() error {
+	return p.SendAndReceiveContext(context.Background())
+}
+
+// SendAndReceiveContext sends an HTTP request while preserving the caller's request context.
+func (p *PolicyClient) SendAndReceiveContext(ctx context.Context) error {
 	p.sender = NewPostfixSender()
+	ctx = ContextWithObservability(ctx, p.observability)
 
 	settings, ok := p.config.PolicyServices[p.receiver.GetName()]
 	if !ok {
@@ -547,40 +616,9 @@ func (p *PolicyClient) SendAndReceive() error {
 		return err
 	}
 
-	var bodyReader io.Reader
-
-	if settings.HTTPRequestCompression {
-		compressed, err := gzipCompressor.Compress([]byte(renderedPayload))
-		if err != nil {
-			return err
-		}
-
-		bodyReader = bytes.NewBuffer(compressed)
-	} else {
-		bodyReader = bytes.NewBuffer([]byte(renderedPayload))
-	}
-
-	req, err := http.NewRequest("POST", settings.Target, bodyReader)
+	req, err := buildOutboundJSONRequest(ctx, componentPolicyService, p.receiver.GetName(), settings, renderedPayload)
 	if err != nil {
 		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if settings.HTTPRequestCompression {
-		req.Header.Set("Content-Encoding", gzipCompressor.Name())
-	}
-
-	if settings.HTTPResponseCompression {
-		req.Header.Set("Accept-Encoding", gzipCompressor.Name())
-	}
-
-	if len(settings.CustomHeaders) != 0 {
-		for _, header := range settings.CustomHeaders {
-			headerKey, headerValue := splitHeader(header)
-			if headerKey != "" && headerValue != "" {
-				req.Header.Set(headerKey, headerValue)
-			}
-		}
 	}
 
 	// Add OIDC token if enabled
@@ -600,34 +638,7 @@ func (p *PolicyClient) SendAndReceive() error {
 	}
 
 	if err != nil {
-		// Try cache on backend failure
-		if p.respCache != nil {
-			if entry, ok := p.respCache.Get(p.receiver.GetName(), p.receiver.GetKey()); ok {
-				if p.logger != nil {
-					p.logger.Error("Backend request failed, serving cached response",
-						"component", "policy_service",
-						"name", p.receiver.GetName(),
-						"key", p.receiver.GetKey(),
-						"error", err.Error())
-				}
-
-				p.sender.SetStatus(entry.Status)
-				p.sender.SetData(entry.Data)
-
-				return nil
-			}
-		}
-
-		if p.logger != nil {
-			p.logger.Error("Backend request failed, no cache entry",
-				"component", "policy_service",
-				"name", p.receiver.GetName(),
-				"key", p.receiver.GetKey(),
-				"error", err.Error())
-		}
-
-		p.sender.SetStatus("DEFER")
-		p.sender.SetData(TempServerProblem)
+		p.handleBackendError(err)
 
 		return nil
 	}
@@ -640,17 +651,53 @@ func (p *PolicyClient) SendAndReceive() error {
 	}
 
 	err = p.handleResponse(resp, settings)
+	p.cacheSuccessfulResponse(err)
 
-	// Cache only on successful definitive policy action
-	if err == nil && p.respCache != nil {
-		if ps, ok := p.sender.(*PostfixSender); ok && ps.status != "" {
-			respEntry := CachedResponse{Status: ps.status, Data: ps.data}
+	return err
+}
 
-			p.respCache.Set(p.receiver.GetName(), p.receiver.GetKey(), respEntry)
+// handleBackendError maps policy backend errors to cache hits or temporary Postfix failures.
+func (p *PolicyClient) handleBackendError(err error) {
+	if p.respCache != nil {
+		if entry, ok := p.respCache.Get(p.receiver.GetName(), p.receiver.GetKey()); ok {
+			p.logBackendError("Backend request failed, serving cached response", err)
+			p.sender.SetStatus(entry.Status)
+			p.sender.SetData(entry.Data)
+
+			return
 		}
 	}
 
-	return err
+	p.logBackendError("Backend request failed, no cache entry", err)
+	p.sender.SetStatus("DEFER")
+	p.sender.SetData(TempServerProblem)
+}
+
+// logBackendError writes a policy backend error with stable log fields.
+func (p *PolicyClient) logBackendError(message string, err error) {
+	if p.logger == nil {
+		return
+	}
+
+	p.logger.Error(message,
+		"component", componentPolicyService,
+		"name", p.receiver.GetName(),
+		"key", p.receiver.GetKey(),
+		"error", err.Error())
+}
+
+// cacheSuccessfulResponse stores definitive policy actions for later backend outages.
+func (p *PolicyClient) cacheSuccessfulResponse(err error) {
+	if err != nil || p.respCache == nil {
+		return
+	}
+
+	ps, ok := p.sender.(*PostfixSender)
+	if !ok || ps.status == "" {
+		return
+	}
+
+	p.respCache.Set(p.receiver.GetName(), p.receiver.GetKey(), CachedResponse{Status: ps.status, Data: ps.data})
 }
 
 // handleResponse processes an HTTP response, evaluates its contents, and sets the sender's status and data accordingly.
@@ -730,10 +777,11 @@ func (p *PolicyClient) handleResponse(resp *http.Response, request Request) erro
 // NewPolicyClient creates and returns a new instance of PolicyClient initialized with the provided dependencies.
 func NewPolicyClient(deps *Deps, logger *slog.Logger) GenericClient {
 	return &PolicyClient{
-		config:      deps.GetConfig(),
-		logger:      logger,
-		httpClient:  deps.GetHTTPClient(),
-		oidcManager: deps.GetOIDCManager(),
-		respCache:   deps.GetRespCache(),
+		config:        deps.GetConfig(),
+		logger:        logger,
+		httpClient:    deps.GetHTTPClient(),
+		oidcManager:   deps.GetOIDCManager(),
+		respCache:     deps.GetRespCache(),
+		observability: deps.GetObservability(),
 	}
 }

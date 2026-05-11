@@ -6,6 +6,7 @@ import (
 )
 
 func TestConfigValidation(t *testing.T) {
+	invalidSampleRatio := 1.5
 	tests := []struct {
 		name        string
 		cfg         Config
@@ -332,6 +333,70 @@ func TestConfigValidation(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: []string{"min_version", "oneof"},
+		},
+		{
+			name: "OTel enabled requires trace or metric export",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "socket_map",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    23456,
+						},
+					},
+					Observability: ObservabilityConfig{
+						OTelEnabled: true,
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"otel_enabled", "otel_traces_enabled", "otel_metrics_enabled"},
+		},
+		{
+			name: "OTel enabled requires OTLP endpoint",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "socket_map",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    23456,
+						},
+					},
+					Observability: ObservabilityConfig{
+						OTelEnabled:       true,
+						OTelTracesEnabled: true,
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"otel_exporter_otlp_endpoint"},
+		},
+		{
+			name: "OTel sample ratio must stay in range",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "socket_map",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    23456,
+						},
+					},
+					Observability: ObservabilityConfig{
+						OTelEnabled:       true,
+						OTelTracesEnabled: true,
+						OTLPEndpoint:      "http://collector.example:4318",
+						OTelSampleRatio:   &invalidSampleRatio,
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"otel_sample_ratio"},
 		},
 	}
 

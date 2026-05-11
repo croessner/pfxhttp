@@ -9,6 +9,7 @@ func main() {
 		fx.Provide(
 			ProvideConfig,
 			ProvideLogger,
+			ProvideObservability,
 			ProvideHTTPClient,
 			ProvideOIDCManager,
 			ProvideResponseCache,

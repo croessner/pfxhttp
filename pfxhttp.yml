@@ -63,6 +63,26 @@ server:
     max_workers: 10
     max_queue: 100
 
+  observability:
+    # All observability features are opt-in.
+    prometheus_enabled: false
+    prometheus_address: 127.0.0.1
+    prometheus_port: 9464
+    prometheus_path: /metrics
+    prometheus_runtime_metrics: false
+    otel_enabled: false
+    otel_traces_enabled: false
+    otel_metrics_enabled: false
+    otel_service_name: pfxhttp
+    # Defaults to the binary version when omitted.
+    # otel_service_version: ""
+    # Required when otel_enabled is true.
+    # otel_exporter_otlp_endpoint: http://127.0.0.1:4318
+    # otel_exporter_otlp_headers:
+    #   authorization: "Bearer token"
+    otel_exporter_otlp_insecure: false
+    otel_sample_ratio: 1.0
+
 socket_maps:
 
   demo:

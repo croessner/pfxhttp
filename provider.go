@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -63,9 +64,14 @@ func ProvideLogger(cfg *Config) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stdout, handlerOpts))
 }
 
+// ProvideObservability creates the process-wide metrics and tracing runtime.
+func ProvideObservability(cfg *Config, logger *slog.Logger) (*Observability, error) {
+	return NewObservability(context.Background(), cfg.Server.Observability, version, logger)
+}
+
 // ProvideHTTPClient creates the HTTP client from the configuration.
-func ProvideHTTPClient(cfg *Config) *http.Client {
-	return InitializeHttpClient(cfg)
+func ProvideHTTPClient(cfg *Config, obs *Observability) *http.Client {
+	return InitializeHTTPClient(cfg, obs)
 }
 
 // ProvideOIDCManager creates a new OIDCManager with the HTTP client.
@@ -96,13 +102,15 @@ func ProvideDeps(
 	oidcManager *OIDCManager,
 	respCache ResponseCache,
 	grpcPool *GRPCConnPool,
+	obs *Observability,
 ) *Deps {
 	return &Deps{
-		Config:       cfg,
-		Logger:       logger,
-		HTTPClient:   httpClient,
-		OIDCManager:  oidcManager,
-		RespCache:    respCache,
-		GRPCConnPool: grpcPool,
+		Config:        cfg,
+		Logger:        logger,
+		HTTPClient:    httpClient,
+		OIDCManager:   oidcManager,
+		RespCache:     respCache,
+		GRPCConnPool:  grpcPool,
+		Observability: obs,
 	}
 }

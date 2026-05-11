@@ -37,6 +37,7 @@ type Server struct {
 	SockmapMaxReplySize int                 `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
 	ResponseCache       ResponseCacheConfig `mapstructure:"response_cache" validate:"omitempty"`
 	WorkerPool          WorkerPoolConfig    `mapstructure:"worker_pool" validate:"omitempty"`
+	Observability       ObservabilityConfig `mapstructure:"observability" validate:"omitempty"`
 }
 
 type Listen struct {
@@ -642,6 +643,11 @@ func (cfg *Config) HandleConfig() error {
 		return err
 	}
 
+	cfg.Server.Observability = normalizeObservabilityConfig(cfg.Server.Observability, version)
+	if err := validateObservabilityConfig(cfg.Server.Observability); err != nil {
+		return err
+	}
+
 	// Apply defaults for worker pool if not configured
 	numCPU := runtime.GOMAXPROCS(0)
 	if cfg.Server.WorkerPool.MaxWorkers == 0 {
@@ -873,4 +879,39 @@ func prettyFormatValidationErrors(validationErrors validator.ValidationErrors) e
 	}
 
 	return errors.New("validation errors: " + strings.Join(errorMessages, "; "))
+}
+
+// validateObservabilityConfig enforces cross-field constraints that struct tags cannot express.
+func validateObservabilityConfig(cfg ObservabilityConfig) error {
+	if cfg.PrometheusEnabled {
+		if cfg.PrometheusAddress == "" {
+			return errors.New("observability prometheus_address must not be empty when prometheus_enabled is true")
+		}
+
+		if cfg.PrometheusPort < 1 || cfg.PrometheusPort > 65535 {
+			return errors.New("observability prometheus_port must be between 1 and 65535")
+		}
+
+		if !strings.HasPrefix(cfg.PrometheusPath, "/") {
+			return errors.New("observability prometheus_path must start with '/'")
+		}
+	}
+
+	if ratio := defaultedOTelSampleRatio(cfg); ratio < 0 || ratio > 1 {
+		return errors.New("observability otel_sample_ratio must be between 0.0 and 1.0")
+	}
+
+	if !cfg.OTelEnabled {
+		return nil
+	}
+
+	if !cfg.OTelTracesEnabled && !cfg.OTelMetricsEnabled {
+		return errors.New("observability otel_enabled requires otel_traces_enabled or otel_metrics_enabled")
+	}
+
+	if cfg.OTLPEndpoint == "" {
+		return errors.New("observability otel_exporter_otlp_endpoint is required when otel_enabled is true")
+	}
+
+	return nil
 }
