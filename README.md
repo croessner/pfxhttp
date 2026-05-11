@@ -816,6 +816,12 @@ This requires `golangci-lint` v2.12.1 or a compatible v2 release on `PATH`.
 
 Dependency updates should be followed by `go mod tidy` and `go mod vendor` so the vendored build remains reproducible.
 
+Release tags must use `vMAJOR.MINOR.PATCH`. Prerelease tags such as
+`v1.2.3-alpha.2` or `v1.2.3-rc.4` are supported and are published as GitHub
+prereleases. Docker prereleases only receive the exact version tag; stable
+release tags also update `latest`, `vMAJOR`, and `vMAJOR.MINOR`.
+Linux package prereleases use Debian/RPM-compatible `~` package versions.
+
 ---
 
 ## References

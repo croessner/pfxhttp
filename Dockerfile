@@ -4,13 +4,20 @@ WORKDIR /build
 
 COPY . ./
 
-# Set necessarry environment vairables and compile the app
+ARG TARGETOS
+ARG TARGETARCH
+
+# Set necessary environment variables and compile the app.
 ENV CGO_ENABLED=0
 
 RUN apk --no-cache --upgrade add build-base git
-RUN make
+RUN if [ -n "${TARGETOS}" ] && [ -n "${TARGETARCH}" ]; then \
+        GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" make; \
+    else \
+        make; \
+    fi
 
-FROM --platform=$BUILDPLATFORM alpine:3
+FROM alpine:3
 
 LABEL org.opencontainers.image.authors="christian@roessner.email"
 LABEL org.opencontainers.image.source="https://github.com/croessner/pfxhttp"

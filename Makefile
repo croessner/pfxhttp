@@ -57,7 +57,10 @@ test:
 race:
 	go test -race -short $$(go list ./... | grep -v /vendor/)
 
-guardrails: fix vet lint test race build-check
+test-release-metadata:
+	bash scripts/test-release-semver-metadata.sh
+
+guardrails: fix vet lint test test-release-metadata race build-check
 
 # Print version
 version:
@@ -71,4 +74,4 @@ generate-grpc:
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		proto/auth/v1/auth.proto
 
-.PHONY: all build build-check clean version install uninstall fix vet lint test race guardrails generate-grpc
+.PHONY: all build build-check clean version install uninstall fix vet lint test test-release-metadata race guardrails generate-grpc
