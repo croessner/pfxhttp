@@ -78,6 +78,23 @@ const (
 )
 
 const (
+	socketMapReadSpanName        = "socket_map read request"
+	socketMapDecodeSpanName      = "socket_map decode request"
+	socketMapBackendSpanName     = "socket_map backend exchange"
+	socketMapEncodeSpanName      = "socket_map encode response"
+	socketMapWriteSpanName       = "socket_map write response"
+	policyServiceReadSpanName    = "policy_service read request"
+	policyServiceDecodeSpanName  = "policy_service decode request"
+	policyServiceBackendSpanName = "policy_service backend exchange"
+	policyServiceEncodeSpanName  = "policy_service encode response"
+	policyServiceWriteSpanName   = "policy_service write response"
+	dovecotSASLMechanismSpanName = "dovecot_sasl mechanism step"
+	dovecotSASLBackendSpanName   = "dovecot_sasl backend auth"
+	dovecotSASLResponseSpanName  = "dovecot_sasl write response"
+	dovecotSASLWaitSpanName      = "dovecot_sasl continuation wait"
+)
+
+const (
 	observabilityContextKey ctxKey = "observability"
 	backendOperationKey     ctxKey = "backend_operation"
 )

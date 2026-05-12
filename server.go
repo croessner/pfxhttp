@@ -345,8 +345,22 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 		case <-s.ctx.Done():
 			return
 		default:
+			requestCtx, obs, span := s.startApplicationSpan(componentSocketMap, defaultBackendName, clientAddr)
+			start := time.Now()
+
+			_, readObs, readSpan := startInternalSpanFromContext(requestCtx,
+				socketMapReadSpanName,
+				attribute.String("pfxhttp.component", componentSocketMap),
+				attribute.String("pfxhttp.listener", safeMetricName(s.name)),
+			)
 			netString, err := s.readNetString(conn)
+			finishObservedSpan(readObs, readSpan, err)
 			if err != nil {
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+					span.End()
+				}
+
 				if errors.Is(err, io.EOF) {
 					break
 				}
@@ -358,6 +372,10 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 
 			// Client closed connection
 			if netString == nil {
+				if obs != nil {
+					span.End()
+				}
+
 				return
 			}
 
@@ -368,20 +386,36 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 
 			received := NewPostfixMapReceiver()
 
+			_, decodeObs, decodeSpan := startInternalSpanFromContext(requestCtx,
+				socketMapDecodeSpanName,
+				attribute.String("pfxhttp.component", componentSocketMap),
+				attribute.String("pfxhttp.listener", safeMetricName(s.name)),
+			)
 			err = received.ReadNetString(netString)
+			finishObservedSpan(decodeObs, decodeSpan, err)
 			if err != nil {
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+				}
 				reqLogger.Error("Error reading request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, defaultBackendName, outcomeError, start)
 
 				return
 			}
 
+			span.SetName(applicationSpanName(componentSocketMap, received.GetName()))
+			span.SetAttributes(attribute.String("pfxhttp.name", safeMetricName(received.GetName())))
+
 			client := NewMapClient(s.deps, reqLogger)
 			client.SetReceiver(received)
 
-			requestCtx, obs, span := s.startApplicationSpan(componentSocketMap, received.GetName(), clientAddr)
-			start := time.Now()
-
-			err = client.SendAndReceiveContext(requestCtx)
+			backendCtx, backendObs, backendSpan := startInternalSpanFromContext(requestCtx,
+				socketMapBackendSpanName,
+				attribute.String("pfxhttp.component", componentSocketMap),
+				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+			)
+			err = client.SendAndReceiveContext(backendCtx)
+			finishObservedSpan(backendObs, backendSpan, err)
 			if err != nil {
 				if obs != nil {
 					obs.RecordSpanError(span, err)
@@ -393,10 +427,24 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 			}
 
 			outcome := outcomeFromSender(client.GetSender())
+
+			_, encodeObs, encodeSpan := startInternalSpanFromContext(requestCtx,
+				socketMapEncodeSpanName,
+				attribute.String("pfxhttp.component", componentSocketMap),
+				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+			)
 			responseData := client.GetSender().String()
 			response := NewNetStringFromString(responseData)
 
+			finishObservedSpan(encodeObs, encodeSpan, nil)
+
+			_, writeObs, writeSpan := startInternalSpanFromContext(requestCtx,
+				socketMapWriteSpanName,
+				attribute.String("pfxhttp.component", componentSocketMap),
+				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+			)
 			err = s.writeNetString(conn, response)
+			finishObservedSpan(writeObs, writeSpan, err)
 			if err != nil {
 				outcome = outcomeError
 
@@ -426,8 +474,22 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 		case <-s.ctx.Done():
 			return
 		default:
+			requestCtx, obs, span := s.startApplicationSpan(componentPolicyService, s.name, clientAddr)
+			start := time.Now()
+
+			_, readObs, readSpan := startInternalSpanFromContext(requestCtx,
+				policyServiceReadSpanName,
+				attribute.String("pfxhttp.component", componentPolicyService),
+				attribute.String("pfxhttp.name", safeMetricName(s.name)),
+			)
 			policy, err := s.readPolicy(conn)
+			finishObservedSpan(readObs, readSpan, err)
 			if err != nil {
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+					span.End()
+				}
+
 				if errors.Is(err, io.EOF) {
 					break
 				}
@@ -443,15 +505,36 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 			reqLogger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", policy.String()))
 
 			received := NewPostfixPolicyReceiver(s.name)
-			_ = received.ReadPolcy(policy)
+
+			_, decodeObs, decodeSpan := startInternalSpanFromContext(requestCtx,
+				policyServiceDecodeSpanName,
+				attribute.String("pfxhttp.component", componentPolicyService),
+				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+			)
+			err = received.ReadPolcy(policy)
+			finishObservedSpan(decodeObs, decodeSpan, err)
+
+			if err != nil {
+				if obs != nil {
+					obs.RecordSpanError(span, err)
+				}
+
+				reqLogger.Error("Error reading request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcomeError, start)
+
+				return
+			}
 
 			client := NewPolicyClient(s.deps, reqLogger)
 			client.SetReceiver(received)
 
-			requestCtx, obs, span := s.startApplicationSpan(componentPolicyService, received.GetName(), clientAddr)
-			start := time.Now()
-
-			err = client.SendAndReceiveContext(requestCtx)
+			backendCtx, backendObs, backendSpan := startInternalSpanFromContext(requestCtx,
+				policyServiceBackendSpanName,
+				attribute.String("pfxhttp.component", componentPolicyService),
+				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+			)
+			err = client.SendAndReceiveContext(backendCtx)
+			finishObservedSpan(backendObs, backendSpan, err)
 			if err != nil {
 				if obs != nil {
 					obs.RecordSpanError(span, err)
@@ -463,9 +546,23 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 			}
 
 			outcome := outcomeFromSender(client.GetSender())
+
+			_, encodeObs, encodeSpan := startInternalSpanFromContext(requestCtx,
+				policyServiceEncodeSpanName,
+				attribute.String("pfxhttp.component", componentPolicyService),
+				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+			)
 			responseData := fmt.Sprintf("action=%s\n\n", strings.TrimSpace(client.GetSender().String()))
 
+			finishObservedSpan(encodeObs, encodeSpan, nil)
+
+			_, writeObs, writeSpan := startInternalSpanFromContext(requestCtx,
+				policyServiceWriteSpanName,
+				attribute.String("pfxhttp.component", componentPolicyService),
+				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+			)
 			err = s.writePolicyResult(conn, responseData)
+			finishObservedSpan(writeObs, writeSpan, err)
 			if err != nil {
 				outcome = outcomeError
 
@@ -496,10 +593,12 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 var dovecotCUIDCounter atomic.Uint64
 
 type saslObservabilityState struct {
-	ctx   context.Context
-	obs   *Observability
-	span  trace.Span
-	start time.Time
+	ctx      context.Context
+	obs      *Observability
+	span     trace.Span
+	start    time.Time
+	waitObs  *Observability
+	waitSpan trace.Span
 }
 
 // generateCookie generates a random hex cookie for the Dovecot SASL handshake.
@@ -539,6 +638,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 
 		for id, state := range activeObservabilityStates {
 			sessionLogger().Warn("Dovecot SASL authentication abandoned", slog.String("id", id), slog.String(LogKeyClient, clientAddr))
+			finishSASLContinuationWait(state, errors.New("authentication abandoned"))
 			s.finishApplicationSpan(state.ctx, state.obs, state.span, componentDovecotSASL, s.name, outcomeError, state.start)
 		}
 
@@ -681,7 +781,24 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 					continue
 				}
 
+				state := activeObservabilityStates[authReq.ID]
+				if state == nil {
+					state = s.startDovecotSASLObservabilityState(clientAddr)
+					activeObservabilityStates[authReq.ID] = state
+				}
+
+				state.ctx = context.WithValue(state.ctx, loggerKey, reqLogger)
+
+				_, mechanismObs, mechanismSpan := startInternalSpanFromContext(state.ctx,
+					dovecotSASLMechanismSpanName,
+					attribute.String("pfxhttp.component", componentDovecotSASL),
+					attribute.String("pfxhttp.name", safeMetricName(s.name)),
+					attribute.String("pfxhttp.sasl.mechanism", authReq.Mechanism),
+					attribute.String("pfxhttp.sasl.step", "start"),
+				)
 				result, creds := mech.Start(authReq.InitialResponse)
+
+				finishObservedSpan(mechanismObs, mechanismSpan, nil)
 				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests, activeObservabilityStates)
 
 			case DovecotCmdCont:
@@ -700,7 +817,33 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				}
 
 				authReq := activeAuthRequests[contReq.ID]
+
+				state := activeObservabilityStates[contReq.ID]
+				if state != nil {
+					finishSASLContinuationWait(state, nil)
+					state.ctx = context.WithValue(state.ctx, loggerKey, reqLogger)
+				}
+
+				mechanismCtx := s.ctx
+				if state != nil {
+					mechanismCtx = state.ctx
+				}
+
+				mechanismName := ""
+				if authReq != nil {
+					mechanismName = authReq.Mechanism
+				}
+
+				_, mechanismObs, mechanismSpan := startInternalSpanFromContext(mechanismCtx,
+					dovecotSASLMechanismSpanName,
+					attribute.String("pfxhttp.component", componentDovecotSASL),
+					attribute.String("pfxhttp.name", safeMetricName(s.name)),
+					attribute.String("pfxhttp.sasl.mechanism", mechanismName),
+					attribute.String("pfxhttp.sasl.step", "continue"),
+				)
 				result, creds := mech.Continue(contReq.Data)
+
+				finishObservedSpan(mechanismObs, mechanismSpan, nil)
 				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests, activeObservabilityStates)
 
 			default:
@@ -750,6 +893,43 @@ func redactDovecotLine(line string) string {
 	return strings.Join(fields, " ")
 }
 
+func (s *MultiServer) startDovecotSASLObservabilityState(clientAddr string) *saslObservabilityState {
+	authCtx, obs, span := s.startApplicationSpan(componentDovecotSASL, s.name, clientAddr)
+
+	return &saslObservabilityState{
+		ctx:   authCtx,
+		obs:   obs,
+		span:  span,
+		start: time.Now(),
+	}
+}
+
+func startSASLContinuationWait(state *saslObservabilityState, name string, authReq *DovecotAuthRequest) {
+	if state == nil || authReq == nil {
+		return
+	}
+
+	_, obs, span := startInternalSpanFromContext(state.ctx,
+		dovecotSASLWaitSpanName,
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.name", safeMetricName(name)),
+		attribute.String("pfxhttp.sasl.id", authReq.ID),
+		attribute.String("pfxhttp.sasl.mechanism", authReq.Mechanism),
+	)
+	state.waitObs = obs
+	state.waitSpan = span
+}
+
+func finishSASLContinuationWait(state *saslObservabilityState, err error) {
+	if state == nil || state.waitSpan == nil {
+		return
+	}
+
+	finishObservedSpan(state.waitObs, state.waitSpan, err)
+	state.waitObs = nil
+	state.waitSpan = nil
+}
+
 // handleSASLResult processes the result of a SASL mechanism step and sends the appropriate protocol response.
 func (s *MultiServer) handleSASLResult(
 	conn net.Conn,
@@ -770,14 +950,10 @@ func (s *MultiServer) handleSASLResult(
 
 	state := activeObservabilityStates[authReq.ID]
 	if state == nil {
-		authCtx, obs, span := s.startApplicationSpan(componentDovecotSASL, s.name, clientAddr)
-		state = &saslObservabilityState{
-			ctx:   authCtx,
-			obs:   obs,
-			span:  span,
-			start: time.Now(),
-		}
+		state = s.startDovecotSASLObservabilityState(clientAddr)
 	}
+
+	finishSASLContinuationWait(state, nil)
 
 	authCtx := state.ctx
 	obs := state.obs
@@ -806,8 +982,19 @@ func (s *MultiServer) handleSASLResult(
 		resp := encoder.EncodeCont(authReq.ID, result.ContinuationChallenge)
 		logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
 
-		if _, err := conn.Write([]byte(resp)); err != nil {
+		_, writeObs, writeSpan := startInternalSpanFromContext(authCtx,
+			dovecotSASLResponseSpanName,
+			attribute.String("pfxhttp.component", componentDovecotSASL),
+			attribute.String("pfxhttp.name", safeMetricName(s.name)),
+			attribute.String("pfxhttp.sasl.command", string(DovecotCmdCont)),
+		)
+		_, err := conn.Write([]byte(resp))
+		finishObservedSpan(writeObs, writeSpan, err)
+
+		if err != nil {
 			logger.Error("Error writing CONT", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+		} else {
+			startSASLContinuationWait(state, s.name, authReq)
 		}
 
 		return
@@ -818,7 +1005,7 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeMechanisms, authReq.ID)
 		delete(activeAuthRequests, authReq.ID)
 
-		sendDovecotFail(conn, encoder, logger, clientAddr, authReq.ID, result.Reason, result.Username, result.Temporary)
+		sendDovecotFail(authCtx, conn, encoder, logger, clientAddr, authReq.ID, result.Reason, result.Username, result.Temporary)
 
 		return
 	}
@@ -836,7 +1023,7 @@ func (s *MultiServer) handleSASLResult(
 				slog.String("username", creds.Username),
 				slog.String("error", "configuration not loaded"))
 
-			sendDovecotFail(conn, encoder, logger, clientAddr, authReq.ID, "internal error", creds.Username, true)
+			sendDovecotFail(authCtx, conn, encoder, logger, clientAddr, authReq.ID, "internal error", creds.Username, true)
 
 			return
 		}
@@ -846,11 +1033,19 @@ func (s *MultiServer) handleSASLResult(
 		var authResult *SASLAuthResult
 		var err error
 
+		backendCtx, backendObs, backendSpan := startInternalSpanFromContext(authCtx,
+			dovecotSASLBackendSpanName,
+			attribute.String("pfxhttp.component", componentDovecotSASL),
+			attribute.String("pfxhttp.name", safeMetricName(s.name)),
+			attribute.String("pfxhttp.sasl.mechanism", authReq.Mechanism),
+		)
 		if IsOAuthMechanism(authReq.Mechanism) {
-			authResult, err = authenticator.AuthenticateToken(authCtx, creds.Username, creds.Token, authReq)
+			authResult, err = authenticator.AuthenticateToken(backendCtx, creds.Username, creds.Token, authReq)
 		} else {
-			authResult, err = authenticator.AuthenticatePassword(authCtx, creds.Username, creds.Password, authReq)
+			authResult, err = authenticator.AuthenticatePassword(backendCtx, creds.Username, creds.Password, authReq)
 		}
+
+		finishObservedSpan(backendObs, backendSpan, err)
 
 		outcome = outcomeFromSASLResult(authResult, err)
 
@@ -866,7 +1061,16 @@ func (s *MultiServer) handleSASLResult(
 			resp := encoder.EncodeFail(authReq.ID, "internal error", creds.Username, true)
 			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
 
-			if _, wErr := conn.Write([]byte(resp)); wErr != nil {
+			_, writeObs, writeSpan := startInternalSpanFromContext(authCtx,
+				dovecotSASLResponseSpanName,
+				attribute.String("pfxhttp.component", componentDovecotSASL),
+				attribute.String("pfxhttp.name", safeMetricName(s.name)),
+				attribute.String("pfxhttp.sasl.command", string(DovecotCmdFail)),
+			)
+			_, wErr := conn.Write([]byte(resp))
+			finishObservedSpan(writeObs, writeSpan, wErr)
+
+			if wErr != nil {
 				logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
 			}
 
@@ -887,7 +1091,16 @@ func (s *MultiServer) handleSASLResult(
 			resp := encoder.EncodeOK(authReq.ID, username)
 			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
 
-			if _, wErr := conn.Write([]byte(resp)); wErr != nil {
+			_, writeObs, writeSpan := startInternalSpanFromContext(authCtx,
+				dovecotSASLResponseSpanName,
+				attribute.String("pfxhttp.component", componentDovecotSASL),
+				attribute.String("pfxhttp.name", safeMetricName(s.name)),
+				attribute.String("pfxhttp.sasl.command", string(DovecotCmdOK)),
+			)
+			_, wErr := conn.Write([]byte(resp))
+			finishObservedSpan(writeObs, writeSpan, wErr)
+
+			if wErr != nil {
 				logger.Error("Error writing OK", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
 			}
 		} else {
@@ -897,7 +1110,7 @@ func (s *MultiServer) handleSASLResult(
 				slog.String("mechanism", authReq.Mechanism),
 				slog.String("reason", authResult.Reason))
 
-			sendDovecotFail(conn, encoder, logger, clientAddr, authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
+			sendDovecotFail(authCtx, conn, encoder, logger, clientAddr, authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
 		}
 	}
 }
@@ -955,11 +1168,19 @@ func applicationSpanName(component, name string) string {
 }
 
 // sendDovecotFail encodes and sends a FAIL response over the Dovecot SASL protocol, logging the response and any write errors.
-func sendDovecotFail(conn net.Conn, encoder *DovecotEncoder, logger *slog.Logger, clientAddr string, id string, reason string, username string, temporary bool) {
+func sendDovecotFail(ctx context.Context, conn net.Conn, encoder *DovecotEncoder, logger *slog.Logger, clientAddr string, id string, reason string, username string, temporary bool) {
 	resp := encoder.EncodeFail(id, reason, username, temporary)
 	logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
 
-	if _, err := conn.Write([]byte(resp)); err != nil {
+	_, writeObs, writeSpan := startInternalSpanFromContext(ctx,
+		dovecotSASLResponseSpanName,
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.sasl.command", string(DovecotCmdFail)),
+	)
+	_, err := conn.Write([]byte(resp))
+	finishObservedSpan(writeObs, writeSpan, err)
+
+	if err != nil {
 		logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
 	}
 }

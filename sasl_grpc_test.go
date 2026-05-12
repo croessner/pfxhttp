@@ -645,6 +645,61 @@ func TestHandleSASLResultKeepsContinuationSpanOpen(t *testing.T) {
 	if got := recorder.countSpans(dovecotSASLSpanName("smtp_auth")); got != 1 {
 		t.Fatalf("ended Dovecot SASL spans after final result = %d, want 1", got)
 	}
+
+	parent, ok := recorder.findSpan(dovecotSASLSpanName("smtp_auth"))
+	if !ok {
+		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName("smtp_auth"))
+	}
+
+	assertChildSpan(t, recorder, parent, dovecotSASLWaitSpanName)
+	assertChildSpan(t, recorder, parent, dovecotSASLResponseSpanName)
+}
+
+func TestHandleSASLResultRecordsBackendAndResponseSpans(t *testing.T) {
+	obs, recorder := newTraceTestObservability(t)
+	backend := &fakeAuthServer{
+		response: &authv1.AuthResponse{
+			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+			AccountField: "Auth-User",
+			Attributes: map[string]*authv1.AttributeValues{
+				"Auth-User": {Values: []string{"alice@example.com"}},
+			},
+		},
+	}
+
+	addr, stop := startFakeAuthServer(t, backend)
+	defer stop()
+
+	deps := &Deps{
+		Config: &Config{DovecotSASL: map[string]Request{
+			"smtp_auth": {
+				Transport: transportGRPC,
+				GRPC:      GRPCRequest{Address: addr, Timeout: 2 * time.Second},
+			},
+		}},
+		Logger:        slog.New(slog.DiscardHandler),
+		HTTPClient:    &http.Client{Timeout: 2 * time.Second},
+		OIDCManager:   NewOIDCManager(&http.Client{Timeout: 2 * time.Second}),
+		GRPCConnPool:  NewGRPCConnPool(),
+		Observability: obs,
+	}
+	defer deps.GRPCConnPool.CloseAll()
+
+	server := &MultiServer{name: "smtp_auth", deps: deps, ctx: context.Background()}
+
+	response := runHandleSASLResultForTest(t, server, slog.New(slog.DiscardHandler), "1")
+	if !strings.Contains(response, "user=alice@example.com") {
+		t.Fatalf("response = %q, want gRPC backend user", response)
+	}
+
+	parent, ok := recorder.findSpan(dovecotSASLSpanName("smtp_auth"))
+	if !ok {
+		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName("smtp_auth"))
+	}
+
+	backendSpan := assertChildSpan(t, recorder, parent, dovecotSASLBackendSpanName)
+	assertChildSpan(t, recorder, parent, dovecotSASLResponseSpanName)
+	assertChildSpan(t, recorder, backendSpan, grpcClientSpanName("Authenticate"))
 }
 
 func runHandleSASLResultForTest(t *testing.T, server *MultiServer, logger *slog.Logger, id string) string {

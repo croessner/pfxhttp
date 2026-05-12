@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -108,6 +109,25 @@ func (r *spanRecorder) countSpans(name string) int {
 	}
 
 	return count
+}
+
+func assertChildSpan(t *testing.T, recorder *spanRecorder, parent recordedSpan, name string) recordedSpan {
+	t.Helper()
+
+	child, ok := recorder.findSpan(name)
+	if !ok {
+		t.Fatalf("child span %q not recorded", name)
+	}
+
+	if child.traceID != parent.traceID {
+		t.Fatalf("child span %q trace ID = %s, want %s", name, child.traceID, parent.traceID)
+	}
+
+	if child.parent.SpanID() != parent.spanID {
+		t.Fatalf("child span %q parent span ID = %s, want %s", name, child.parent.SpanID(), parent.spanID)
+	}
+
+	return child
 }
 
 // newTraceTestObservability returns a runtime backed by an in-memory span recorder.
@@ -313,6 +333,170 @@ func TestInstrumentedHTTPClientPropagatesTraceContext(t *testing.T) {
 	}
 }
 
+func TestHandleNetStringConnectionRecordsSocketMapProtocolSpans(t *testing.T) {
+	obs, recorder := newTraceTestObservability(t)
+	client, _ := newObservedMapClient(t, obs)
+
+	mapClient, ok := client.(*MapClient)
+	if !ok {
+		t.Fatalf("observed map client type = %T, want *MapClient", client)
+	}
+
+	deps := &Deps{
+		Config:        mapClient.config,
+		Logger:        slog.New(slog.DiscardHandler),
+		HTTPClient:    mapClient.httpClient,
+		Observability: obs,
+	}
+	server := &MultiServer{
+		name: testListener,
+		deps: deps,
+		ctx:  context.Background(),
+	}
+
+	response := runNetStringHandlerForTest(t, server, testMapName+" user@example.test")
+	if response.String() != "OK mapped" {
+		t.Fatalf("socket-map response = %q, want %q", response.String(), "OK mapped")
+	}
+
+	parent, ok := recorder.findSpan(socketMapSpanName(testMapName))
+	if !ok {
+		t.Fatalf("parent span %q not recorded", socketMapSpanName(testMapName))
+	}
+
+	for _, name := range []string{
+		socketMapReadSpanName,
+		socketMapDecodeSpanName,
+		socketMapBackendSpanName,
+		socketMapEncodeSpanName,
+		socketMapWriteSpanName,
+	} {
+		assertChildSpan(t, recorder, parent, name)
+	}
+}
+
+func TestHandlePolicyServiceConnectionRecordsProtocolSpans(t *testing.T) {
+	obs, recorder := newTraceTestObservability(t)
+	deps := newObservedPolicyDeps(t, obs)
+	server := &MultiServer{
+		name: testListener,
+		deps: deps,
+		ctx:  context.Background(),
+	}
+
+	response := runPolicyHandlerForTest(t, server, "request=smtpd_access_policy\nclient_address=192.0.2.10\n\n")
+	if response != "action=DUNNO\n\n" {
+		t.Fatalf("policy response = %q, want %q", response, "action=DUNNO\n\n")
+	}
+
+	parent, ok := recorder.findSpan(policyServiceSpanName(testListener))
+	if !ok {
+		t.Fatalf("parent span %q not recorded", policyServiceSpanName(testListener))
+	}
+
+	for _, name := range []string{
+		policyServiceReadSpanName,
+		policyServiceDecodeSpanName,
+		policyServiceBackendSpanName,
+		policyServiceEncodeSpanName,
+		policyServiceWriteSpanName,
+	} {
+		assertChildSpan(t, recorder, parent, name)
+	}
+}
+
+func runNetStringHandlerForTest(t *testing.T, server *MultiServer, payload string) NetData {
+	t.Helper()
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+
+	server.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		server.HandleNetStringConnection(serverConn)
+	}()
+
+	if err := clientConn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	request := NewNetStringFromString(payload)
+
+	message := fmt.Sprintf("%d:%s,", request.Length(), request.String())
+	if _, err := clientConn.Write([]byte(message)); err != nil {
+		t.Fatalf("write netstring request: %v", err)
+	}
+
+	response, err := server.readNetString(clientConn)
+	if err != nil {
+		t.Fatalf("read netstring response: %v", err)
+	}
+
+	if response == nil {
+		t.Fatal("missing netstring response")
+	}
+
+	_ = clientConn.Close()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HandleNetStringConnection did not return")
+	}
+
+	return response
+}
+
+func runPolicyHandlerForTest(t *testing.T, server *MultiServer, payload string) string {
+	t.Helper()
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+
+	server.wg.Add(1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		server.HandlePolicyServiceConnection(serverConn)
+	}()
+
+	if err := clientConn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	if _, err := clientConn.Write([]byte(payload)); err != nil {
+		t.Fatalf("write policy request: %v", err)
+	}
+
+	reader := bufio.NewReader(clientConn)
+
+	first, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read policy response line: %v", err)
+	}
+
+	second, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read policy response terminator: %v", err)
+	}
+
+	_ = clientConn.Close()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HandlePolicyServiceConnection did not return")
+	}
+
+	return first + second
+}
+
 // newObservedMapClient returns a map client wired to an instrumented test backend.
 func newObservedMapClient(t *testing.T, obs *Observability) (GenericClient, *string) {
 	t.Helper()
@@ -353,6 +537,37 @@ func newObservedMapDeps(target string, httpClient *http.Client, obs *Observabili
 				Payload:    testMapPayload,
 				StatusCode: http.StatusOK,
 				ValueField: testValueField,
+			},
+		},
+	}
+
+	return &Deps{
+		Config:        cfg,
+		Logger:        slog.New(slog.DiscardHandler),
+		HTTPClient:    httpClient,
+		Observability: obs,
+	}
+}
+
+func newObservedPolicyDeps(t *testing.T, obs *Observability) *Deps {
+	t.Helper()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusOK)
+		_, _ = responseWriter.Write([]byte(`{"action":"DUNNO"}`))
+	}))
+	t.Cleanup(backend.Close)
+
+	httpClient := backend.Client()
+	obs.InstrumentHTTPClient(httpClient)
+
+	cfg := &Config{
+		PolicyServices: map[string]Request{
+			testListener: {
+				Target:     backend.URL,
+				Payload:    "{{ .Key }}",
+				StatusCode: http.StatusOK,
+				ValueField: "action",
 			},
 		},
 	}

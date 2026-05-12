@@ -500,6 +500,8 @@ Behavior:
 
 Observability is disabled by default. When enabled, Pfxhttp records listener connection events, protocol-level requests, outgoing HTTP backend requests, outgoing gRPC `Authenticate` calls, and OIDC discovery/token/JWKS/introspection traffic. Request contexts are delegated through these paths so outbound HTTP headers and gRPC metadata receive the active W3C trace context.
 
+Ingress protocol traces include child spans for the listener protocol steps. Socket-map requests expose request read, decode, backend exchange, response encoding, and response write spans. Policy-service requests expose the same read/decode/backend/encode/write shape for policy payloads. Dovecot SASL requests expose mechanism-step, backend-auth, response-write, and continuation-wait spans so multi-step SASL exchanges show the time spent waiting for the next Postfix/client continuation instead of hiding it in the root auth span.
+
 gRPC-backed SASL traces also split the pre-call preparation into `gRPC connection`, `gRPC metadata`, and `gRPC request build` spans. When OIDC caller authentication is enabled, token cache lookups, cache-lock waits, discovery, token fetches, client assertions, and JWKS validation are traced as child spans without recording secrets or token values.
 
 Application request metrics keep the request-side name in the `name` label and add the configured listener name in the `listener` label. This lets dashboards show ingress latency per listener while still preserving map/backend-specific views for the outbound side.
