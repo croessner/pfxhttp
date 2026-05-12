@@ -32,7 +32,7 @@ usr/share/man/man8/pfxhttp.8.gz
 FILES
 )"
 
-actual_files="$(cd "${stage_root}" && find . -type f -print | sed 's#^\./##' | sort)"
+actual_files="$(cd "${stage_root}" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)"
 if [[ "${actual_files}" != "${expected_files}" ]]; then
   diff -u <(printf '%s\n' "${expected_files}") <(printf '%s\n' "${actual_files}") >&2 || true
   echo "Package staging file list does not match expected content." >&2

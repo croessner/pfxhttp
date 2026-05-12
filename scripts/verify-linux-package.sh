@@ -34,7 +34,7 @@ FILES
 )"
 
 normalize_paths() {
-  sed -e 's#^\./##' -e 's#^/##' | sort
+  sed -e 's#^\./##' -e 's#^/##' | LC_ALL=C sort
 }
 
 absolute_path() {
