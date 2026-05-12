@@ -1,0 +1,69 @@
+---
+# Safe package default for pfxhttp.
+#
+# The package does not enable or start the service automatically. This default
+# matches the packaged pfxhttp-policy.socket unit. Enable that socket unit, or
+# remove systemd_socket_name and switch the listener to a native endpoint before
+# starting pfxhttp.service directly.
+
+server:
+  run_as_user: "pfxhttp"
+  run_as_group: "pfxhttp"
+
+  listen:
+    - kind: "policy_service"
+      name: "policy"
+      type: "unix"
+      address: "/var/spool/postfix/private/pfxhttp-policy"
+      systemd_socket_name: "policy"
+
+  logging:
+    json: false
+    level: info
+    use_systemd: true
+
+  http_client:
+    timeout: 30s
+    max_connections_per_host: 10
+    max_idle_connections: 4
+    max_idle_connections_per_host: 1
+    idle_connection_timeout: 10s
+
+  tls:
+    enabled: true
+    skip_verify: false
+
+  socketmap_max_reply_size: 100000
+
+  response_cache:
+    enabled: false
+    ttl: 1m
+
+  worker_pool:
+    max_workers: 10
+    max_queue: 100
+
+  observability:
+    prometheus_enabled: false
+    prometheus_address: 127.0.0.1
+    prometheus_port: 9464
+    prometheus_path: /metrics
+    prometheus_runtime_metrics: false
+    prometheus_tls:
+      enabled: false
+      min_tls_version: "1.2"
+    otel_enabled: false
+    otel_traces_enabled: false
+    otel_metrics_enabled: false
+    otel_service_name: pfxhttp
+    otel_exporter_otlp_insecure: false
+    otel_sample_ratio: 1.0
+
+policy_services:
+  policy:
+    target: http://127.0.0.1:8080/pfxhttp/policy_service
+    payload: "{{ .Key }}"
+    status_code: 200
+    value_field: "result"
+    error_field: "error"
+    no_error_value: "OK"

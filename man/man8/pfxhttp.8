@@ -91,10 +91,11 @@ When using the \fBchroot\fP option, the service must run as root initially (remo
 
 \fBpfxhttp\fP also supports optional systemd socket activation per listener. Set \fBsystemd_socket_name\fP on a listener to consume a matching systemd \fBFileDescriptorName\fP from \fBLISTEN_FDS\fP. If that setting is omitted, \fBpfxhttp\fP uses the native listener path and creates the socket itself. Use \fBAccept=no\fP in the .socket unit so \fBpfxhttp\fP remains responsible for accepting connections and applying its worker-pool back-pressure.
 
-The distribution includes both a concrete \fBpfxhttp-policy.socket\fP example
-and a reusable \fBpfxhttp@.socket\fP template. With the template, the instance
-name becomes the descriptor name and the Postfix private socket suffix. For
-example, \fBpfxhttp@policy.socket\fP creates
+The distribution includes both a concrete \fBpfxhttp-policy.socket\fP unit and
+a reusable \fBpfxhttp@.socket\fP template. The packaged default configuration
+matches the concrete \fBpfxhttp-policy.socket\fP unit. With the template, the
+instance name becomes the descriptor name and the Postfix private socket suffix.
+For example, \fBpfxhttp@policy.socket\fP creates
 \fI/var/spool/postfix/private/pfxhttp-policy\fP and passes
 \fBFileDescriptorName=policy\fP to \fBpfxhttp.service\fP. Multiple template
 instances can target the same service. Enable either the template instance or a

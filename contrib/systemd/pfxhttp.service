@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=root
 Group=root
-EnvironmentFile=-/etc/default/pfxhttp
+EnvironmentFile=-/etc/pfxhttp/pfxhttp.env
 # Be explicit: point to the config file in /etc to avoid search path surprises
 ExecStart=/usr/local/sbin/pfxhttp --config /etc/pfxhttp/pfxhttp.yml
 ExecReload=/bin/kill -HUP $MAINPID

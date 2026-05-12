@@ -63,6 +63,32 @@ make
 make install
 ```
 
+Release builds also publish Linux `.deb` and `.rpm` packages. The packages use
+distribution-owned paths and include:
+
+- `/usr/sbin/pfxhttp`
+- `/etc/pfxhttp/pfxhttp.yml`
+- `/etc/pfxhttp/pfxhttp.env`
+- `/usr/lib/systemd/system/pfxhttp.service`
+- `/usr/lib/systemd/system/pfxhttp-policy.socket`
+- `/usr/lib/systemd/system/pfxhttp@.socket`
+- `/usr/share/man/man5/pfxhttp.yml.5.gz`
+- `/usr/share/man/man8/pfxhttp.8.gz`
+- `/usr/share/doc/pfxhttp/README.md`
+- `/usr/share/doc/pfxhttp/LICENSE`
+- `/usr/share/doc/pfxhttp/pfxhttp.yml.demo`
+
+Package installation creates the `pfxhttp` system user and group when missing,
+reloads the systemd manager, and leaves service enablement to the operator. The
+packaged service reads optional overrides from `/etc/pfxhttp/pfxhttp.env`. The
+packaged default configuration matches `pfxhttp-policy.socket`: it consumes the
+systemd descriptor named `policy` for
+`/var/spool/postfix/private/pfxhttp-policy`, avoids demo credentials, and stores
+`/etc/pfxhttp/pfxhttp.yml` as a conffile with `root:pfxhttp` ownership and
+`0640` permissions so SIGHUP reloads remain readable after privilege drop. To
+run `pfxhttp.service` without socket activation, edit the listener to remove
+`systemd_socket_name` and configure a native TCP or Unix endpoint first.
+
 #### Prerequisites
 
 - Go 1.26 or later
@@ -81,7 +107,7 @@ Type=simple
 Restart=always
 User=pfxhttp
 Group=pfxhttp
-EnvironmentFile=-/etc/default/pfxhttp
+EnvironmentFile=-/etc/pfxhttp/pfxhttp.env
 ExecStart=/usr/local/sbin/pfxhttp
 StandardOutput=journal
 StandardError=journal
@@ -168,10 +194,12 @@ same `pfxhttp.service`; systemd passes all sockets for that service to the
 process when it starts. Use explicit `.socket` units instead if a listener needs
 a path or descriptor name that does not fit the template. Enable either the
 template instance or a concrete `.socket` unit for a listener, not both.
+The packaged default configuration matches the concrete
+`pfxhttp-policy.socket` unit.
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now pfxhttp@policy.socket
+sudo systemctl enable --now pfxhttp-policy.socket
 sudo systemctl restart pfxhttp.service
 ```
 
@@ -949,6 +977,9 @@ Release tags must use `vMAJOR.MINOR.PATCH`. Prerelease tags such as
 prereleases. Docker prereleases only receive the exact version tag; stable
 release tags also update `latest`, `vMAJOR`, and `vMAJOR.MINOR`.
 Linux package prereleases use Debian/RPM-compatible `~` package versions.
+Release package jobs build both formats through `scripts/build-linux-package.sh`
+and validate the final package contents with `scripts/verify-linux-package.sh`
+before upload.
 
 ---
 

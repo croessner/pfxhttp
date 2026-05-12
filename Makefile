@@ -59,6 +59,7 @@ race:
 
 test-release-metadata:
 	bash scripts/test-release-semver-metadata.sh
+	bash scripts/test-linux-package-layout.sh
 
 guardrails: fix vet lint test test-release-metadata race build-check
 

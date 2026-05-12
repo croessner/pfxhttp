@@ -150,15 +150,24 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
+            container_platform: linux/amd64
+            deb_arch: amd64
             rpm_arch: x86_64
           - goos: linux
             goarch: arm64
+            container_platform: linux/arm64
+            deb_arch: arm64
             rpm_arch: aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: 1.26.x
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Build binary
         env:
@@ -172,59 +181,47 @@ jobs:
         id: release_metadata
         run: ./scripts/release-semver-metadata.sh "${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Copy package files
+      - name: Build Linux packages
         run: |
-          for pkg in .debpkg .rpmpkg; do
-            mkdir -p "${pkg}/usr/local/sbin"
-            mkdir -p "${pkg}/usr/lib/systemd/system"
-            mkdir -p "${pkg}/etc/pfxhttp"
-            mkdir -p "${pkg}/usr/share/man/man5"
-            mkdir -p "${pkg}/usr/share/man/man8"
-            mkdir -p "${pkg}/usr/share/doc/${{ env.APP_NAME }}"
-
-            cp "${{ env.APP_NAME }}" "${pkg}/usr/local/sbin/"
-            cp pfxhttp.yml "${pkg}/etc/pfxhttp/"
-            cp contrib/systemd/pfxhttp.service contrib/systemd/pfxhttp-policy.socket contrib/systemd/pfxhttp@.socket "${pkg}/usr/lib/systemd/system/"
-            cp man/man5/pfxhttp.yml.5 "${pkg}/usr/share/man/man5/"
-            cp man/man8/pfxhttp.8 "${pkg}/usr/share/man/man8/"
-            cp README.md "${pkg}/usr/share/doc/${{ env.APP_NAME }}/"
-          done
-
-      - name: Build DEB
-        uses: jiro4989/build-deb-action@v4
-        with:
-          package: ${{ env.APP_NAME }}
-          package_root: .debpkg
-          maintainer: ${{ env.MAINTAINER }}
-          version: ${{ steps.release_metadata.outputs.package_version }}
-          arch: ${{ matrix.goarch }}
-          desc: ${{ env.DESC }}
-
-      - name: Build RPM
-        uses: jiro4989/build-rpm-action@v2
-        with:
-          package: ${{ env.APP_NAME }}
-          package_root: .rpmpkg
-          maintainer: ${{ env.MAINTAINER }}
-          version: ${{ steps.release_metadata.outputs.package_version }}
-          arch: ${{ matrix.rpm_arch }}
-          desc: ${{ env.DESC }}
-          summary: ${{ env.DESC }}
+          host_uid="$(id -u)"
+          host_gid="$(id -g)"
+          docker run --rm \
+            --platform "${{ matrix.container_platform }}" \
+            -e "HOST_UID=${host_uid}" \
+            -e "HOST_GID=${host_gid}" \
+            -v "${PWD}:/work" \
+            -w /work \
+            alpine:3.23 \
+            sh -c '
+              set -e
+              apk add --no-cache bash coreutils cpio dpkg rpm
+              mkdir -p dist/packages
+              ./scripts/build-linux-package.sh \
+                --type deb \
+                --arch "${{ matrix.deb_arch }}" \
+                --version "${{ steps.release_metadata.outputs.package_version }}" \
+                --binary "./${{ env.APP_NAME }}" \
+                --out-dir dist/packages
+              ./scripts/build-linux-package.sh \
+                --type rpm \
+                --arch "${{ matrix.rpm_arch }}" \
+                --version "${{ steps.release_metadata.outputs.package_version }}" \
+                --binary "./${{ env.APP_NAME }}" \
+                --out-dir dist/packages
+              ./scripts/verify-linux-package.sh dist/packages/*.deb dist/packages/*.rpm
+              chown -R "${HOST_UID}:${HOST_GID}" dist/packages
+            '
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}-pkgs
-          path: |
-            ./*.deb
-            ./*.rpm
+          path: dist/packages/*
 
       - name: Attest package artifacts
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: |
-            ./*.deb
-            ./*.rpm
+          subject-path: dist/packages/*
 
   upload-linux-packages:
     runs-on: ubuntu-latest
@@ -254,11 +251,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}-pkgs
+          path: dist
 
       - name: Select package asset
         run: |
-          asset_name="$(find . -maxdepth 1 -type f -name '*.${{ matrix.pkg }}' -print -quit)"
-          asset_name="${asset_name#./}"
+          asset_name="$(find dist -type f -name '*.${{ matrix.pkg }}' -print -quit)"
+          if [[ -z "${asset_name}" ]]; then
+            echo "No .${{ matrix.pkg }} package asset found in downloaded artifact." >&2
+            exit 1
+          fi
           echo "ASSET_NAME=${asset_name}" >> "${GITHUB_ENV}"
 
       - name: Upload Asset
