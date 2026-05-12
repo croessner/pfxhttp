@@ -219,6 +219,16 @@ type DovecotAuthRequest struct {
 	AuthLoginAttempt uint32
 }
 
+// ensureDovecotAuthExternalSessionID keeps caller-provided correlation IDs
+// authoritative and uses the local pfxhttp connection session only as a fallback.
+func ensureDovecotAuthExternalSessionID(req *DovecotAuthRequest, fallbackSessionID string) {
+	if req == nil || req.ExternalSessionID != "" || fallbackSessionID == "" {
+		return
+	}
+
+	req.ExternalSessionID = fallbackSessionID
+}
+
 // DovecotContRequest represents a parsed CONT command from a client.
 type DovecotContRequest struct {
 	// ID is the request identifier matching the original AUTH request.

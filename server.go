@@ -767,6 +767,8 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 					continue
 				}
 
+				ensureDovecotAuthExternalSessionID(authReq, sessionID)
+
 				reqLogger.Debug("AUTH request received",
 					slog.String(LogKeyClient, clientAddr),
 					slog.String("id", authReq.ID),

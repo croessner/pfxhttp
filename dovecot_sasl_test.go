@@ -407,6 +407,40 @@ func TestDovecotDecoderDecodeContRequest(t *testing.T) {
 	}
 }
 
+func TestEnsureDovecotAuthExternalSessionID(t *testing.T) {
+	const callerSessionID = "from-client"
+
+	t.Run("keeps caller value", func(t *testing.T) {
+		req := &DovecotAuthRequest{ExternalSessionID: callerSessionID}
+
+		ensureDovecotAuthExternalSessionID(req, "from-pfxhttp")
+
+		if req.ExternalSessionID != callerSessionID {
+			t.Fatalf("ExternalSessionID = %q, want caller value", req.ExternalSessionID)
+		}
+	})
+
+	t.Run("uses fallback", func(t *testing.T) {
+		req := &DovecotAuthRequest{}
+
+		ensureDovecotAuthExternalSessionID(req, "from-pfxhttp")
+
+		if req.ExternalSessionID != "from-pfxhttp" {
+			t.Fatalf("ExternalSessionID = %q, want fallback", req.ExternalSessionID)
+		}
+	})
+
+	t.Run("ignores empty fallback", func(t *testing.T) {
+		req := &DovecotAuthRequest{}
+
+		ensureDovecotAuthExternalSessionID(req, "")
+
+		if req.ExternalSessionID != "" {
+			t.Fatalf("ExternalSessionID = %q, want empty", req.ExternalSessionID)
+		}
+	})
+}
+
 func TestDovecotEncoderEncodeHandshake(t *testing.T) {
 	encoder := &DovecotEncoder{}
 

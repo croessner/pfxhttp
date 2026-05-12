@@ -872,6 +872,9 @@ Notes:
   remain supported. Fields without an AuthService equivalent, such as
   `ssl_cipher_bits`, `ssl_pxt_id`, `nologin`, and `no_penalty`, are not sent
   over gRPC.
+- If Postfix/Dovecot does not provide `external_session_id` or `session`,
+  pfxhttp sends its own Dovecot-SASL connection session ID as
+  `external_session_id` so backend logs still have a stable correlation value.
 - Caller authorization is derived from existing fields:
   - `backend_oidc_auth.enabled: true` → the OIDC manager fetches a token via
     Client Credentials / `private_key_jwt` and the result is sent as
