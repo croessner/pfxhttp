@@ -8,8 +8,6 @@ MAN8_DIR := $(PREFIX)/share/man/man8
 BIN_DIR := $(PREFIX)/sbin
 GOLANGCI_NEW_FROM_REV ?= HEAD
 
-export GOEXPERIMENT := runtimesecret
-
 # Default target
 all: build
 

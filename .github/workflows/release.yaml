@@ -12,7 +12,6 @@ env:
   APP_NAME: pfxhttp
   MAINTAINER: croessner
   DESC: Postfix to HTTP wrapper
-  GOEXPERIMENT: runtimesecret
 
 jobs:
   build-artifact:

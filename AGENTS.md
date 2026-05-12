@@ -8,8 +8,8 @@ change.
 
 - Use the Makefile targets instead of ad hoc command variants whenever possible.
 - Run `make guardrails` before every commit or pull request.
-- Run tests with `GOEXPERIMENT=runtimesecret`; the Makefile exports this for
-  `make test`, `make race`, and `make guardrails`.
+- Run Go tests through the Makefile targets so `make test`, `make race`, and
+  `make guardrails` stay aligned.
 - Run lint through `make lint`; `make guardrails` includes `golangci-lint`.
 - Keep the vendored module tree in sync. After dependency updates, run
   `go mod tidy` and `go mod vendor`.

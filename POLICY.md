@@ -10,8 +10,8 @@ These rules are mandatory for coding changes in this repository.
 - MUST: Keep `.golangci.yml` aligned with the repository guardrail policy and
   run `golangci-lint` through `make lint` or `make guardrails`.
 - MUST: Keep `vendor/` synchronized after dependency changes.
-- MUST: Run Go tests with `GOEXPERIMENT=runtimesecret`; prefer the Makefile
-  targets so this is set consistently.
+- MUST: Run Go tests through the Makefile targets so local validation stays
+  consistent with CI and release builds.
 - MUST: Add focused regression coverage for bug fixes when a reproducer is
   practical.
 - MUST: Write code comments and technical documentation in English.
