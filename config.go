@@ -596,6 +596,16 @@ func basicAuthorizationValue(credentials string) string {
 	return "Basic " + encoded
 }
 
+// splitBasicAuthCredentials validates and separates the user:password form used for Basic auth.
+func splitBasicAuthCredentials(credentials string) (string, string, error) {
+	username, password, ok := strings.Cut(credentials, ":")
+	if !ok || username == "" || password == "" {
+		return "", "", errors.New("must use non-empty user:password credentials")
+	}
+
+	return username, password, nil
+}
+
 func (cfg *Config) HandleConfig() error {
 
 	err := viper.Unmarshal(cfg)
@@ -894,6 +904,22 @@ func validateObservabilityConfig(cfg ObservabilityConfig) error {
 
 		if !strings.HasPrefix(cfg.PrometheusPath, "/") {
 			return errors.New("observability prometheus_path must start with '/'")
+		}
+
+		if cfg.PrometheusHTTPAuthBasic != "" {
+			if _, _, err := splitBasicAuthCredentials(cfg.PrometheusHTTPAuthBasic); err != nil {
+				return fmt.Errorf("observability prometheus_http_auth_basic %w", err)
+			}
+		}
+
+		if cfg.PrometheusTLS.Enabled {
+			if cfg.PrometheusTLS.Cert == "" || cfg.PrometheusTLS.Key == "" {
+				return errors.New("observability prometheus_tls requires cert and key when enabled")
+			}
+
+			if _, err := resolveTLSMinVersion(cfg.PrometheusTLS.MinVersion); err != nil {
+				return fmt.Errorf("observability prometheus_tls: %w", err)
+			}
 		}
 	}
 

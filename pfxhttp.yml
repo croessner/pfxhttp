@@ -70,6 +70,14 @@ server:
     prometheus_port: 9464
     prometheus_path: /metrics
     prometheus_runtime_metrics: false
+    # Optional incoming Basic auth for the Prometheus endpoint.
+    # prometheus_http_auth_basic: "metrics:change-me"
+    # Optional server-side TLS for the Prometheus endpoint.
+    prometheus_tls:
+      enabled: false
+      # cert: /etc/pfxhttp/metrics.crt
+      # key: /etc/pfxhttp/metrics.key
+      min_tls_version: "1.2"
     otel_enabled: false
     otel_traces_enabled: false
     otel_metrics_enabled: false

@@ -2,9 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
 	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +30,14 @@ const (
 	testMapPayload = `{"key":"{{ .Key }}"}`
 	testValueField = "value"
 	testListener   = "listener1"
+
+	testMetricsUsername    = "metrics"
+	testMetricsPassword    = "secret"
+	testMetricsCredentials = testMetricsUsername + ":" + testMetricsPassword
+	testWrongPassword      = "wrong"
+	testTLS13Version       = "1.3"
+	testMetricsLocalhost   = "localhost"
+	testRSAPrivateKeyBlock = "RSA PRIVATE KEY"
 )
 
 type recordedSpan struct {
@@ -125,6 +144,141 @@ func TestObservabilityRecordsApplicationRequestMetric(t *testing.T) {
 	}
 }
 
+func TestPrometheusHandlerRequiresBasicAuth(t *testing.T) {
+	obs, err := NewObservability(t.Context(), ObservabilityConfig{
+		PrometheusEnabled:       true,
+		PrometheusHTTPAuthBasic: testMetricsCredentials,
+	}, "test-version", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("NewObservability() error = %v", err)
+	}
+
+	handler := obs.PrometheusHandler()
+	tests := []struct {
+		name       string
+		username   string
+		password   string
+		wantStatus int
+	}{
+		{
+			name:       "missing",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "wrong credentials",
+			username:   testMetricsUsername,
+			password:   testWrongPassword,
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "valid",
+			username:   testMetricsUsername,
+			password:   testMetricsPassword,
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, defaultPrometheusPath, nil)
+			if tc.username != "" || tc.password != "" {
+				request.SetBasicAuth(tc.username, tc.password)
+			}
+
+			responseRecorder := httptest.NewRecorder()
+			handler.ServeHTTP(responseRecorder, request)
+
+			if responseRecorder.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", responseRecorder.Code, tc.wantStatus)
+			}
+
+			if tc.wantStatus == http.StatusUnauthorized && responseRecorder.Header().Get("WWW-Authenticate") == "" {
+				t.Fatal("missing WWW-Authenticate challenge")
+			}
+		})
+	}
+}
+
+func TestBuildPrometheusServerTLSConfig(t *testing.T) {
+	certFile, keyFile, _ := writeTestServerCertificate(t)
+
+	tlsConfig, err := buildPrometheusServerTLSConfig(PrometheusTLS{
+		Enabled:    true,
+		Cert:       certFile,
+		Key:        keyFile,
+		MinVersion: testTLS13Version,
+	})
+	if err != nil {
+		t.Fatalf("buildPrometheusServerTLSConfig() error = %v", err)
+	}
+
+	if tlsConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("MinVersion = %x, want %x", tlsConfig.MinVersion, tls.VersionTLS13)
+	}
+
+	if len(tlsConfig.Certificates) != 1 {
+		t.Fatalf("certificates = %d, want 1", len(tlsConfig.Certificates))
+	}
+}
+
+func TestStartPrometheusServerWithTLSAndBasicAuth(t *testing.T) {
+	certFile, keyFile, certPEM := writeTestServerCertificate(t)
+	port := freeLocalTCPPort(t)
+
+	obs, err := NewObservability(t.Context(), ObservabilityConfig{
+		PrometheusEnabled:       true,
+		PrometheusAddress:       defaultPrometheusAddress,
+		PrometheusPort:          port,
+		PrometheusHTTPAuthBasic: testMetricsCredentials,
+		PrometheusTLS: PrometheusTLS{
+			Enabled: true,
+			Cert:    certFile,
+			Key:     keyFile,
+		},
+	}, "test-version", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("NewObservability() error = %v", err)
+	}
+
+	if err = obs.StartPrometheusServer(); err != nil {
+		t.Fatalf("StartPrometheusServer() error = %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = obs.Shutdown(context.Background())
+	})
+
+	rootCAs := x509.NewCertPool()
+	if !rootCAs.AppendCertsFromPEM(certPEM) {
+		t.Fatal("append test certificate to RootCAs")
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: rootCAs, MinVersion: tls.VersionTLS12}},
+		Timeout:   5 * time.Second,
+	}
+
+	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s:%d%s", defaultPrometheusAddress, port, defaultPrometheusPath), nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	request.SetBasicAuth(testMetricsUsername, testMetricsPassword)
+
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("scrape metrics over TLS: %v", err)
+	}
+
+	defer func() {
+		_ = response.Body.Close()
+	}()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
 func TestInstrumentedHTTPClientPropagatesTraceContext(t *testing.T) {
 	obs, recorder := newTraceTestObservability(t)
 	client, traceparent := newObservedMapClient(t, obs)
@@ -209,4 +363,70 @@ func newObservedMapDeps(target string, httpClient *http.Client, obs *Observabili
 		HTTPClient:    httpClient,
 		Observability: obs,
 	}
+}
+
+// writeTestServerCertificate creates a temporary self-signed certificate valid for localhost.
+func writeTestServerCertificate(t *testing.T) (string, string, []byte) {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate private key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: testMetricsLocalhost,
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{testMetricsLocalhost},
+		IPAddresses:           []net.IP{net.ParseIP(defaultPrometheusAddress)},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: testRSAPrivateKeyBlock, Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	tmpDir := t.TempDir()
+	certFile := filepath.Join(tmpDir, "server.crt")
+	keyFile := filepath.Join(tmpDir, "server.key")
+
+	if err = os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("write certificate: %v", err)
+	}
+
+	if err = os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("write private key: %v", err)
+	}
+
+	return certFile, keyFile, certPEM
+}
+
+// freeLocalTCPPort returns an available loopback TCP port for listener smoke tests.
+func freeLocalTCPPort(t *testing.T) int {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", defaultPrometheusAddress+":0")
+	if err != nil {
+		t.Fatalf("listen on loopback: %v", err)
+	}
+
+	defer func() {
+		_ = listener.Close()
+	}()
+
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", listener.Addr())
+	}
+
+	return addr.Port
 }

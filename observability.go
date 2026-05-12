@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -86,6 +89,8 @@ type ObservabilityConfig struct {
 	PrometheusPort           int               `mapstructure:"prometheus_port"`
 	PrometheusPath           string            `mapstructure:"prometheus_path"`
 	PrometheusRuntimeMetrics bool              `mapstructure:"prometheus_runtime_metrics"`
+	PrometheusHTTPAuthBasic  string            `mapstructure:"prometheus_http_auth_basic"`
+	PrometheusTLS            PrometheusTLS     `mapstructure:"prometheus_tls" validate:"omitempty"`
 	OTelEnabled              bool              `mapstructure:"otel_enabled"`
 	OTelTracesEnabled        bool              `mapstructure:"otel_traces_enabled"`
 	OTelMetricsEnabled       bool              `mapstructure:"otel_metrics_enabled"`
@@ -95,6 +100,14 @@ type ObservabilityConfig struct {
 	OTLPHeaders              map[string]string `mapstructure:"otel_exporter_otlp_headers"`
 	OTLPInsecure             bool              `mapstructure:"otel_exporter_otlp_insecure"`
 	OTelSampleRatio          *float64          `mapstructure:"otel_sample_ratio"`
+}
+
+// PrometheusTLS configures server-side TLS for the optional Prometheus endpoint.
+type PrometheusTLS struct {
+	Enabled    bool   `mapstructure:"enabled"`
+	Cert       string `mapstructure:"cert" validate:"omitempty,file"`
+	Key        string `mapstructure:"key" validate:"omitempty,file"`
+	MinVersion string `mapstructure:"min_tls_version" validate:"omitempty,oneof=1.2 1.3"`
 }
 
 // Observability owns Prometheus collectors and OpenTelemetry providers for the process.
@@ -487,10 +500,20 @@ func (o *Observability) StartPrometheusServer() error {
 	mux := http.NewServeMux()
 	mux.Handle(o.PrometheusPath(), o.PrometheusHandler())
 
+	tlsConfig, err := buildPrometheusServerTLSConfig(o.config.PrometheusTLS)
+	if err != nil {
+		_ = listener.Close()
+
+		o.observeObservabilityStartup(resultError)
+
+		return err
+	}
+
 	server := &http.Server{
 		Addr:              address,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         tlsConfig,
 	}
 
 	o.prometheusListener = listener
@@ -498,12 +521,25 @@ func (o *Observability) StartPrometheusServer() error {
 	o.observeObservabilityStartup(resultOK)
 
 	go func() {
-		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		var serveErr error
+		if tlsConfig != nil {
+			serveErr = server.ServeTLS(listener, "", "")
+		} else {
+			serveErr = server.Serve(listener)
+		}
+
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			o.logger.Error("Prometheus endpoint stopped", slog.String("error", serveErr.Error()))
 		}
 	}()
 
-	o.logger.Info("Prometheus metrics endpoint started", slog.String("address", address), slog.String("path", o.PrometheusPath()))
+	o.logger.Info(
+		"Prometheus metrics endpoint started",
+		slog.String("address", address),
+		slog.String("path", o.PrometheusPath()),
+		slog.Bool("tls", tlsConfig != nil),
+		slog.Bool("basic_auth", o.config.PrometheusHTTPAuthBasic != ""),
+	)
 
 	return nil
 }
@@ -514,7 +550,68 @@ func (o *Observability) PrometheusHandler() http.Handler {
 		return http.NotFoundHandler()
 	}
 
-	return promhttp.HandlerFor(o.registry, promhttp.HandlerOpts{})
+	handler := promhttp.HandlerFor(o.registry, promhttp.HandlerOpts{})
+	if o.config.PrometheusHTTPAuthBasic == "" {
+		return handler
+	}
+
+	username, password, err := splitBasicAuthCredentials(o.config.PrometheusHTTPAuthBasic)
+	if err != nil {
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+			http.Error(responseWriter, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		})
+	}
+
+	return requireHTTPBasicAuth(username, password, handler)
+}
+
+// buildPrometheusServerTLSConfig creates the server-side TLS settings for the scrape endpoint.
+func buildPrometheusServerTLSConfig(cfg PrometheusTLS) (*tls.Config, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+
+	if cfg.Cert == "" || cfg.Key == "" {
+		return nil, errors.New("observability prometheus_tls requires cert and key when enabled")
+	}
+
+	minVersion, err := resolveTLSMinVersion(cfg.MinVersion)
+	if err != nil {
+		return nil, fmt.Errorf("observability prometheus_tls: %w", err)
+	}
+
+	cert, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
+	if err != nil {
+		return nil, fmt.Errorf("observability prometheus_tls load cert/key: %w", err)
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   minVersion,
+	}, nil
+}
+
+// requireHTTPBasicAuth protects an HTTP handler with constant-time Basic auth checks.
+func requireHTTPBasicAuth(username, password string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		gotUser, gotPassword, ok := request.BasicAuth()
+		if !ok || !secureStringEqual(gotUser, username) || !secureStringEqual(gotPassword, password) {
+			responseWriter.Header().Set("WWW-Authenticate", `Basic realm="pfxhttp metrics"`)
+			http.Error(responseWriter, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+
+			return
+		}
+
+		next.ServeHTTP(responseWriter, request)
+	})
+}
+
+// secureStringEqual compares strings without leaking useful timing information about their contents.
+func secureStringEqual(got, want string) bool {
+	gotHash := sha256.Sum256([]byte(got))
+	wantHash := sha256.Sum256([]byte(want))
+
+	return subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) == 1
 }
 
 // PrometheusEnabled reports whether the Prometheus endpoint should be started.

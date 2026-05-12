@@ -69,6 +69,14 @@ func TestObservabilityDefaultsAreOptIn(t *testing.T) {
 		t.Fatal("prometheus_runtime_metrics must default to false")
 	}
 
+	if cfg.Server.Observability.PrometheusHTTPAuthBasic != "" {
+		t.Fatal("prometheus_http_auth_basic must default to empty")
+	}
+
+	if cfg.Server.Observability.PrometheusTLS.Enabled {
+		t.Fatal("prometheus_tls.enabled must default to false")
+	}
+
 	if cfg.Server.Observability.OTelEnabled {
 		t.Fatal("otel_enabled must default to false")
 	}

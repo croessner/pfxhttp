@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+const (
+	testPrometheusTLSKey = "prometheus_tls"
+	testMetricsCertPath  = "/tmp/metrics.crt"
+	testMetricsKeyPath   = "/tmp/metrics.key"
+)
+
 func TestConfigValidation(t *testing.T) {
 	invalidSampleRatio := 1.5
 	tests := []struct {
@@ -397,6 +403,77 @@ func TestConfigValidation(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: []string{"otel_sample_ratio"},
+		},
+		{
+			name: "Prometheus basic auth requires user password form",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "socket_map",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    23456,
+						},
+					},
+					Observability: ObservabilityConfig{
+						PrometheusEnabled:       true,
+						PrometheusHTTPAuthBasic: "metrics-only",
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{"prometheus_http_auth_basic", "user:password"},
+		},
+		{
+			name: "Prometheus TLS requires certificate pair",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "socket_map",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    23456,
+						},
+					},
+					Observability: ObservabilityConfig{
+						PrometheusEnabled: true,
+						PrometheusTLS: PrometheusTLS{
+							Enabled: true,
+							Cert:    testMetricsCertPath,
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{testPrometheusTLSKey, "cert and key"},
+		},
+		{
+			name: "Prometheus TLS rejects legacy min version",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "socket_map",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    23456,
+						},
+					},
+					Observability: ObservabilityConfig{
+						PrometheusEnabled: true,
+						PrometheusTLS: PrometheusTLS{
+							Enabled:    true,
+							Cert:       testMetricsCertPath,
+							Key:        testMetricsKeyPath,
+							MinVersion: "1.1",
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{testPrometheusTLSKey, "min_tls_version"},
 		},
 	}
 

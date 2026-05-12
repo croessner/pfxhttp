@@ -291,6 +291,12 @@ server:
     prometheus_port: 9464
     prometheus_path: "/metrics"
     prometheus_runtime_metrics: false
+    # prometheus_http_auth_basic: "metrics:change-me"
+    prometheus_tls:
+      enabled: false
+      # cert: "/etc/pfxhttp/metrics.crt"
+      # key: "/etc/pfxhttp/metrics.key"
+      min_tls_version: "1.2"
     otel_enabled: false
     otel_traces_enabled: false
     otel_metrics_enabled: false
@@ -508,12 +514,20 @@ server:
     prometheus_port: 9464
     prometheus_path: "/metrics"
     prometheus_runtime_metrics: false
+    prometheus_http_auth_basic: "metrics:secret"
+    prometheus_tls:
+      enabled: true
+      cert: "/etc/pfxhttp/metrics.crt"
+      key: "/etc/pfxhttp/metrics.key"
+      min_tls_version: "1.2"
 ```
+
+`prometheus_http_auth_basic` protects the scrape endpoint with incoming HTTP Basic auth and must use `user:password` form. `prometheus_tls` enables HTTPS for the dedicated Prometheus endpoint; it requires a certificate and key when enabled and accepts `min_tls_version` values `1.2` or `1.3`. These settings apply only to the metrics HTTP server. The top-level `server.tls` section remains the outbound backend HTTP client TLS configuration.
 
 Scrape example:
 
 ```bash
-curl http://127.0.0.1:9464/metrics
+curl --cacert /etc/pfxhttp/metrics.crt -u metrics:secret https://127.0.0.1:9464/metrics
 ```
 
 OpenTelemetry uses OTLP over HTTP. `otel_enabled` is the master switch; traces and metrics remain separate opt-in controls:
@@ -539,6 +553,11 @@ Configuration keys:
 | `prometheus_port`             | `9464`        | Bind port for the metrics endpoint.                          |
 | `prometheus_path`             | `/metrics`    | HTTP path for Prometheus scraping.                           |
 | `prometheus_runtime_metrics`  | `false`       | Adds Go runtime and process collectors.                      |
+| `prometheus_http_auth_basic`  | empty         | Protects the scrape endpoint with Basic auth `user:password`. |
+| `prometheus_tls.enabled`      | `false`       | Serves the Prometheus endpoint over HTTPS.                   |
+| `prometheus_tls.cert`         | empty         | PEM certificate file for the HTTPS scrape endpoint.          |
+| `prometheus_tls.key`          | empty         | PEM private key file for the HTTPS scrape endpoint.          |
+| `prometheus_tls.min_tls_version` | `1.2`      | Lowest accepted TLS version: `1.2` or `1.3`.                 |
 | `otel_enabled`                | `false`       | Enables OpenTelemetry export.                                |
 | `otel_traces_enabled`         | `false`       | Exports traces when OTel is enabled.                         |
 | `otel_metrics_enabled`        | `false`       | Exports OTel metrics when OTel is enabled.                   |

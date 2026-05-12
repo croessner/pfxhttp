@@ -65,6 +65,12 @@ server:
     prometheus_port: 9464
     prometheus_path: "/metrics"
     prometheus_runtime_metrics: false
+    # prometheus_http_auth_basic: "metrics:change-me"
+    prometheus_tls:
+      enabled: false
+      # cert: "/etc/pfxhttp/metrics.crt"
+      # key: "/etc/pfxhttp/metrics.key"
+      min_tls_version: "1.2"
     otel_enabled: false
     otel_traces_enabled: false
     otel_metrics_enabled: false
@@ -258,6 +264,21 @@ HTTP path for metrics. Default: \fB/metrics\fP.
 .IP \[bu] 2
 .B prometheus_runtime_metrics:
 Adds Go runtime and process collectors when explicitly enabled.
+.IP \[bu] 2
+.B prometheus_http_auth_basic:
+Optional incoming HTTP Basic authentication for the scrape endpoint. The value must use \fBuser:password\fP form.
+.IP \[bu] 2
+.B prometheus_tls.enabled:
+Serves the dedicated Prometheus endpoint over HTTPS when \fBtrue\fP. This is independent from the top-level outbound \fBserver.tls\fP client settings.
+.IP \[bu] 2
+.B prometheus_tls.cert:
+PEM certificate file for the Prometheus HTTPS endpoint. Required when \fBprometheus_tls.enabled\fP is true.
+.IP \[bu] 2
+.B prometheus_tls.key:
+PEM private key file for the Prometheus HTTPS endpoint. Required when \fBprometheus_tls.enabled\fP is true.
+.IP \[bu] 2
+.B prometheus_tls.min_tls_version:
+Lowest accepted TLS version for Prometheus HTTPS. Allowed values are \fB1.2\fP and \fB1.3\fP. Default: \fB1.2\fP.
 .IP \[bu] 2
 .B otel_enabled:
 Enables OpenTelemetry OTLP HTTP export. At least one of \fBotel_traces_enabled\fP or \fBotel_metrics_enabled\fP must also be true.
