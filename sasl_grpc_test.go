@@ -25,6 +25,7 @@ import (
 	"time"
 
 	authv1 "PostfixToHTTP/proto/auth/v1"
+	commonv1 "PostfixToHTTP/proto/common/v1"
 
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -156,7 +157,7 @@ func TestMapAuthResponseDecisionOK(t *testing.T) {
 		Ok:           true,
 		Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
 		AccountField: "Auth-User",
-		Attributes: map[string]*authv1.AttributeValues{
+		Attributes: map[string]*commonv1.AttributeValues{
 			"Auth-User": {Values: []string{"alice@example.com"}},
 		},
 	}
@@ -208,7 +209,7 @@ func TestMapAuthResponseAccountFieldFallback(t *testing.T) {
 		Ok:       true,
 		Decision: authv1.AuthDecision_AUTH_DECISION_OK,
 		// AccountField empty: fall back to "Auth-User".
-		Attributes: map[string]*authv1.AttributeValues{
+		Attributes: map[string]*commonv1.AttributeValues{
 			"Auth-User": {Values: []string{"resolved@example.com"}},
 		},
 	}
@@ -327,7 +328,7 @@ func TestNauthilusGRPCSASLAuthenticatorPasswordSuccess(t *testing.T) {
 			Ok:           true,
 			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
 			AccountField: "Auth-User",
-			Attributes: map[string]*authv1.AttributeValues{
+			Attributes: map[string]*commonv1.AttributeValues{
 				"Auth-User": {Values: []string{"alice@example.com"}},
 			},
 		},
@@ -547,7 +548,7 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 		response: &authv1.AuthResponse{
 			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
 			AccountField: "Auth-User",
-			Attributes: map[string]*authv1.AttributeValues{
+			Attributes: map[string]*commonv1.AttributeValues{
 				"Auth-User": {Values: []string{"old@example.com"}},
 			},
 		},
@@ -559,7 +560,7 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 		response: &authv1.AuthResponse{
 			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
 			AccountField: "Auth-User",
-			Attributes: map[string]*authv1.AttributeValues{
+			Attributes: map[string]*commonv1.AttributeValues{
 				"Auth-User": {Values: []string{"new@example.com"}},
 			},
 		},
@@ -661,7 +662,7 @@ func TestHandleSASLResultRecordsBackendAndResponseSpans(t *testing.T) {
 		response: &authv1.AuthResponse{
 			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
 			AccountField: "Auth-User",
-			Attributes: map[string]*authv1.AttributeValues{
+			Attributes: map[string]*commonv1.AttributeValues{
 				"Auth-User": {Values: []string{"alice@example.com"}},
 			},
 		},
@@ -1113,7 +1114,7 @@ func TestNauthilusGRPCSASLAuthenticatorOIDCBearer(t *testing.T) {
 			Ok:           true,
 			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
 			AccountField: "Auth-User",
-			Attributes: map[string]*authv1.AttributeValues{
+			Attributes: map[string]*commonv1.AttributeValues{
 				"Auth-User": {Values: []string{"oidc-user@example.com"}},
 			},
 		},

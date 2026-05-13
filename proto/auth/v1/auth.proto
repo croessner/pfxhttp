@@ -2,10 +2,13 @@ syntax = "proto3";
 
 // nauthilus.auth.v1 is the gRPC contract owned by Nauthilus
 // (server/grpcapi/auth/v1/auth.proto). This file is a verbatim copy of the
-// upstream contract so pfxhttp can act as a gRPC client. Only the go_package
-// option is adapted to this module. Keep the wire format in sync with
-// upstream; otherwise the generated code will diverge from the server.
+// upstream contract so pfxhttp can act as a gRPC client. The go_package option
+// and local common-proto import path are adapted to this module. Keep the wire
+// format in sync with upstream; otherwise the generated code will diverge from
+// the server.
 package nauthilus.auth.v1;
+
+import "proto/common/v1/common.proto";
 
 option go_package = "PostfixToHTTP/proto/auth/v1;authv1";
 
@@ -101,10 +104,6 @@ enum AuthDecision {
   AUTH_DECISION_TEMPFAIL = 3;
 }
 
-message AttributeValues {
-  repeated string values = 1;
-}
-
 message AuthResponse {
   bool ok = 1;
   AuthDecision decision = 2;
@@ -112,9 +111,10 @@ message AuthResponse {
   string account_field = 4;
   string totp_secret_field = 5;
   uint32 backend = 6;
-  map<string, AttributeValues> attributes = 7;
+  map<string, .nauthilus.common.v1.AttributeValues> attributes = 7;
   string status_message = 8;
   string error = 9;
+  .nauthilus.common.v1.BackendRef backend_ref = 10;
 }
 
 message ListAccountsResponse {

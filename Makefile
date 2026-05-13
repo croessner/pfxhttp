@@ -65,12 +65,13 @@ guardrails: fix vet lint test test-release-metadata race build-check
 version:
 	@echo $(VERSION)
 
-# Regenerate gRPC stubs from proto/auth/v1/auth.proto.
+# Regenerate gRPC stubs from the local Nauthilus AuthService proto mirror.
 # Requires protoc and the protoc-gen-go / protoc-gen-go-grpc plugins on PATH.
 generate-grpc:
 	protoc \
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		proto/common/v1/common.proto \
 		proto/auth/v1/auth.proto
 
 .PHONY: all build build-check clean version install uninstall fix vet lint test test-release-metadata race guardrails generate-grpc
