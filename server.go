@@ -649,19 +649,9 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	encoder := &DovecotEncoder{}
 	reader := bufio.NewReader(conn)
 
-	// Determine supported mechanisms from config
-	mechanisms := []DovecotMechanism{
-		{Name: "PLAIN", PlainText: true, Dictionary: true, Active: true},
-		{Name: "LOGIN", PlainText: true, Dictionary: true, Active: true},
-	}
-
-	// Add OAuth mechanisms if SASL OIDC validation is configured for this service
-	if settings, ok := config.DovecotSASL[s.name]; ok && settings.SASLOIDCAuth.Enabled {
-		mechanisms = append(mechanisms,
-			DovecotMechanism{Name: "XOAUTH2", ForwardSecrecy: true},
-			DovecotMechanism{Name: "OAUTHBEARER", ForwardSecrecy: true},
-		)
-	}
+	settings := config.DovecotSASL[s.name]
+	mechanisms := dovecotSASLMechanisms(settings)
+	allowedMechanisms := dovecotSASLMechanismSet(mechanisms)
 
 	cuid := dovecotCUIDCounter.Add(1)
 	handshake := &DovecotHandshake{
@@ -775,6 +765,14 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 					slog.String("mechanism", authReq.Mechanism),
 					slog.String("service", authReq.Service))
 
+				if !dovecotSASLMechanismAllowed(allowedMechanisms, authReq.Mechanism) {
+					if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, "unsupported mechanism", "", false))); wErr != nil {
+						return
+					}
+
+					continue
+				}
+
 				mech := NewSASLMechanism(authReq.Mechanism)
 				if mech == nil {
 					if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, "unsupported mechanism", "", false))); wErr != nil {
@@ -852,6 +850,61 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				reqLogger.Warn("Unknown command", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
 			}
 		}
+	}
+}
+
+func dovecotSASLMechanisms(settings Request) []DovecotMechanism {
+	names := settings.Mechanisms
+	if len(names) == 0 {
+		names = []string{saslMechanismPlain, saslMechanismLogin}
+		if settings.SASLOIDCAuth.Enabled {
+			names = append(names, saslMechanismXOAuth2, saslMechanismOAuthBearer)
+		}
+	}
+
+	mechanisms := make([]DovecotMechanism, 0, len(names))
+	for _, name := range names {
+		mechanisms = append(mechanisms, dovecotSASLMechanismDefinition(name))
+	}
+
+	return mechanisms
+}
+
+func dovecotSASLMechanismSet(mechanisms []DovecotMechanism) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(mechanisms))
+	for _, mechanism := range mechanisms {
+		if normalized, ok := normalizeSASLMechanismName(mechanism.Name); ok {
+			allowed[normalized] = struct{}{}
+		}
+	}
+
+	return allowed
+}
+
+func dovecotSASLMechanismAllowed(allowed map[string]struct{}, name string) bool {
+	mechanism, ok := normalizeSASLMechanismName(name)
+	if !ok {
+		return false
+	}
+
+	_, ok = allowed[mechanism]
+
+	return ok
+}
+
+func dovecotSASLMechanismDefinition(name string) DovecotMechanism {
+	mechanism, ok := normalizeSASLMechanismName(name)
+	if !ok {
+		mechanism = strings.ToUpper(strings.TrimSpace(name))
+	}
+
+	switch mechanism {
+	case saslMechanismPlain, saslMechanismLogin:
+		return DovecotMechanism{Name: mechanism, PlainText: true, Dictionary: true, Active: true}
+	case saslMechanismXOAuth2, saslMechanismOAuthBearer:
+		return DovecotMechanism{Name: mechanism, ForwardSecrecy: true}
+	default:
+		return DovecotMechanism{Name: mechanism}
 	}
 }
 

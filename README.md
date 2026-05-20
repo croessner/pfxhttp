@@ -408,6 +408,10 @@ dovecot_sasl:
       scopes:
         - "introspect"
       validation: introspection
+    mechanisms:
+      - PLAIN
+      - XOAUTH2
+      - OAUTHBEARER
     # Note: For dovecot_sasl, the payload is generated internally according to Nauthilus
     # /api/v1/auth/json; a payload entry has no effect here.
     status_code: 200
@@ -801,12 +805,22 @@ dovecot_sasl:
     sasl_oidc_auth:
       enabled: true
       configuration_uri: "https://auth.example.org/.well-known/openid-configuration"
+    # Optional exact list of advertised mechanisms. If omitted, pfxhttp
+    # advertises PLAIN and LOGIN, plus XOAUTH2/OAUTHBEARER when
+    # sasl_oidc_auth.enabled is true.
+    mechanisms:
+      - PLAIN
+      - XOAUTH2
+      - OAUTHBEARER
 ```
 
 Behavior:
 - If Dovecot provides `local_port`, it is forwarded.
 - Else, if `default_local_port` is set, it is sent as `local_port` to the backend.
 - Applies to both password-based and OAuth-based SASL flows.
+- `mechanisms` is transport-independent. When set, it is the exact allowlist
+  advertised to Postfix; unknown values are rejected, duplicates are rejected,
+  and `XOAUTH2` / `OAUTHBEARER` require `sasl_oidc_auth.enabled: true`.
 
 ##### gRPC Transport (alternative to JSON)
 
@@ -824,6 +838,8 @@ introspection / JWKS endpoints over HTTP, regardless of `transport`.
 dovecot_sasl:
   smtp_auth:
     transport: grpc
+    mechanisms:
+      - PLAIN
     # backend_oidc_auth applies to gRPC just like HTTP and produces the
     # `authorization: Bearer <token>` metadata for outgoing RPCs.
     backend_oidc_auth:

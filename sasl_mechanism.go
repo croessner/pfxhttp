@@ -99,6 +99,13 @@ type SASLCredentials struct {
 	AuthzID string
 }
 
+const (
+	saslMechanismPlain       = "PLAIN"
+	saslMechanismLogin       = "LOGIN"
+	saslMechanismXOAuth2     = "XOAUTH2"
+	saslMechanismOAuthBearer = "OAUTHBEARER"
+)
+
 // SASLMechanism defines the interface for SASL authentication mechanisms.
 // Each mechanism handles its own credential extraction and multi-step exchanges.
 type SASLMechanism interface {
@@ -393,14 +400,14 @@ var _ SASLMechanism = (*OAuthBearerMechanism)(nil)
 // NewSASLMechanism creates a new SASL mechanism handler for the given mechanism name.
 // Returns nil if the mechanism is not supported.
 func NewSASLMechanism(name string) SASLMechanism {
-	switch strings.ToUpper(name) {
-	case "PLAIN":
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case saslMechanismPlain:
 		return &PlainMechanism{}
-	case "LOGIN":
+	case saslMechanismLogin:
 		return &LoginMechanism{}
-	case "XOAUTH2":
+	case saslMechanismXOAuth2:
 		return &XOAuth2Mechanism{}
-	case "OAUTHBEARER":
+	case saslMechanismOAuthBearer:
 		return &OAuthBearerMechanism{}
 	default:
 		return nil
@@ -409,11 +416,21 @@ func NewSASLMechanism(name string) SASLMechanism {
 
 // IsOAuthMechanism returns true if the given mechanism name is an OAuth-based mechanism.
 func IsOAuthMechanism(mechanism string) bool {
-	switch strings.ToUpper(mechanism) {
-	case "XOAUTH2", "OAUTHBEARER":
+	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
+	case saslMechanismXOAuth2, saslMechanismOAuthBearer:
 		return true
 	default:
 		return false
+	}
+}
+
+func normalizeSASLMechanismName(name string) (string, bool) {
+	normalized := strings.ToUpper(strings.TrimSpace(name))
+	switch normalized {
+	case saslMechanismPlain, saslMechanismLogin, saslMechanismXOAuth2, saslMechanismOAuthBearer:
+		return normalized, true
+	default:
+		return "", false
 	}
 }
 

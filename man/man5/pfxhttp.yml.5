@@ -594,6 +594,26 @@ client_id
 .RE
 
 .TP
+.B mechanisms
+Optional exact list of SASL mechanisms advertised to Postfix for this \fBdovecot_sasl\fP entry.
+If omitted, Pfxhttp advertises \fBPLAIN\fP and \fBLOGIN\fP, plus \fBXOAUTH2\fP and
+\fBOAUTHBEARER\fP when \fBsasl_oidc_auth.enabled\fP is true. Supported values are
+\fBPLAIN\fP, \fBLOGIN\fP, \fBXOAUTH2\fP, and \fBOAUTHBEARER\fP. Values are normalized
+case-insensitively. Unknown values, duplicates, and an empty list are rejected.
+\fBXOAUTH2\fP and \fBOAUTHBEARER\fP require \fBsasl_oidc_auth.enabled: true\fP.
+The setting is transport-independent and applies to JSON and gRPC backends.
+.RS
+.nf
+dovecot_sasl:
+  smtp_auth:
+    mechanisms:
+      - PLAIN
+      - XOAUTH2
+      - OAUTHBEARER
+.fi
+.RE
+
+.TP
 .B gRPC transport
 Password-based SASL mechanisms can use the Nauthilus gRPC AuthService instead of the JSON endpoint:
 .RS
@@ -601,6 +621,8 @@ Password-based SASL mechanisms can use the Nauthilus gRPC AuthService instead of
 dovecot_sasl:
   smtp_auth:
     transport: grpc
+    mechanisms:
+      - PLAIN
     http_auth_basic: admin:admin-password
     default_local_port: "587"
     grpc:

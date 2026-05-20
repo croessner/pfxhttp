@@ -10,3 +10,4 @@ pfxhttp
 dist/
 .debpkg/
 .rpmpkg/
+temp/

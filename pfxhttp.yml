@@ -165,12 +165,19 @@ dovecot_sasl:
       # account_claim: "dovecot_account"
     # Note: For dovecot_sasl, the payload is generated internally according to Nauthilus
     # /api/v1/auth/json; a payload entry has no effect here.
+    # Optional exact list of advertised SASL mechanisms. If unset, pfxhttp advertises
+    # PLAIN and LOGIN, plus XOAUTH2/OAUTHBEARER when sasl_oidc_auth.enabled is true.
+    mechanisms:
+      - PLAIN
+      # - LOGIN
     status_code: 200
     # Username is returned via HTTP response header "Auth-User" by the backend.
     # Errors are signaled via HTTP status and the "Auth-Status" header.
 
   dovecot_sasl_grpc:
     transport: grpc
+    mechanisms:
+      - PLAIN
     http_auth_basic: admin:admin-password
     default_local_port: "587"
     grpc:

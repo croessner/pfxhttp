@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -9,6 +10,12 @@ const (
 	testPrometheusTLSKey = "prometheus_tls"
 	testMetricsCertPath  = "/tmp/metrics.crt"
 	testMetricsKeyPath   = "/tmp/metrics.key"
+	testDovecotTargetURL = "https://nauthilus.example.com/api/v1/auth/json"
+	testLowerPlain       = "plain"
+	testMechanismsKey    = "mechanisms"
+	testCramMD5          = "CRAM-MD5"
+	testIDPConfigURI     = "https://idp.example.com/.well-known/openid-configuration"
+	testPfxhttpClientID  = "pfxhttp"
 )
 
 func TestConfigValidation(t *testing.T) {
@@ -255,6 +262,126 @@ func TestConfigValidation(t *testing.T) {
 						GRPC: GRPCRequest{
 							Address:  "nauthilus.example.com:9444",
 							Metadata: map[string][]string{"Accept-Language": {"de"}},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "DovecotSASL HTTP accepts and normalizes mechanisms",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Target:     testDovecotTargetURL,
+						Mechanisms: []string{testLowerPlain},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "DovecotSASL rejects empty mechanisms",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Target:     testDovecotTargetURL,
+						Mechanisms: []string{},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{testMechanismsKey, "at least one"},
+		},
+		{
+			name: "DovecotSASL rejects unknown mechanisms",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Target:     testDovecotTargetURL,
+						Mechanisms: []string{saslMechanismPlain, testCramMD5},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{testMechanismsKey, "unsupported mechanism", testCramMD5},
+		},
+		{
+			name: "DovecotSASL rejects OAuth mechanisms without SASL OIDC",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport:  transportGRPC,
+						GRPC:       GRPCRequest{Address: "nauthilus.example.com:9444"},
+						Mechanisms: []string{saslMechanismPlain, saslMechanismXOAuth2},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: []string{saslMechanismXOAuth2, "sasl_oidc_auth.enabled"},
+		},
+		{
+			name: "DovecotSASL gRPC accepts OAuth mechanisms with SASL OIDC",
+			cfg: Config{
+				Server: Server{
+					Listen: []Listen{
+						{
+							Kind:    "dovecot_sasl",
+							Type:    "tcp",
+							Address: "127.0.0.1",
+							Port:    34000,
+						},
+					},
+				},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {
+						Transport:  transportGRPC,
+						GRPC:       GRPCRequest{Address: "nauthilus.example.com:9444"},
+						Mechanisms: []string{saslMechanismPlain, saslMechanismXOAuth2, saslMechanismOAuthBearer},
+						SASLOIDCAuth: SASLOIDCAuth{
+							Enabled:          true,
+							ConfigurationURI: testIDPConfigURI,
+							ClientID:         testPfxhttpClientID,
 						},
 					},
 				},
@@ -528,5 +655,35 @@ func TestHandleConfigNormalizesGRPCMetadataKeys(t *testing.T) {
 	}
 	if values := md["accept-language"]; len(values) != 1 || values[0] != "de" {
 		t.Fatalf("accept-language metadata = %v, want [de]", values)
+	}
+}
+
+func TestHandleConfigNormalizesDovecotSASLMechanisms(t *testing.T) {
+	cfg := Config{
+		Server: Server{
+			Listen: []Listen{
+				{
+					Kind:    "dovecot_sasl",
+					Type:    "tcp",
+					Address: "127.0.0.1",
+					Port:    34000,
+				},
+			},
+		},
+		DovecotSASL: map[string]Request{
+			"smtp_auth": {
+				Target:     testDovecotTargetURL,
+				Mechanisms: []string{testLowerPlain, "login"},
+			},
+		},
+	}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig: %v", err)
+	}
+
+	mechanisms := cfg.DovecotSASL["smtp_auth"].Mechanisms
+	if !slices.Equal(mechanisms, []string{saslMechanismPlain, saslMechanismLogin}) {
+		t.Fatalf("mechanisms = %v, want [PLAIN LOGIN]", mechanisms)
 	}
 }

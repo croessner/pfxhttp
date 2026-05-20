@@ -133,6 +133,7 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 			NoErrorValue:            "not-found",
 			HTTPRequestCompression:  true,
 			HTTPResponseCompression: true,
+			Mechanisms:              []string{saslMechanismPlain},
 			DefaultLocalPort:        "587",
 		},
 		"entry_a": {
@@ -185,6 +186,10 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 		t.Errorf("entry_a.DefaultLocalPort = %q, want %q", a.DefaultLocalPort, "587")
 	}
 
+	if !slices.Equal(a.Mechanisms, []string{saslMechanismPlain}) {
+		t.Errorf("entry_a.Mechanisms = %v, want [PLAIN]", a.Mechanisms)
+	}
+
 	// entry_a custom_headers: defaults + entry-specific (additive)
 	expectedHeaders := []string{"X-Common: yes", "X-Pfx-Name: entry_a"}
 	if !slices.Equal(a.CustomHeaders, expectedHeaders) {
@@ -201,6 +206,10 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 	}
 	if b.ValueField != "result" {
 		t.Errorf("entry_b.ValueField not inherited")
+	}
+
+	if !slices.Equal(b.Mechanisms, []string{saslMechanismPlain}) {
+		t.Errorf("entry_b.Mechanisms = %v, want inherited [PLAIN]", b.Mechanisms)
 	}
 }
 

@@ -183,6 +183,7 @@ type Request struct {
 	NoErrorValue            string          `mapstructure:"no_error_value" validate:"omitempty,printascii"`
 	BackendOIDCAuth         BackendOIDCAuth `mapstructure:"backend_oidc_auth" validate:"omitempty"`
 	SASLOIDCAuth            SASLOIDCAuth    `mapstructure:"sasl_oidc_auth" validate:"omitempty"`
+	Mechanisms              []string        `mapstructure:"mechanisms" validate:"omitempty,dive,printascii"`
 	DefaultLocalPort        string          `mapstructure:"default_local_port" validate:"omitempty,numeric"`
 	Transport               string          `mapstructure:"transport" validate:"omitempty,oneof=json grpc"`
 	GRPC                    GRPCRequest     `mapstructure:"grpc" validate:"omitempty"`
@@ -244,6 +245,10 @@ func mergeRequest(defaults, entry Request) Request {
 
 	if !entry.SASLOIDCAuth.Enabled && defaults.SASLOIDCAuth.Enabled {
 		entry.SASLOIDCAuth = defaults.SASLOIDCAuth
+	}
+
+	if entry.Mechanisms == nil && defaults.Mechanisms != nil {
+		entry.Mechanisms = append([]string(nil), defaults.Mechanisms...)
 	}
 
 	if entry.DefaultLocalPort == "" {
@@ -412,6 +417,59 @@ func validateDovecotSASLEndpoints(section map[string]Request) error {
 	}
 
 	return nil
+}
+
+func normalizeDovecotSASLMechanisms(section map[string]Request) error {
+	for name, entry := range maps.All(section) {
+		if entry.Mechanisms == nil {
+			continue
+		}
+
+		mechanisms, err := normalizeConfiguredSASLMechanisms(entry.Mechanisms)
+		if err != nil {
+			return fmt.Errorf("entry '%s' in 'dovecot_sasl' has invalid mechanisms: %w", name, err)
+		}
+
+		for _, mechanism := range mechanisms {
+			if IsOAuthMechanism(mechanism) && !entry.SASLOIDCAuth.Enabled {
+				return fmt.Errorf("entry '%s' in 'dovecot_sasl' enables mechanism %q but sasl_oidc_auth.enabled is false", name, mechanism)
+			}
+		}
+
+		entry.Mechanisms = mechanisms
+		section[name] = entry
+	}
+
+	return nil
+}
+
+func normalizeConfiguredSASLMechanisms(raw []string) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	if len(raw) == 0 {
+		return nil, errors.New("must contain at least one mechanism")
+	}
+
+	seen := make(map[string]struct{}, len(raw))
+
+	mechanisms := make([]string, 0, len(raw))
+	for _, value := range raw {
+		mechanism, ok := normalizeSASLMechanismName(value)
+		if !ok {
+			return nil, fmt.Errorf("unsupported mechanism %q (supported: PLAIN, LOGIN, XOAUTH2, OAUTHBEARER)", value)
+		}
+
+		if _, exists := seen[mechanism]; exists {
+			return nil, fmt.Errorf("duplicate mechanism %q", mechanism)
+		}
+
+		seen[mechanism] = struct{}{}
+		mechanisms = append(mechanisms, mechanism)
+	}
+
+	return mechanisms, nil
 }
 
 // validateAuthSourceConflicts rejects entries that configure both static Basic
@@ -632,6 +690,10 @@ func (cfg *Config) HandleConfig() error {
 	}
 
 	if err := normalizeDovecotSASLGRPCMetadata(cfg.DovecotSASL); err != nil {
+		return err
+	}
+
+	if err := normalizeDovecotSASLMechanisms(cfg.DovecotSASL); err != nil {
 		return err
 	}
 

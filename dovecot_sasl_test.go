@@ -494,6 +494,69 @@ func TestDovecotEncoderEncodeHandshake(t *testing.T) {
 	}
 }
 
+func TestDovecotSASLMechanismsUsesConfiguredAllowlist(t *testing.T) {
+	mechanisms := dovecotSASLMechanisms(Request{
+		Mechanisms: []string{saslMechanismPlain, saslMechanismXOAuth2, saslMechanismOAuthBearer},
+		SASLOIDCAuth: SASLOIDCAuth{
+			Enabled: true,
+		},
+	})
+
+	if len(mechanisms) != 3 {
+		t.Fatalf("mechanisms length = %d, want 3: %+v", len(mechanisms), mechanisms)
+	}
+
+	if mechanisms[0] != (DovecotMechanism{Name: saslMechanismPlain, PlainText: true, Dictionary: true, Active: true}) {
+		t.Fatalf("mechanisms[0] = %+v, want PLAIN with password flags", mechanisms[0])
+	}
+
+	if mechanisms[1] != (DovecotMechanism{Name: saslMechanismXOAuth2, ForwardSecrecy: true}) {
+		t.Fatalf("mechanisms[1] = %+v, want XOAUTH2 with forward-secrecy", mechanisms[1])
+	}
+
+	if mechanisms[2] != (DovecotMechanism{Name: saslMechanismOAuthBearer, ForwardSecrecy: true}) {
+		t.Fatalf("mechanisms[2] = %+v, want OAUTHBEARER with forward-secrecy", mechanisms[2])
+	}
+}
+
+func TestDovecotSASLMechanismsDefaultBehavior(t *testing.T) {
+	withoutOAuth := dovecotSASLMechanisms(Request{})
+	if len(withoutOAuth) != 2 {
+		t.Fatalf("default mechanisms length = %d, want 2: %+v", len(withoutOAuth), withoutOAuth)
+	}
+
+	if withoutOAuth[0].Name != saslMechanismPlain || withoutOAuth[1].Name != saslMechanismLogin {
+		t.Fatalf("default mechanisms = %+v, want PLAIN and LOGIN", withoutOAuth)
+	}
+
+	withOAuth := dovecotSASLMechanisms(Request{SASLOIDCAuth: SASLOIDCAuth{Enabled: true}})
+	if len(withOAuth) != 4 {
+		t.Fatalf("OAuth default mechanisms length = %d, want 4: %+v", len(withOAuth), withOAuth)
+	}
+
+	if withOAuth[2].Name != saslMechanismXOAuth2 || withOAuth[3].Name != saslMechanismOAuthBearer {
+		t.Fatalf("OAuth default mechanisms = %+v, want XOAUTH2 and OAUTHBEARER appended", withOAuth)
+	}
+}
+
+func TestDovecotSASLMechanismAllowlist(t *testing.T) {
+	allowed := dovecotSASLMechanismSet(dovecotSASLMechanisms(Request{
+		Mechanisms: []string{saslMechanismPlain},
+	}))
+
+	if !dovecotSASLMechanismAllowed(allowed, "plain") {
+		t.Fatal("PLAIN should be allowed case-insensitively")
+	}
+
+	if dovecotSASLMechanismAllowed(allowed, saslMechanismLogin) {
+		t.Fatal("LOGIN should be rejected when it is not in mechanisms")
+	}
+
+	if dovecotSASLMechanismAllowed(allowed, testCramMD5) {
+		t.Fatal("unknown mechanisms should be rejected")
+	}
+}
+
 func TestDovecotEncoderEncodeOK(t *testing.T) {
 	encoder := &DovecotEncoder{}
 
