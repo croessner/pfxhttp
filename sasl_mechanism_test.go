@@ -4,16 +4,25 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+)
+
+const (
+	testPrivateKeyIntrospectionClientID = "pfxhttp-introspection"
+	testPrivateKeyIntrospectionEntry    = "private_key"
+	testPrivateKeyIntrospectionUser     = "private-key-user"
 )
 
 // --- PLAIN mechanism tests ---
@@ -681,6 +690,198 @@ func TestNauthilusSASLAuthenticatorTokenIntrospection(t *testing.T) {
 	if result.Reason != "token is not active" {
 		t.Errorf("Reason = %q, want 'token is not active'", result.Reason)
 	}
+}
+
+func TestNauthilusSASLAuthenticatorTokenIntrospectionPrivateKeyJWT(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	keyFile := writeRSAPrivateKeyFile(t, priv)
+
+	requests := make(chan privateKeyIntrospectionRequest, 1)
+
+	server := newPrivateKeyIntrospectionServer(t, requests)
+	defer server.Close()
+
+	testClient := server.Client()
+	mgr := NewOIDCManager(testClient)
+	cfg := newPrivateKeyIntrospectionConfig(server.URL, keyFile)
+
+	ctx := context.WithValue(t.Context(), loggerKey, slog.New(slog.DiscardHandler))
+	authenticator := NewNauthilusSASLAuthenticator(cfg, testPrivateKeyIntrospectionEntry, testClient, mgr)
+
+	result, err := authenticator.AuthenticateToken(ctx, "user@example.com", "valid-token", &DovecotAuthRequest{Mechanism: "XOAUTH2", Service: "smtp"})
+
+	assertPrivateKeyIntrospectionResult(t, result, err)
+
+	got := readPrivateKeyIntrospectionRequest(t, requests)
+	assertPrivateKeyIntrospectionRequest(t, got)
+	assertPrivateKeyClientAssertion(t, got.clientAssertion, server.URL+"/introspect", &priv.PublicKey)
+}
+
+type privateKeyIntrospectionRequest struct {
+	authorization       string
+	clientID            string
+	clientAssertionType string
+	clientAssertion     string
+}
+
+func newPrivateKeyIntrospectionServer(t *testing.T, requests chan<- privateKeyIntrospectionRequest) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			writeSASLTestJSON(t, w, map[string]string{
+				"issuer":                 "http://" + r.Host,
+				"introspection_endpoint": "http://" + r.Host + "/introspect",
+			})
+		case "/introspect":
+			recordPrivateKeyIntrospectionRequest(requests, r)
+			writeSASLTestJSON(t, w, map[string]any{
+				"active":   true,
+				"username": testPrivateKeyIntrospectionUser,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func recordPrivateKeyIntrospectionRequest(requests chan<- privateKeyIntrospectionRequest, r *http.Request) {
+	_ = r.ParseForm()
+	requests <- privateKeyIntrospectionRequest{
+		authorization:       r.Header.Get("Authorization"),
+		clientID:            r.FormValue("client_id"),
+		clientAssertionType: r.FormValue("client_assertion_type"),
+		clientAssertion:     r.FormValue("client_assertion"),
+	}
+}
+
+func writeSASLTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Errorf("encode SASL test response: %v", err)
+	}
+}
+
+func newPrivateKeyIntrospectionConfig(serverURL, keyFile string) *Config {
+	return &Config{
+		DovecotSASL: map[string]Request{
+			testPrivateKeyIntrospectionEntry: {
+				Target:     serverURL,
+				StatusCode: 200,
+				SASLOIDCAuth: SASLOIDCAuth{
+					Enabled:          true,
+					ConfigurationURI: serverURL + "/.well-known/openid-configuration",
+					ClientID:         testPrivateKeyIntrospectionClientID,
+					PrivateKeyFile:   keyFile,
+					AuthMethod:       oidcAuthMethodPrivateKeyJWT,
+				},
+			},
+		},
+	}
+}
+
+func assertPrivateKeyIntrospectionResult(t *testing.T, result *SASLAuthResult, err error) {
+	t.Helper()
+
+	if err != nil {
+		t.Fatalf("AuthenticateToken error: %v", err)
+	}
+
+	if !result.Success {
+		t.Fatalf("expected success, got failure: %s", result.Reason)
+	}
+
+	if result.Username != testPrivateKeyIntrospectionUser {
+		t.Fatalf("Username = %q, want %s", result.Username, testPrivateKeyIntrospectionUser)
+	}
+}
+
+func readPrivateKeyIntrospectionRequest(t *testing.T, requests <-chan privateKeyIntrospectionRequest) privateKeyIntrospectionRequest {
+	t.Helper()
+
+	select {
+	case got := <-requests:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("introspection endpoint was not called")
+	}
+
+	return privateKeyIntrospectionRequest{}
+}
+
+func assertPrivateKeyIntrospectionRequest(t *testing.T, got privateKeyIntrospectionRequest) {
+	t.Helper()
+
+	if got.authorization != "" {
+		t.Fatalf("Authorization header = %q, want empty", got.authorization)
+	}
+
+	if got.clientID != testPrivateKeyIntrospectionClientID {
+		t.Fatalf("client_id = %q, want %q", got.clientID, testPrivateKeyIntrospectionClientID)
+	}
+
+	if got.clientAssertionType != oidcClientAssertionTypeJWT {
+		t.Fatalf("client_assertion_type = %q", got.clientAssertionType)
+	}
+
+	if got.clientAssertion == "" {
+		t.Fatal("client_assertion must be set")
+	}
+}
+
+func assertPrivateKeyClientAssertion(t *testing.T, assertion, audience string, publicKey *rsa.PublicKey) {
+	t.Helper()
+
+	claims := jwt.MapClaims{}
+
+	parsed, err := jwt.ParseWithClaims(assertion, claims, func(_ *jwt.Token) (any, error) {
+		return publicKey, nil
+	})
+	if err != nil {
+		t.Fatalf("parse client_assertion: %v", err)
+	}
+
+	if !parsed.Valid {
+		t.Fatal("client_assertion is not valid")
+	}
+
+	if parsed.Method.Alg() != jwt.SigningMethodRS256.Alg() {
+		t.Fatalf("client_assertion alg = %q, want RS256", parsed.Method.Alg())
+	}
+
+	if claims["iss"] != testPrivateKeyIntrospectionClientID || claims["sub"] != testPrivateKeyIntrospectionClientID {
+		t.Fatalf("client_assertion iss/sub = %v/%v, want %s", claims["iss"], claims["sub"], testPrivateKeyIntrospectionClientID)
+	}
+
+	if claims["aud"] != audience {
+		t.Fatalf("client_assertion aud = %v, want %s", claims["aud"], audience)
+	}
+
+	if claims["jti"] == "" {
+		t.Fatal("client_assertion jti must be set")
+	}
+}
+
+func writeRSAPrivateKeyFile(t *testing.T, key *rsa.PrivateKey) string {
+	t.Helper()
+
+	keyFile := t.TempDir() + "/client.key"
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  testRSAPrivateKeyBlock,
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("write private key: %v", err)
+	}
+
+	return keyFile
 }
 
 func TestNauthilusSASLAuthenticatorMissingConfig(t *testing.T) {

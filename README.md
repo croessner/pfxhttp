@@ -405,6 +405,9 @@ dovecot_sasl:
       configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
       client_id: roundcube
       client_secret: introspection-secret
+      # OR private_key_file for private_key_jwt:
+      # private_key_file: /etc/pfxhttp/introspection-client.pem
+      # auth_method: private_key_jwt
       scopes:
         - "introspect"
       validation: introspection
@@ -672,7 +675,7 @@ When using TLS with a custom `root_ca`, the CA certificate file is loaded **befo
 Similarly, if `cert` and `key` are configured for client TLS certificates, these files should also be present inside the chroot for reload compatibility.
 
 **OIDC private key files**
-If `private_key_file` is configured for `private_key_jwt` authentication, the key file is read at token fetch time (not at startup). After chroot, the path must be accessible inside the jail.
+If `private_key_file` is configured for `private_key_jwt` authentication, the key file is read when token or introspection requests are prepared (not at startup). After chroot, the path must be accessible inside the jail.
 
 **Example chroot directory layout**
 
@@ -1027,6 +1030,10 @@ The following optional fields fine-tune OIDC behavior. Defaults are chosen for m
   - Else use `client_secret_basic` when `client_secret` is set
   - Else fall back to `none` (send only `client_id`)
 
+- `private_key_file`: PEM-encoded RSA, ECDSA, or Ed25519 private key used by `private_key_jwt`.
+  For `backend_oidc_auth`, the client assertion audience is the discovered `token_endpoint`.
+  For `sasl_oidc_auth` introspection, the audience is the discovered `introspection_endpoint`.
+
 - `sasl_oidc_auth.scopes`: Optional list of scopes to send as a space-separated `scope` parameter to the introspection endpoint. Only needed if your provider requires it for introspection access.
 
 - `sasl_oidc_auth.validation`: How SASL OAuth tokens are validated.
@@ -1059,6 +1066,8 @@ socket_maps:
       configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
       client_id: "roundcube"
       client_secret: "introspection-secret"
+      # OR private_key_file: "/etc/pfxhttp/introspection-client.pem"
+      # auth_method: private_key_jwt
       validation: auto  # or: introspection | jwks
       jwks_cache_ttl: 5m
       # Use a custom claim/field as the account name:
@@ -1069,5 +1078,5 @@ Notes:
 - HTTP requests to the token and introspection endpoints now include `Accept: application/json`.
 - Request bodies are built once and never rewritten after `http.NewRequest`, ensuring correct `Content-Length` handling.
 - For target requests with `backend_oidc_auth`, any pre-existing `Authorization` header (e.g., set via `custom_headers`) is explicitly removed and replaced with `Authorization: Bearer <token>`.
-- For introspection requests with `sasl_oidc_auth`, any `Authorization` header is explicitly cleared before applying the selected client authentication (`client_secret_basic` or `client_secret_post`).
+- For introspection requests with `sasl_oidc_auth`, any `Authorization` header is explicitly cleared before applying the selected client authentication (`client_secret_basic`, `client_secret_post`, or `private_key_jwt`).
 - JWKS-based validation supports RSA, EC (P-256/384/521), and Ed25519 keys from the provider’s `jwks_uri`.

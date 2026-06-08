@@ -167,6 +167,15 @@ dovecot_sasl:
     # /api/v1/auth/json; a payload entry has no effect here.
     # Optional exact list of advertised SASL mechanisms. If unset, pfxhttp advertises
     # PLAIN and LOGIN, plus XOAUTH2/OAUTHBEARER when sasl_oidc_auth.enabled is true.
+    # sasl_oidc_auth:
+    #   enabled: true
+    #   configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
+    #   client_id: pfxhttp
+    #   # Use either client_secret or private_key_file for introspection client auth.
+    #   # client_secret: introspection-secret
+    #   # private_key_file: /etc/pfxhttp/introspection-client.pem
+    #   # auth_method: private_key_jwt
+    #   validation: introspection
     mechanisms:
       - PLAIN
       # - LOGIN

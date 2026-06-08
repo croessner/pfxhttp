@@ -53,7 +53,33 @@ const (
 	oidcAuthMethodClientSecretPost  = "client_secret_post"
 	oidcAuthMethodNone              = "none"
 	oidcAuthMethodPrivateKeyJWT     = "private_key_jwt"
+	oidcClientAssertionTypeJWT      = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 )
+
+type oidcEndpointAuth struct {
+	ClientID       string
+	ClientSecret   string
+	PrivateKeyFile string
+	AuthMethod     string
+}
+
+func backendOIDCEndpointAuth(auth BackendOIDCAuth) oidcEndpointAuth {
+	return oidcEndpointAuth{
+		ClientID:       auth.ClientID,
+		ClientSecret:   auth.ClientSecret,
+		PrivateKeyFile: auth.PrivateKeyFile,
+		AuthMethod:     auth.AuthMethod,
+	}
+}
+
+func saslOIDCEndpointAuth(auth SASLOIDCAuth) oidcEndpointAuth {
+	return oidcEndpointAuth{
+		ClientID:       auth.ClientID,
+		ClientSecret:   auth.ClientSecret,
+		PrivateKeyFile: auth.PrivateKeyFile,
+		AuthMethod:     auth.AuthMethod,
+	}
+}
 
 // OIDCManager handles fetching and caching of OIDC tokens
 type OIDCManager struct {
@@ -328,11 +354,20 @@ func (m *OIDCManager) prepareTokenRequestData(ctx context.Context, auth BackendO
 		data.Set("scope", strings.Join(auth.Scopes, " "))
 	}
 
+	authMethod, err := m.applyEndpointClientAuth(ctx, data, backendOIDCEndpointAuth(auth), tokenEndpoint)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return data, authMethod, nil
+}
+
+func (m *OIDCManager) applyEndpointClientAuth(ctx context.Context, data url.Values, auth oidcEndpointAuth, audience string) (string, error) {
 	authMethod := auth.AuthMethod
 	switch authMethod {
 	case oidcAuthMethodPrivateKeyJWT:
-		if err := m.addClientAssertion(ctx, data, auth, tokenEndpoint); err != nil {
-			return nil, "", err
+		if err := m.addClientAssertion(ctx, data, auth, audience); err != nil {
+			return "", err
 		}
 	case oidcAuthMethodClientSecretPost:
 		data.Set("client_id", auth.ClientID)
@@ -342,21 +377,21 @@ func (m *OIDCManager) prepareTokenRequestData(ctx context.Context, auth BackendO
 	case oidcAuthMethodNone:
 		addClientID(data, auth.ClientID)
 	default:
-		method, err := m.applyDefaultTokenAuth(ctx, data, auth, tokenEndpoint)
+		method, err := m.applyDefaultEndpointClientAuth(ctx, data, auth, audience)
 		if err != nil {
-			return nil, "", err
+			return "", err
 		}
 
 		authMethod = method
 	}
 
-	return data, authMethod, nil
+	return authMethod, nil
 }
 
-func (m *OIDCManager) applyDefaultTokenAuth(ctx context.Context, data url.Values, auth BackendOIDCAuth, tokenEndpoint string) (string, error) {
+func (m *OIDCManager) applyDefaultEndpointClientAuth(ctx context.Context, data url.Values, auth oidcEndpointAuth, audience string) (string, error) {
 	switch {
 	case auth.PrivateKeyFile != "":
-		if err := m.addClientAssertion(ctx, data, auth, tokenEndpoint); err != nil {
+		if err := m.addClientAssertion(ctx, data, auth, audience); err != nil {
 			return "", err
 		}
 
@@ -372,14 +407,18 @@ func (m *OIDCManager) applyDefaultTokenAuth(ctx context.Context, data url.Values
 	}
 }
 
-func (m *OIDCManager) addClientAssertion(ctx context.Context, data url.Values, auth BackendOIDCAuth, tokenEndpoint string) error {
-	assertion, err := m.createAssertion(ctx, auth.ClientID, tokenEndpoint, auth.PrivateKeyFile)
+func (m *OIDCManager) addClientAssertion(ctx context.Context, data url.Values, auth oidcEndpointAuth, audience string) error {
+	if auth.PrivateKeyFile == "" {
+		return errors.New("private_key_file is required for private_key_jwt")
+	}
+
+	assertion, err := m.createAssertion(ctx, auth.ClientID, audience, auth.PrivateKeyFile)
 	if err != nil {
 		return fmt.Errorf("failed to create assertion: %w", err)
 	}
 
 	data.Set("client_id", auth.ClientID)
-	data.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+	data.Set("client_assertion_type", oidcClientAssertionTypeJWT)
 	data.Set("client_assertion", assertion)
 
 	return nil
@@ -391,7 +430,7 @@ func addClientID(data url.Values, clientID string) {
 	}
 }
 
-func (m *OIDCManager) createAssertion(ctx context.Context, clientID, tokenEndpoint, keyFile string) (assertion string, err error) {
+func (m *OIDCManager) createAssertion(ctx context.Context, clientID, audience, keyFile string) (assertion string, err error) {
 	_, spanObs, span := startInternalSpanFromContext(ctx,
 		"OIDC client assertion",
 		attribute.String("pfxhttp.component", componentOIDC),
@@ -427,7 +466,7 @@ func (m *OIDCManager) createAssertion(ctx context.Context, clientID, tokenEndpoi
 	claims := jwt.MapClaims{
 		"iss": clientID,
 		"sub": clientID,
-		"aud": tokenEndpoint,
+		"aud": audience,
 		"exp": now.Add(5 * time.Minute).Unix(),
 		"iat": now.Unix(),
 		"jti": fmt.Sprintf("%d", now.UnixNano()),

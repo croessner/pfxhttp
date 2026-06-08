@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -117,6 +118,49 @@ func TestObservabilityPreservesExplicitZeroSampleRatio(t *testing.T) {
 
 	if err := validateObservabilityConfig(cfg); err != nil {
 		t.Fatalf("validateObservabilityConfig() error = %v", err)
+	}
+}
+
+func TestSASLOIDCAuthDefaultsPreferPrivateKeyJWT(t *testing.T) {
+	const testDovecotSASLEntry = "smtp_auth"
+
+	keyFile := t.TempDir() + "/client.key"
+	if err := os.WriteFile(keyFile, []byte("test-key"), 0o600); err != nil {
+		t.Fatalf("write private key fixture: %v", err)
+	}
+
+	cfg := &Config{
+		Server: Server{
+			Listen: []Listen{
+				{
+					Kind:    componentDovecotSASL,
+					Type:    "tcp",
+					Address: "127.0.0.1",
+					Port:    34000,
+				},
+			},
+		},
+		DovecotSASL: map[string]Request{
+			testDovecotSASLEntry: {
+				Target:     testDovecotTargetURL,
+				Mechanisms: []string{saslMechanismXOAuth2},
+				SASLOIDCAuth: SASLOIDCAuth{
+					Enabled:          true,
+					ConfigurationURI: testIDPConfigURI,
+					ClientID:         testPfxhttpClientID,
+					PrivateKeyFile:   keyFile,
+				},
+			},
+		},
+	}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	got := cfg.DovecotSASL[testDovecotSASLEntry].SASLOIDCAuth.AuthMethod
+	if got != oidcAuthMethodPrivateKeyJWT {
+		t.Fatalf("SASL OIDC auth_method = %q, want %q", got, oidcAuthMethodPrivateKeyJWT)
 	}
 }
 

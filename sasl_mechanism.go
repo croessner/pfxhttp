@@ -724,24 +724,17 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		data.Set("client_id", req.ClientID)
 	}
 
-	// Decide authentication method
-	authMethod := settings.SASLOIDCAuth.AuthMethod
-	switch authMethod {
-	case "client_secret_post":
-		data.Set("client_id", settings.SASLOIDCAuth.ClientID)
-		data.Set("client_secret", settings.SASLOIDCAuth.ClientSecret)
-	case "client_secret_basic":
-		// handled after request creation via SetBasicAuth
-	case "none":
-		if settings.SASLOIDCAuth.ClientID != "" {
-			data.Set("client_id", settings.SASLOIDCAuth.ClientID)
+	authMethod, err := a.oidcManager.applyEndpointClientAuth(ctx, data, saslOIDCEndpointAuth(settings.SASLOIDCAuth), introspectionEndpoint)
+	if err != nil {
+		if logger != nil {
+			logger.Error("Failed to prepare introspection client authentication", "error", err)
 		}
-	default:
-		if settings.SASLOIDCAuth.ClientSecret != "" {
-			authMethod = "client_secret_basic"
-		} else if settings.SASLOIDCAuth.ClientID != "" {
-			data.Set("client_id", settings.SASLOIDCAuth.ClientID)
-		}
+
+		return &SASLAuthResult{
+			Success:   false,
+			Reason:    "introspection client authentication failed",
+			Temporary: true,
+		}, nil
 	}
 
 	ctx = ContextWithBackendOperation(ctx, componentOIDC, "introspection")
@@ -753,7 +746,8 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	httpReq.Header.Set("Accept", "application/json")
 	// Ensure no conflicting Authorization header is present
 	httpReq.Header.Del("Authorization")
-	if authMethod == "client_secret_basic" {
+
+	if authMethod == oidcAuthMethodClientSecretBasic {
 		httpReq.SetBasicAuth(settings.SASLOIDCAuth.ClientID, settings.SASLOIDCAuth.ClientSecret)
 	}
 

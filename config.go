@@ -104,10 +104,11 @@ type SASLOIDCAuth struct {
 	ConfigurationURI string   `mapstructure:"configuration_uri" validate:"required_if=Enabled true,http_url"`
 	ClientID         string   `mapstructure:"client_id" validate:"required_if=Enabled true"`
 	ClientSecret     string   `mapstructure:"client_secret"`
+	PrivateKeyFile   string   `mapstructure:"private_key_file" validate:"omitempty,file"`
 	Scopes           []string `mapstructure:"scopes"`
 	// AuthMethod controls how the client authenticates to token/introspection endpoints.
-	// Values: auto, client_secret_basic, client_secret_post, none
-	AuthMethod string `mapstructure:"auth_method" validate:"omitempty,oneof=auto client_secret_basic client_secret_post none"`
+	// Values: auto, client_secret_basic, client_secret_post, private_key_jwt, none
+	AuthMethod string `mapstructure:"auth_method" validate:"omitempty,oneof=auto client_secret_basic client_secret_post private_key_jwt none"`
 	// Validation controls how incoming OAuth tokens are validated for SASL.
 	// Values: introspection, jwks, auto
 	Validation   string        `mapstructure:"validation" validate:"omitempty,oneof=introspection jwks auto"`
@@ -764,7 +765,9 @@ func (cfg *Config) HandleConfig() error {
 		}
 		// auth_method defaulting
 		if r.SASLOIDCAuth.AuthMethod == "" || r.SASLOIDCAuth.AuthMethod == "auto" {
-			if r.SASLOIDCAuth.ClientSecret != "" {
+			if r.SASLOIDCAuth.PrivateKeyFile != "" {
+				r.SASLOIDCAuth.AuthMethod = "private_key_jwt"
+			} else if r.SASLOIDCAuth.ClientSecret != "" {
 				r.SASLOIDCAuth.AuthMethod = "client_secret_basic"
 			} else {
 				r.SASLOIDCAuth.AuthMethod = "none"

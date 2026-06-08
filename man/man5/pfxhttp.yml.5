@@ -122,7 +122,7 @@ template maps the instance name to both \fBFileDescriptorName\fP and
 .IP
 \fBTLS certificates:\fP The \fBroot_ca\fP file is loaded before the chroot. However, if the HTTP client is re-initialized during a SIGHUP reload, the file must be accessible inside the chroot (e.g., \fB/var/lib/pfxhttp/etc/ssl/certs/ca-bundle.crt\fP). It is recommended to always place CA files inside the chroot. The same applies to \fBcert\fP and \fBkey\fP files.
 .IP
-\fBOIDC private key files:\fP If \fBprivate_key_file\fP is configured for \fBprivate_key_jwt\fP authentication, the key file is read at token fetch time (not at startup). After chroot, the path must be accessible inside the jail.
+\fBOIDC private key files:\fP If \fBprivate_key_file\fP is configured for \fBprivate_key_jwt\fP authentication, the key file is read when token or introspection requests are prepared (not at startup). After chroot, the path must be accessible inside the jail.
 
 .TP
 .B listen
@@ -610,6 +610,28 @@ dovecot_sasl:
       - PLAIN
       - XOAUTH2
       - OAUTHBEARER
+.fi
+.RE
+
+.TP
+.B sasl_oidc_auth
+Configures validation of incoming \fBXOAUTH2\fP and \fBOAUTHBEARER\fP bearer tokens.
+The \fBvalidation\fP mode is \fBintrospection\fP, \fBjwks\fP, or \fBauto\fP. Introspection
+client authentication supports \fBclient_secret_basic\fP, \fBclient_secret_post\fP,
+\fBprivate_key_jwt\fP, and \fBnone\fP. When \fBauth_method\fP is omitted or set to
+\fBauto\fP, \fBprivate_key_jwt\fP is selected when \fBprivate_key_file\fP is set,
+otherwise \fBclient_secret_basic\fP is selected when \fBclient_secret\fP is set.
+.RS
+.nf
+dovecot_sasl:
+  smtp_auth:
+    sasl_oidc_auth:
+      enabled: true
+      configuration_uri: https://idp.example.org/.well-known/openid-configuration
+      client_id: pfxhttp
+      private_key_file: /etc/pfxhttp/introspection-client.pem
+      auth_method: private_key_jwt
+      validation: introspection
 .fi
 .RE
 
