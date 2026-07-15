@@ -52,6 +52,8 @@ require_contains .github/workflows/build-stable.yaml '^[[:space:]]{2}govulncheck
 	"release artifact workflow must define a govulncheck job"
 require_contains .github/workflows/build-stable.yaml '^[[:space:]]{6}- govulncheck$' \
 	"release publication must depend on govulncheck"
+require_contains .github/workflows/build-stable.yaml 'chown -R "\$\{HOST_UID\}:\$\{HOST_GID\}" dist$' \
+	"package build container must return the complete dist tree to the runner user"
 require_contains .github/workflows/docker-stable.yaml '^[[:space:]]{4}needs: govulncheck$' \
 	"Docker publication must depend on govulncheck"
 require_contains .github/workflows/docker-stable-build.yaml 'GO_IMAGE=\$\{golang_image\}@\$\{golang_digest\}' \

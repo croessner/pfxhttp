@@ -177,7 +177,7 @@ jobs:
                 --binary "./${{ env.APP_NAME }}" \
                 --out-dir dist/packages
               ./scripts/verify-linux-package.sh dist/packages/*.deb dist/packages/*.rpm
-              chown -R "${HOST_UID}:${HOST_GID}" dist/packages
+              chown -R "${HOST_UID}:${HOST_GID}" dist
             '
 
       - name: Generate package SBOMs
