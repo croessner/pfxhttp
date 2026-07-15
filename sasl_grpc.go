@@ -18,7 +18,6 @@ import (
 	authv1 "PostfixToHTTP/proto/auth/v1"
 
 	"go.opentelemetry.io/otel/attribute"
-	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -110,7 +109,7 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 			logger.Error("Failed to obtain gRPC connection",
 				slog.String("entry", a.name),
 				slog.String("address", settings.GRPC.Address),
-				slog.String("error", err.Error()))
+				slog.String("reason", boundedErrorKind(err)))
 		}
 
 		return &SASLAuthResult{Success: false, Reason: "grpc backend unavailable", Temporary: true}, nil
@@ -130,7 +129,7 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 	metadataCtx, err = a.attachOutgoingMetadata(metadataCtx, settings, logger)
 	finishObservedSpan(metadataSpanObs, metadataSpan, err)
 	if err != nil {
-		return &SASLAuthResult{Success: false, Reason: err.Error(), Temporary: true}, nil
+		return &SASLAuthResult{Success: false, Reason: "grpc metadata unavailable", Temporary: true}, nil
 	}
 
 	if metadataSpan != nil {
@@ -151,7 +150,6 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 	if logger != nil {
 		logger.Debug("Outgoing Nauthilus gRPC Authenticate request",
 			slog.String("address", settings.GRPC.Address),
-			slog.String("username", grpcReq.GetUsername()),
 			slog.String("protocol", grpcReq.GetProtocol()),
 			slog.String("method", grpcReq.GetMethod()))
 	}
@@ -188,7 +186,6 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 
 		if obs != nil {
 			obs.RecordSpanError(span, err)
-			span.SetStatus(otelcodes.Error, err.Error())
 			obs.ObserveBackendGRPCRequest(authCtx, componentDovecotSASL, a.name, "Authenticate", grpcStatus, grpcResult, time.Since(grpcStart))
 		}
 
@@ -426,21 +423,20 @@ func classifyGRPCError(err error, logger *slog.Logger) *SASLAuthResult {
 
 	if logger != nil {
 		logger.Warn("gRPC AuthService call failed",
-			slog.String("code", st.Code().String()),
-			slog.String("message", st.Message()))
+			slog.String("code", st.Code().String()))
 	}
 
 	switch st.Code() {
 	case codes.Unauthenticated, codes.PermissionDenied:
 		// caller credentials are wrong: tempfail so admins get an alert
-		return &SASLAuthResult{Success: false, Reason: "grpc caller authorization rejected: " + st.Message(), Temporary: true}
+		return &SASLAuthResult{Success: false, Reason: "grpc caller authorization rejected", Temporary: true}
 	case codes.Unavailable, codes.DeadlineExceeded, codes.Aborted, codes.ResourceExhausted:
 		return &SASLAuthResult{Success: false, Reason: "grpc backend unavailable", Temporary: true}
 	case codes.Canceled:
 		return &SASLAuthResult{Success: false, Reason: "grpc request canceled", Temporary: true}
 	case codes.InvalidArgument:
-		return &SASLAuthResult{Success: false, Reason: "invalid request: " + st.Message()}
+		return &SASLAuthResult{Success: false, Reason: "invalid request"}
 	default:
-		return &SASLAuthResult{Success: false, Reason: st.Message(), Temporary: true}
+		return &SASLAuthResult{Success: false, Reason: "grpc backend failure", Temporary: true}
 	}
 }

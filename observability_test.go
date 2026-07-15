@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -9,7 +10,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -17,11 +20,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
@@ -39,6 +46,8 @@ const (
 	testTLS13Version       = "1.3"
 	testMetricsLocalhost   = "localhost"
 	testRSAPrivateKeyBlock = "RSA PRIVATE KEY"
+	testSocketMapLabel     = "SocketMap"
+	testPartialPolicyFrame = "request=smtpd_access_policy\n"
 )
 
 type recordedSpan struct {
@@ -47,6 +56,10 @@ type recordedSpan struct {
 	spanID  oteltrace.SpanID
 	parent  oteltrace.SpanContext
 	kind    oteltrace.SpanKind
+	start   time.Time
+	end     time.Time
+	attrs   []attribute.KeyValue
+	status  string
 }
 
 type spanRecorder struct {
@@ -68,6 +81,10 @@ func (r *spanRecorder) OnEnd(span sdktrace.ReadOnlySpan) {
 		spanID:  span.SpanContext().SpanID(),
 		parent:  span.Parent(),
 		kind:    span.SpanKind(),
+		start:   span.StartTime(),
+		end:     span.EndTime(),
+		attrs:   append([]attribute.KeyValue(nil), span.Attributes()...),
+		status:  span.Status().Description,
 	})
 }
 
@@ -111,6 +128,13 @@ func (r *spanRecorder) countSpans(name string) int {
 	return count
 }
 
+func (r *spanRecorder) snapshot() []recordedSpan {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]recordedSpan(nil), r.spans...)
+}
+
 func assertChildSpan(t *testing.T, recorder *spanRecorder, parent recordedSpan, name string) recordedSpan {
 	t.Helper()
 
@@ -130,6 +154,16 @@ func assertChildSpan(t *testing.T, recorder *spanRecorder, parent recordedSpan, 
 	return child
 }
 
+func assertSpanOmitsAttribute(t *testing.T, span recordedSpan, key string) {
+	t.Helper()
+
+	for _, attr := range span.attrs {
+		if string(attr.Key) == key {
+			t.Fatalf("span %q contains forbidden attribute %q", span.name, key)
+		}
+	}
+}
+
 // newTraceTestObservability returns a runtime backed by an in-memory span recorder.
 func newTraceTestObservability(t *testing.T) (*Observability, *spanRecorder) {
 	t.Helper()
@@ -147,6 +181,48 @@ func newTraceTestObservability(t *testing.T) (*Observability, *spanRecorder) {
 	return newTraceTestObservabilityWithProvider(provider), recorder
 }
 
+func newPrometheusTestObservability(t *testing.T) *Observability {
+	t.Helper()
+
+	obs, err := NewObservability(t.Context(), ObservabilityConfig{PrometheusEnabled: true}, "test-version", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("NewObservability() error = %v", err)
+	}
+
+	return obs
+}
+
+func waitForMetricValue(t *testing.T, collector prometheus.Collector, want float64) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := testutil.ToFloat64(collector); got == want {
+			return
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	t.Fatalf("metric value = %v, want %v", testutil.ToFloat64(collector), want)
+}
+
+func histogramSampleCount(t *testing.T, observer prometheus.Observer) uint64 {
+	t.Helper()
+
+	metricValue, ok := observer.(prometheus.Metric)
+	if !ok {
+		t.Fatalf("histogram observer type = %T, want prometheus.Metric", observer)
+	}
+
+	metric := &dto.Metric{}
+	if err := metricValue.Write(metric); err != nil {
+		t.Fatalf("write histogram metric: %v", err)
+	}
+
+	return metric.GetHistogram().GetSampleCount()
+}
+
 func TestObservabilityRecordsApplicationRequestMetric(t *testing.T) {
 	obs, err := NewObservability(t.Context(), ObservabilityConfig{
 		PrometheusEnabled:        true,
@@ -161,6 +237,249 @@ func TestObservabilityRecordsApplicationRequestMetric(t *testing.T) {
 	got := testutil.ToFloat64(obs.metrics.applicationRequests.WithLabelValues(componentSocketMap, testMapName, testListener, outcomeOK))
 	if got != 1 {
 		t.Fatalf("applicationRequests = %v, want 1", got)
+	}
+}
+
+func TestProtocolConnectionStateMetricsSeparateIdleAndPartial(t *testing.T) {
+	obs := newPrometheusTestObservability(t)
+	serverConn, clientConn := net.Pipe()
+
+	t.Cleanup(func() { _ = serverConn.Close() })
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	reader := newSocketMapReader(serverConn, socketMapFramingLimits{
+		partialTimeout:  time.Second,
+		maxRequestBytes: 16,
+		maxLengthDigits: 2,
+	})
+	reader.SetStateObserver(func(state string, delta int64) {
+		obs.ObserveListenerState(t.Context(), componentSocketMap, testListener, state, delta)
+	})
+
+	result := make(chan error, 1)
+
+	go func() {
+		_, err := reader.Read(t.Context())
+		result <- err
+	}()
+
+	waitForMetricValue(t, obs.metrics.listenerState.WithLabelValues(componentSocketMap, testListener, "idle"), 1)
+
+	if _, err := io.WriteString(clientConn, "4"); err != nil {
+		t.Fatalf("write first frame byte: %v", err)
+	}
+
+	waitForMetricValue(t, obs.metrics.listenerState.WithLabelValues(componentSocketMap, testListener, "idle"), 0)
+	waitForMetricValue(t, obs.metrics.listenerState.WithLabelValues(componentSocketMap, testListener, "partial"), 1)
+
+	if _, err := io.WriteString(clientConn, ":test,"); err != nil {
+		t.Fatalf("finish frame: %v", err)
+	}
+
+	if err := <-result; err != nil {
+		t.Fatalf("read complete frame: %v", err)
+	}
+
+	waitForMetricValue(t, obs.metrics.listenerState.WithLabelValues(componentSocketMap, testListener, "partial"), 0)
+}
+
+func TestRequestLimiterMetricsRecoverAfterQueuedWork(t *testing.T) {
+	obs := newPrometheusTestObservability(t)
+	limiter := NewRequestLimiter(t.Context(), 1, 1, time.Second)
+	limiter.SetObserver(func(event requestLimiterEvent) {
+		obs.ObserveRequestLimiter(t.Context(), componentSocketMap, testListener, event)
+	})
+
+	first, _ := limiter.Acquire(t.Context())
+	second := make(chan *RequestPermit, 1)
+
+	go func() {
+		permit, _ := limiter.Acquire(t.Context())
+		second <- permit
+	}()
+
+	waitForLimiterSnapshot(t, limiter, 1, 1)
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(componentSocketMap, testListener, "inflight"), 1)
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(componentSocketMap, testListener, "queued"), 1)
+
+	first.Release()
+	(<-second).Release()
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(componentSocketMap, testListener, "inflight"), 0)
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(componentSocketMap, testListener, "queued"), 0)
+
+	if got := testutil.ToFloat64(obs.metrics.requestAdmissions.WithLabelValues(componentSocketMap, testListener, string(requestQueued))); got != 1 {
+		t.Fatalf("queued admission counter = %v, want 1", got)
+	}
+
+	queueWait := obs.metrics.requestQueueWait.WithLabelValues(componentSocketMap, testListener, string(requestQueued))
+	if got := histogramSampleCount(t, queueWait); got != 1 {
+		t.Fatalf("queue wait samples = %d, want 1", got)
+	}
+}
+
+func TestMultiServerStopRecordsOneDrainOutcome(t *testing.T) {
+	obs := newPrometheusTestObservability(t)
+	deps := &Deps{Logger: slog.New(slog.DiscardHandler), Observability: obs}
+	server := NewMultiServer(t.Context(), deps, nil).(*MultiServer)
+	server.kind = listenKindPolicyService
+	server.name = testListener
+
+	server.Stop()
+	server.Stop()
+
+	if got := testutil.ToFloat64(obs.metrics.listenerDrains.WithLabelValues(listenKindPolicyService, testListener, resultOK)); got != 1 {
+		t.Fatalf("successful drain outcomes = %v, want 1", got)
+	}
+}
+
+func TestConfiguredSocketMapNameBoundsUnknownInput(t *testing.T) {
+	const attackerControlledName = "secret-user-supplied-map-name"
+
+	config := &Config{SocketMaps: map[string]Request{testMapName: {}}}
+	if got := configuredSocketMapName(config, attackerControlledName); got != unknownBackendName {
+		t.Fatalf("unknown SocketMap telemetry name = %q, want %q", got, unknownBackendName)
+	}
+
+	if got := configuredSocketMapName(config, testMapName); got != testMapName {
+		t.Fatalf("configured SocketMap telemetry name = %q, want %q", got, testMapName)
+	}
+}
+
+func TestProtocolTelemetryAndLogsOmitRawTrafficValues(t *testing.T) {
+	const (
+		rawKey     = "raw-secret-socketmap-key"
+		rawError   = "raw-secret-backend-error"
+		rawPayload = `{"credential":"raw-secret-password"}`
+	)
+
+	var logOutput bytes.Buffer
+
+	obs, recorder := newTraceTestObservability(t)
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	deps := &Deps{
+		Config: &Config{
+			Server: Server{SockmapMaxReplySize: 1024},
+			SocketMaps: map[string]Request{
+				testMapName: {
+					Target:     lifecycleBackendURL,
+					Payload:    rawPayload,
+					StatusCode: http.StatusOK,
+					ValueField: testValueField,
+				},
+			},
+		},
+		Logger: logger,
+		HTTPClient: newTestHTTPClient(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New(rawError)
+		}),
+		Observability: obs,
+	}
+	server := &MultiServer{
+		name:           testListener,
+		kind:           listenKindSocketMap,
+		deps:           deps,
+		ctx:            ContextWithObservability(t.Context(), obs),
+		limiter:        NewRequestLimiter(t.Context(), 1, 1, time.Second),
+		requestTimeout: time.Second,
+	}
+
+	response := runNetStringHandlerForTest(t, server, testMapName+" "+rawKey)
+	if response.String() != socketMapTemporaryResponse {
+		t.Fatalf("backend failure response = %q, want bounded temporary response", response.String())
+	}
+
+	observedOutput := logOutput.String() + fmt.Sprint(recorder.snapshot())
+	for _, forbidden := range []string{
+		rawKey,
+		rawError,
+		rawPayload,
+		"raw-secret-password",
+		"pipe",
+		"session=",
+		"sub_session=",
+		" error=",
+	} {
+		if strings.Contains(observedOutput, forbidden) {
+			t.Fatalf("telemetry or logs expose forbidden value %q: %s", forbidden, observedOutput)
+		}
+	}
+}
+
+func TestRequestLimiterMetricsRecoverAfterCancellationAndShutdown(t *testing.T) {
+	obs := newPrometheusTestObservability(t)
+	limiter := NewRequestLimiter(context.Background(), 1, 1, time.Second)
+	limiter.SetObserver(func(event requestLimiterEvent) {
+		obs.ObserveRequestLimiter(t.Context(), componentPolicyService, testListener, event)
+	})
+	occupied, _ := limiter.Acquire(context.Background())
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	canceled := make(chan RequestAdmissionOutcome, 1)
+
+	go func() {
+		_, outcome := limiter.Acquire(canceledCtx)
+		canceled <- outcome
+	}()
+
+	waitForLimiterSnapshot(t, limiter, 1, 1)
+	cancel()
+
+	if outcome := <-canceled; outcome != requestCallerCanceled {
+		t.Fatalf("canceled outcome = %q", outcome)
+	}
+
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(componentPolicyService, testListener, "queued"), 0)
+
+	shutdown := make(chan RequestAdmissionOutcome, 1)
+
+	go func() {
+		_, outcome := limiter.Acquire(context.Background())
+		shutdown <- outcome
+	}()
+
+	waitForLimiterSnapshot(t, limiter, 1, 1)
+	limiter.Stop()
+
+	if outcome := <-shutdown; outcome != requestServerShutdown {
+		t.Fatalf("shutdown outcome = %q", outcome)
+	}
+
+	occupied.Release()
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(componentPolicyService, testListener, "queued"), 0)
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(componentPolicyService, testListener, "inflight"), 0)
+}
+
+func TestRequestLimiterFailureCountersUseBoundedOutcomes(t *testing.T) {
+	obs := newPrometheusTestObservability(t)
+	limiter := NewRequestLimiter(t.Context(), 1, 1, 20*time.Millisecond)
+	limiter.SetObserver(func(event requestLimiterEvent) {
+		obs.ObserveRequestLimiter(t.Context(), componentPolicyService, testListener, event)
+	})
+
+	occupied, _ := limiter.Acquire(t.Context())
+	defer occupied.Release()
+
+	timedOut := make(chan RequestAdmissionOutcome, 1)
+
+	go func() {
+		_, outcome := limiter.Acquire(t.Context())
+		timedOut <- outcome
+	}()
+
+	waitForLimiterSnapshot(t, limiter, 1, 1)
+
+	if _, outcome := limiter.Acquire(t.Context()); outcome != requestQueueFull {
+		t.Fatalf("full outcome = %q", outcome)
+	}
+
+	if outcome := <-timedOut; outcome != requestQueueTimeout {
+		t.Fatalf("timeout outcome = %q", outcome)
+	}
+
+	for _, outcome := range []RequestAdmissionOutcome{requestQueueFull, requestQueueTimeout} {
+		if got := testutil.ToFloat64(obs.metrics.requestAdmissions.WithLabelValues(componentPolicyService, testListener, string(outcome))); got != 1 {
+			t.Fatalf("%s counter = %v, want 1", outcome, got)
+		}
 	}
 }
 
@@ -349,9 +668,11 @@ func TestHandleNetStringConnectionRecordsSocketMapProtocolSpans(t *testing.T) {
 		Observability: obs,
 	}
 	server := &MultiServer{
-		name: testListener,
-		deps: deps,
-		ctx:  context.Background(),
+		name:    testListener,
+		kind:    listenKindSocketMap,
+		deps:    deps,
+		ctx:     context.Background(),
+		limiter: NewRequestLimiter(context.Background(), 1, 1, time.Second),
 	}
 
 	response := runNetStringHandlerForTest(t, server, testMapName+" user@example.test")
@@ -365,13 +686,23 @@ func TestHandleNetStringConnectionRecordsSocketMapProtocolSpans(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		socketMapReadSpanName,
 		socketMapDecodeSpanName,
+		requestQueueSpanName,
 		socketMapBackendSpanName,
 		socketMapEncodeSpanName,
 		socketMapWriteSpanName,
 	} {
 		assertChildSpan(t, recorder, parent, name)
+	}
+
+	ordered := []string{socketMapDecodeSpanName, requestQueueSpanName, socketMapBackendSpanName, socketMapEncodeSpanName, socketMapWriteSpanName}
+	for index := 1; index < len(ordered); index++ {
+		previous, _ := recorder.findSpan(ordered[index-1])
+
+		current, _ := recorder.findSpan(ordered[index])
+		if previous.end.After(current.start) {
+			t.Fatalf("span %q ended after %q started", previous.name, current.name)
+		}
 	}
 }
 
@@ -395,7 +726,6 @@ func TestHandlePolicyServiceConnectionRecordsProtocolSpans(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		policyServiceReadSpanName,
 		policyServiceDecodeSpanName,
 		policyServiceBackendSpanName,
 		policyServiceEncodeSpanName,
@@ -405,13 +735,248 @@ func TestHandlePolicyServiceConnectionRecordsProtocolSpans(t *testing.T) {
 	}
 }
 
+func TestIncompleteProtocolFramesDoNotRecordApplicationSpans(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		spanName string
+		handler  func(*MultiServer, net.Conn)
+	}{
+		{
+			name:     "SocketMap idle close",
+			spanName: socketMapSpanName(defaultBackendName),
+			handler:  func(server *MultiServer, conn net.Conn) { server.HandleNetStringConnection(conn) },
+		},
+		{
+			name:     "SocketMap partial frame",
+			payload:  "4:ab",
+			spanName: socketMapSpanName(defaultBackendName),
+			handler:  func(server *MultiServer, conn net.Conn) { server.HandleNetStringConnection(conn) },
+		},
+		{
+			name:     "policy idle close",
+			spanName: policyServiceSpanName(testListener),
+			handler:  func(server *MultiServer, conn net.Conn) { server.HandlePolicyServiceConnection(conn) },
+		},
+		{
+			name:     "policy partial frame",
+			payload:  testPartialPolicyFrame,
+			spanName: policyServiceSpanName(testListener),
+			handler:  func(server *MultiServer, conn net.Conn) { server.HandlePolicyServiceConnection(conn) },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertIncompleteFrameHasNoApplicationSpan(t, test.payload, test.spanName, test.handler)
+		})
+	}
+}
+
+func TestPublicListenerGaugesRecoverAfterClientClose(t *testing.T) {
+	obs := newPrometheusTestObservability(t)
+	deps := newObservedPolicyDeps(t, obs)
+	listener := startObservedServer(t, deps, 2, Listen{
+		Kind: listenKindPolicyService,
+		Name: testListener,
+		Type: listenTypeTCP,
+		Limits: LimitsConfig{
+			MaxInflightRequests: 1,
+			MaxQueuedRequests:   new(1),
+			RequestTimeout:      time.Second,
+		},
+	})
+
+	conn, accepted := dialObservedConnection(t, listener)
+	setLifecycleDeadline(t, conn)
+
+	if _, err := io.WriteString(conn, lifecyclePolicyRequest("192.0.2.40")); err != nil {
+		t.Fatalf("write observed policy request: %v", err)
+	}
+
+	if response := readPolicyResponse(t, bufio.NewReader(conn)); response != "action=DUNNO\n\n" {
+		t.Fatalf("observed policy response = %q, want DUNNO", response)
+	}
+
+	waitForActiveRead(t, accepted)
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close observed policy client: %v", err)
+	}
+
+	waitForMetricValue(t, obs.metrics.listenerActive.WithLabelValues(listenKindPolicyService, testListener), 0)
+	waitForMetricValue(t, obs.metrics.listenerState.WithLabelValues(listenKindPolicyService, testListener, "idle"), 0)
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(listenKindPolicyService, testListener, "inflight"), 0)
+	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(listenKindPolicyService, testListener, "queued"), 0)
+}
+
+func TestDovecotListenerStateTracksPartialCommand(t *testing.T) {
+	obs := newPrometheusTestObservability(t)
+	deps := newLifecycleSASLDeps(t)
+	deps.Observability = obs
+
+	listener := startObservedServer(t, deps, 1, Listen{
+		Kind: listenKindDovecotSASL,
+		Name: concurrencyTestSASL,
+		Type: listenTypeTCP,
+		Limits: LimitsConfig{
+			MaxInflightRequests: 1,
+			MaxQueuedRequests:   new(1),
+			RequestTimeout:      time.Second,
+		},
+	})
+
+	conn, _ := dialObservedConnection(t, listener)
+	_ = completeDovecotHandshakeWithReader(t, conn)
+
+	if _, err := io.WriteString(conn, "AUTH\tpartial"); err != nil {
+		t.Fatalf("write partial Dovecot command: %v", err)
+	}
+
+	partial := obs.metrics.listenerState.WithLabelValues(listenKindDovecotSASL, concurrencyTestSASL, "partial")
+	waitForMetricValue(t, partial, 1)
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close partial Dovecot client: %v", err)
+	}
+
+	waitForMetricValue(t, partial, 0)
+	waitForMetricValue(t, obs.metrics.listenerState.WithLabelValues(listenKindDovecotSASL, concurrencyTestSASL, "idle"), 0)
+}
+
+func TestListenerStartupLogIncludesEffectiveLimits(t *testing.T) {
+	var output bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	deps := &Deps{Logger: logger}
+	server := NewMultiServer(t.Context(), deps, nil)
+
+	listener, err := net.Listen(listenTypeTCP, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for startup log test: %v", err)
+	}
+
+	limits := LimitsConfig{
+		MaxConnections:       7,
+		MaxInflightRequests:  3,
+		MaxQueuedRequests:    new(5),
+		RequestQueueTimeout:  250 * time.Millisecond,
+		RequestTimeout:       2 * time.Second,
+		ResponseWriteReserve: 100 * time.Millisecond,
+	}
+	if err = server.Listen(Listen{Kind: listenKindPolicyService, Name: testListener, Type: listenTypeTCP, Limits: limits}, listener); err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+
+	t.Cleanup(server.Stop)
+
+	for _, expected := range []string{
+		"max_connections=7",
+		"max_inflight_requests=3",
+		"max_queued_requests=5",
+		"request_queue_timeout=250ms",
+		"request_timeout=2s",
+		"response_write_reserve=100ms",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("startup log %q does not contain %q", output.String(), expected)
+		}
+	}
+}
+
+func TestProtocolHandlersReturnAfterIdleEOF(t *testing.T) {
+	server := &MultiServer{
+		name: testListener,
+		deps: &Deps{Logger: slog.New(slog.DiscardHandler)},
+		ctx:  t.Context(),
+	}
+
+	for _, test := range []struct {
+		name    string
+		handler func(net.Conn)
+	}{
+		{name: testSocketMapLabel, handler: server.HandleNetStringConnection},
+		{name: testSocketName, handler: server.HandlePolicyServiceConnection},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conn := &idleEOFConn{}
+			test.handler(conn)
+
+			if conn.reads != 1 {
+				t.Fatalf("idle EOF reads = %d, want 1", conn.reads)
+			}
+		})
+	}
+}
+
+type idleEOFConn struct {
+	reads int
+}
+
+func (c *idleEOFConn) Read([]byte) (int, error) {
+	c.reads++
+
+	return 0, io.EOF
+}
+
+func (*idleEOFConn) Write(buffer []byte) (int, error) { return len(buffer), nil }
+func (*idleEOFConn) Close() error                     { return nil }
+func (*idleEOFConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*idleEOFConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*idleEOFConn) SetDeadline(time.Time) error      { return nil }
+func (*idleEOFConn) SetReadDeadline(time.Time) error  { return nil }
+func (*idleEOFConn) SetWriteDeadline(time.Time) error { return nil }
+
+var _ net.Conn = (*idleEOFConn)(nil)
+
+func assertIncompleteFrameHasNoApplicationSpan(
+	t *testing.T,
+	payload string,
+	spanName string,
+	handler func(*MultiServer, net.Conn),
+) {
+	t.Helper()
+
+	obs, recorder := newTraceTestObservability(t)
+	server := &MultiServer{
+		name: testListener,
+		deps: &Deps{Logger: slog.New(slog.DiscardHandler), Observability: obs},
+		ctx:  t.Context(),
+	}
+	serverConn, clientConn := net.Pipe()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		handler(server, serverConn)
+	}()
+
+	if payload != "" {
+		if _, err := io.WriteString(clientConn, payload); err != nil {
+			t.Fatalf("write partial frame: %v", err)
+		}
+	}
+
+	_ = clientConn.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("protocol handler did not return")
+	}
+
+	if got := recorder.countSpans(spanName); got != 0 {
+		t.Fatalf("application spans = %d, want 0", got)
+	}
+}
+
 func runNetStringHandlerForTest(t *testing.T, server *MultiServer, payload string) NetData {
 	t.Helper()
 
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = clientConn.Close() }()
-
-	server.wg.Add(1)
 
 	done := make(chan struct{})
 	go func() {
@@ -456,8 +1021,6 @@ func runPolicyHandlerForTest(t *testing.T, server *MultiServer, payload string) 
 
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = clientConn.Close() }()
-
-	server.wg.Add(1)
 
 	done := make(chan struct{})
 	go func() {
@@ -565,9 +1128,9 @@ func newObservedPolicyDeps(t *testing.T, obs *Observability) *Deps {
 		PolicyServices: map[string]Request{
 			testListener: {
 				Target:     backend.URL,
-				Payload:    "{{ .Key }}",
+				Payload:    testPolicyPayload,
 				StatusCode: http.StatusOK,
-				ValueField: "action",
+				ValueField: testPolicyActionField,
 			},
 		},
 	}

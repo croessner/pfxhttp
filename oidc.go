@@ -92,6 +92,41 @@ type OIDCManager struct {
 	jwksMu     sync.RWMutex
 }
 
+func lockRWMutexContext(ctx context.Context, mutex *sync.RWMutex) error {
+	return lockRWMutexModeContext(ctx, mutex.TryLock, mutex.Unlock)
+}
+
+func rlockRWMutexContext(ctx context.Context, mutex *sync.RWMutex) error {
+	return lockRWMutexModeContext(ctx, mutex.TryRLock, mutex.RUnlock)
+}
+
+func lockRWMutexModeContext(ctx context.Context, tryLock func() bool, unlock func()) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if tryLock() {
+			if err := ctx.Err(); err != nil {
+				unlock()
+
+				return err
+			}
+
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // NewOIDCManager creates a new OIDCManager with the given HTTP client.
 func NewOIDCManager(httpClient *http.Client) *OIDCManager {
 	return &OIDCManager{
@@ -109,8 +144,6 @@ func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth Ba
 	ctx, spanObs, span := startInternalSpanFromContext(ctx,
 		"OIDC token",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.client_id", auth.ClientID),
-		attribute.String("pfxhttp.oidc.configuration_uri", auth.ConfigurationURI),
 		attribute.String("pfxhttp.oidc.auth_method", oidcAuthMethodLabel(auth.AuthMethod)),
 		attribute.Int("pfxhttp.oidc.scope_count", len(auth.Scopes)),
 	)
@@ -119,7 +152,10 @@ func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth Ba
 	}()
 
 	// Check cache
-	m.mu.RLock()
+	if err := rlockRWMutexContext(ctx, &m.mu); err != nil {
+		return "", err
+	}
+
 	token, ok := m.tokens[cacheKey]
 	m.mu.RUnlock()
 
@@ -135,10 +171,14 @@ func (m *OIDCManager) GetToken(ctx context.Context, logger *slog.Logger, auth Ba
 	_, waitSpanObs, waitSpan := startInternalSpanFromContext(ctx,
 		"OIDC token cache wait",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.client_id", auth.ClientID),
 	)
-	m.mu.Lock()
-	finishObservedSpan(waitSpanObs, waitSpan, nil)
+
+	lockErr := lockRWMutexContext(ctx, &m.mu)
+	finishObservedSpan(waitSpanObs, waitSpan, lockErr)
+
+	if lockErr != nil {
+		return "", lockErr
+	}
 	defer m.mu.Unlock()
 
 	// Double check cache after acquiring lock
@@ -173,13 +213,15 @@ func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (discovery *
 	ctx, spanObs, span := startInternalSpanFromContext(ctx,
 		"OIDC discovery",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.discovery_uri", uri),
 	)
 	defer func() {
 		finishObservedSpan(spanObs, span, err)
 	}()
 
-	m.discMu.RLock()
+	if err := rlockRWMutexContext(ctx, &m.discMu); err != nil {
+		return nil, err
+	}
+
 	disc, ok := m.discovery[uri]
 	m.discMu.RUnlock()
 
@@ -194,10 +236,14 @@ func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (discovery *
 	_, waitSpanObs, waitSpan := startInternalSpanFromContext(ctx,
 		"OIDC discovery cache wait",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.discovery_uri", uri),
 	)
-	m.discMu.Lock()
-	finishObservedSpan(waitSpanObs, waitSpan, nil)
+
+	lockErr := lockRWMutexContext(ctx, &m.discMu)
+	finishObservedSpan(waitSpanObs, waitSpan, lockErr)
+
+	if lockErr != nil {
+		return nil, lockErr
+	}
 	defer m.discMu.Unlock()
 
 	// Double check
@@ -221,7 +267,6 @@ func (m *OIDCManager) getDiscovery(ctx context.Context, uri string) (discovery *
 
 	m.discovery[uri] = d
 	setSpanAttributes(span,
-		attribute.String("pfxhttp.oidc.issuer", d.Issuer),
 		attribute.Bool("pfxhttp.oidc.has_token_endpoint", d.TokenEndpoint != ""),
 		attribute.Bool("pfxhttp.oidc.has_introspection_endpoint", d.IntrospectionEndpoint != ""),
 		attribute.Bool("pfxhttp.oidc.has_jwks_uri", d.JWKSURI != ""),
@@ -243,7 +288,7 @@ func (m *OIDCManager) fetchDiscoveryDocument(ctx context.Context, uri string) (*
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
-			slog.Default().Error("failed to close discovery response body", "error", cerr)
+			slog.Default().Error("failed to close discovery response body", "reason", boundedErrorKind(cerr))
 		}
 	}()
 
@@ -268,7 +313,6 @@ func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (tok
 	ctx, spanObs, span := startInternalSpanFromContext(ctx,
 		"OIDC token fetch",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.client_id", auth.ClientID),
 	)
 	defer func() {
 		finishObservedSpan(spanObs, span, err)
@@ -281,8 +325,6 @@ func (m *OIDCManager) fetchToken(ctx context.Context, auth BackendOIDCAuth) (tok
 	if disc.TokenEndpoint == "" {
 		return nil, errors.New("discovery response missing token_endpoint")
 	}
-
-	setSpanAttributes(span, attribute.String("pfxhttp.oidc.token_endpoint", disc.TokenEndpoint))
 
 	data, authMethod, err := m.prepareTokenRequestData(ctx, auth, disc.TokenEndpoint)
 	if err != nil {
@@ -317,7 +359,7 @@ func (m *OIDCManager) doTokenRequest(ctx context.Context, tokenEndpoint string, 
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
-			slog.Default().Error("failed to close token response body", "error", cerr)
+			slog.Default().Error("failed to close token response body", "reason", boundedErrorKind(cerr))
 		}
 	}()
 
@@ -434,7 +476,6 @@ func (m *OIDCManager) createAssertion(ctx context.Context, clientID, audience, k
 	_, spanObs, span := startInternalSpanFromContext(ctx,
 		"OIDC client assertion",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.client_id", clientID),
 	)
 	defer func() {
 		finishObservedSpan(spanObs, span, err)
@@ -531,14 +572,16 @@ func (m *OIDCManager) getJWKS(ctx context.Context, jwksURI string, ttl time.Dura
 	ctx, spanObs, span := startInternalSpanFromContext(ctx,
 		"OIDC JWKS",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.jwks_uri", jwksURI),
 	)
 	defer func() {
 		finishObservedSpan(spanObs, span, err)
 	}()
 
 	// Check cache
-	m.jwksMu.RLock()
+	if err := rlockRWMutexContext(ctx, &m.jwksMu); err != nil {
+		return JWKS{}, err
+	}
+
 	c, ok := m.jwks[jwksURI]
 	m.jwksMu.RUnlock()
 	if ok && time.Now().Before(c.expiresAt) {
@@ -567,7 +610,7 @@ func (m *OIDCManager) getJWKS(ctx context.Context, jwksURI string, ttl time.Dura
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
-			slog.Default().Error("failed to close JWKS response body", "error", cerr)
+			slog.Default().Error("failed to close JWKS response body", "reason", boundedErrorKind(cerr))
 		}
 	}()
 	if resp.StatusCode != http.StatusOK {
@@ -583,7 +626,10 @@ func (m *OIDCManager) getJWKS(ctx context.Context, jwksURI string, ttl time.Dura
 		return JWKS{}, fmt.Errorf("failed to decode JWKS: %w", err)
 	}
 
-	m.jwksMu.Lock()
+	if err := lockRWMutexContext(ctx, &m.jwksMu); err != nil {
+		return JWKS{}, err
+	}
+
 	m.jwks[jwksURI] = &cachedJWKS{set: fetched, expiresAt: time.Now().Add(ttl)}
 	m.jwksMu.Unlock()
 	setSpanAttributes(span, attribute.Int("pfxhttp.oidc.jwks.keys", len(fetched.Keys)))
@@ -656,7 +702,6 @@ func (m *OIDCManager) VerifyJWTWithJWKS(ctx context.Context, configurationURI, t
 	ctx, spanObs, span := startInternalSpanFromContext(ctx,
 		"OIDC JWT validation",
 		attribute.String("pfxhttp.component", componentOIDC),
-		attribute.String("pfxhttp.oidc.configuration_uri", configurationURI),
 		attribute.String("pfxhttp.oidc.validation", "jwks"),
 	)
 	defer func() {

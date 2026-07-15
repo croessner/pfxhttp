@@ -1,0 +1,12 @@
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+COPY vendor ./vendor
+COPY proto ./proto
+COPY test/e2e/postfix/harness ./test/e2e/postfix/harness
+RUN --network=none go build -mod=vendor -trimpath -o /out/pfxhttp-e2e-harness ./test/e2e/postfix/harness
+
+FROM alpine:3.23
+COPY --from=builder /out/pfxhttp-e2e-harness /usr/local/bin/pfxhttp-e2e-harness
+ENTRYPOINT ["/usr/local/bin/pfxhttp-e2e-harness"]

@@ -14,21 +14,14 @@ import (
 	"strings"
 )
 
-// Helpers to ensure we never log secrets like passwords, tokens or Authorization headers.
-func redactHeadersForLog(h http.Header) map[string][]string {
-	redacted := make(map[string][]string, len(h))
-	for k, vs := range h {
-		low := strings.ToLower(k)
-		copyVals := make([]string, len(vs))
-		copy(copyVals, vs)
-		if low == "authorization" || low == "proxy-authorization" {
-			for i := range copyVals {
-				copyVals[i] = "<redacted>"
-			}
-		}
-		redacted[k] = copyVals
+func logSASLHTTPRequest(logger *slog.Logger, message string, request *http.Request) {
+	if logger == nil || request == nil {
+		return
 	}
-	return redacted
+
+	logger.Debug(message,
+		slog.String("method", request.Method),
+		slog.Int("header_count", len(request.Header)))
 }
 
 func redactJSONForLog(m map[string]string) string {
@@ -549,17 +542,12 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 	if oidcErr != nil {
 		return &SASLAuthResult{
 			Success:   false,
-			Reason:    oidcErr.Error(),
+			Reason:    "backend authentication unavailable",
 			Temporary: true,
 		}, nil
 	}
-	if logger != nil {
-		logger.Debug("Outgoing Nauthilus request",
-			slog.String("method", httpReq.Method),
-			slog.String("url", httpReq.URL.String()),
-			slog.Any("headers", redactHeadersForLog(httpReq.Header)),
-			slog.String("payload", redactJSONForLog(payload)))
-	}
+
+	logSASLHTTPRequest(logger, "Outgoing Nauthilus request", httpReq)
 
 	resp, err := a.httpClient.Do(httpReq)
 	if err != nil {
@@ -647,7 +635,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 			if settings.SASLOIDCAuth.Validation == "jwks" {
 				// Hard fail for explicit jwks mode
 				if logger != nil {
-					logger.Info("JWKS validation failed", "error", err)
+					logger.Info("JWKS validation failed", "reason", boundedErrorKind(err))
 				}
 				return &SASLAuthResult{Success: false, Username: username, Reason: "invalid token"}, nil
 			}
@@ -657,7 +645,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	introspectionEndpoint, err := getIntrospectionEndpoint(ctx, settings.SASLOIDCAuth.ConfigurationURI, a.oidcManager)
 	if err != nil {
 		if logger != nil {
-			logger.Error("Failed to get introspection endpoint", "error", err)
+			logger.Error("Failed to get introspection endpoint", "reason", boundedErrorKind(err))
 		}
 
 		return &SASLAuthResult{
@@ -727,7 +715,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 	authMethod, err := a.oidcManager.applyEndpointClientAuth(ctx, data, saslOIDCEndpointAuth(settings.SASLOIDCAuth), introspectionEndpoint)
 	if err != nil {
 		if logger != nil {
-			logger.Error("Failed to prepare introspection client authentication", "error", err)
+			logger.Error("Failed to prepare introspection client authentication", "reason", boundedErrorKind(err))
 		}
 
 		return &SASLAuthResult{
@@ -751,13 +739,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 		httpReq.SetBasicAuth(settings.SASLOIDCAuth.ClientID, settings.SASLOIDCAuth.ClientSecret)
 	}
 
-	if logger != nil {
-		logger.Debug("Outgoing Nauthilus introspection request",
-			slog.String("method", httpReq.Method),
-			slog.String("url", httpReq.URL.String()),
-			slog.Any("headers", redactHeadersForLog(httpReq.Header)),
-			slog.String("payload", redactFormForLog(data)))
-	}
+	logSASLHTTPRequest(logger, "Outgoing Nauthilus introspection request", httpReq)
 
 	resp, err := a.httpClient.Do(httpReq)
 	if err != nil {
@@ -779,9 +761,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticateToken(ctx context.Context, user
 
 	if logger != nil {
 		logger.Debug("Nauthilus introspection response received",
-			slog.Int("status", resp.StatusCode),
-			slog.Any("headers", resp.Header),
-			slog.String("body", string(bodyBytes)))
+			slog.Int("status", resp.StatusCode))
 	}
 
 	if resp.StatusCode != http.StatusOK {

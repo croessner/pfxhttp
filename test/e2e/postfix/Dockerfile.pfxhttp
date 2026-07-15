@@ -1,0 +1,19 @@
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+COPY vendor ./vendor
+COPY proto ./proto
+COPY *.go ./
+ARG VERSION=e2e
+ENV CGO_ENABLED=0
+RUN --network=none go build -mod=vendor -trimpath \
+    -ldflags "-X main.version=${VERSION}" -o /out/pfxhttp .
+
+FROM alpine:3.23
+WORKDIR /usr/app
+COPY --from=builder /out/pfxhttp /usr/app/pfxhttp
+COPY --from=builder /usr/local/go/lib/time/zoneinfo.zip /zoneinfo.zip
+ENV ZONEINFO=/zoneinfo.zip
+USER 65532:65532
+ENTRYPOINT ["/usr/app/pfxhttp"]

@@ -39,9 +39,34 @@ server:
     enabled: false
     ttl: 1m
 
-  worker_pool:
-    max_workers: 10
-    max_queue: 100
+  limits:
+    max_connections: 1024
+    max_inflight_requests: 32
+    max_queued_requests: 320
+    request_queue_timeout: 2s
+    request_timeout: 4s
+    backend_timeout: 1s
+    response_write_reserve: 500ms
+
+  protocol_limits:
+    socket_map:
+      idle_timeout: 15s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_length_digits: 10
+    policy_service:
+      idle_timeout: 0s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_line_bytes: 65536
+      max_attributes: 256
+    dovecot_sasl:
+      idle_timeout: 0s
+      partial_request_timeout: 30s
+      write_timeout: 10s
+      max_line_bytes: 16384
 
   observability:
     prometheus_enabled: false

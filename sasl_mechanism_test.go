@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -13,11 +14,38 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+func TestSASLHTTPRequestLogOmitsURLAndHeaderValues(t *testing.T) {
+	const secret = "synthetic-secret-value"
+
+	request, err := http.NewRequest(http.MethodPost, "https://user:"+secret+"@example.test/auth?token="+secret, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	request.Header.Set("X-Api-Key", secret)
+
+	var output bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logSASLHTTPRequest(logger, "Outgoing request", request)
+
+	if strings.Contains(output.String(), secret) || strings.Contains(output.String(), "example.test") {
+		t.Fatalf("request log exposes URL or header value: %s", output.String())
+	}
+
+	for _, expected := range []string{"method=POST", "header_count=1"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("request log %q does not contain %q", output.String(), expected)
+		}
+	}
+}
 
 const (
 	testPrivateKeyIntrospectionClientID = "pfxhttp-introspection"

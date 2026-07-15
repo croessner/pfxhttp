@@ -1,4 +1,4 @@
-.TH PFXHTTP.YML 5 "January 2025" "pfxhttp 1.0" "Configuration Files"
+.TH PFXHTTP.YML 5 "July 2026" "pfxhttp" "Configuration Files"
 .SH NAME
 pfxhttp.yml \- Configuration file for pfxhttp, an HTTP Proxy for Postfix
 
@@ -56,16 +56,40 @@ server:
   response_cache:
     enabled: true
     ttl: 1m
-  worker_pool:
-    max_workers: 10
-    max_queue: 100
+  limits:
+    max_connections: 1024
+    max_inflight_requests: 32
+    max_queued_requests: 320
+    request_queue_timeout: 2s
+    request_timeout: 4s
+    backend_timeout: 1s
+    response_write_reserve: 500ms
+  protocol_limits:
+    socket_map:
+      idle_timeout: 15s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_length_digits: 10
+    policy_service:
+      idle_timeout: 0s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_line_bytes: 65536
+      max_attributes: 256
+    dovecot_sasl:
+      idle_timeout: 0s
+      partial_request_timeout: 30s
+      write_timeout: 10s
+      max_line_bytes: 16384
   observability:
     prometheus_enabled: false
     prometheus_address: "127.0.0.1"
     prometheus_port: 9464
     prometheus_path: "/metrics"
     prometheus_runtime_metrics: false
-    # prometheus_http_auth_basic: "metrics:change-me"
+    # prometheus_http_auth_basic: "<username>:<password>"
     prometheus_tls:
       enabled: false
       # cert: "/etc/pfxhttp/metrics.crt"
@@ -155,6 +179,9 @@ Applicable only for \fBunix\fP sockets. Sets the socket's group (groupname or GI
 .IP \[bu] 2
 .B systemd_socket_name:
 Optional. When set, the listener uses the systemd-activated socket whose \fBFileDescriptorName\fP matches this value. When omitted, \fBpfxhttp\fP uses the native listener path and creates the socket itself.
+.IP \[bu] 2
+.B limits, protocol_limits:
+Optional listener-local overrides of the normalized server values. Runtime supervisors and request limiters remain independent per listener even when all values are inherited. Only the protocol block selected by \fBkind\fP affects that listener.
 .RE
 
 .TP
@@ -234,16 +261,56 @@ Time-to-live for cached responses as a Go duration string (e.g., 30s, 1m, 10m). 
 .RE
 
 .TP
-.B worker_pool
-Configures a worker pool to manage concurrent connections and provide back-pressure.
+.B limits
+Separately bounds listener connections and complete requests. Missing listener fields inherit normalized server fields. Missing server fields use safe defaults.
 .RS
 .IP \[bu] 2
-.B max_workers:
-Maximum number of concurrent workers. If not configured in the \fBserver\fP section, it defaults to \fB2 * GOMAXPROCS\fP.
+.B max_connections:
+Maximum admitted client connections. Default: 1024. Range: 1 to 1048576. Zero means unset or inherit, never unlimited.
 .IP \[bu] 2
-.B max_queue:
-Maximum number of connections waiting in the queue. If not configured, it defaults to \fB10 * max_workers\fP.
+.B max_inflight_requests:
+Maximum complete requests executing backend or cache work. Default: twice GOMAXPROCS, at least one. Range: 1 to 1048576. Zero means unset or inherit.
+.IP \[bu] 2
+.B max_queued_requests:
+Maximum complete requests waiting for an execution permit. The default is ten times max_inflight_requests. Range: 0 to 1048576. An explicit zero disables queueing; omission inherits.
+.IP \[bu] 2
+.B request_queue_timeout:
+Maximum queue wait. Default: 2s. Range: 1ms to 1h. It is unused when queueing is disabled.
+.IP \[bu] 2
+.B request_timeout:
+Total decoded-request budget shared by queue, backend work and response reserve. Default: 4s. Range: 1s to 1h.
+.IP \[bu] 2
+.B backend_timeout:
+Total backend attempt budget, including retries. Default: 1s. Range: 1ms to 1h. It cannot extend the surrounding request deadline.
+.IP \[bu] 2
+.B response_write_reserve:
+Time retained for a protocol response after backend cancellation. Default: 500ms. Range: 1ms to 1m.
 .RE
+.IP
+Configuration is rejected unless request_timeout is greater than queue timeout plus backend timeout plus response reserve. The queue term is zero when max_queued_requests is zero. HTTP and gRPC timeouts are additional upper bounds and retries share this same deadline.
+
+.TP
+.B protocol_limits
+Bounds framing memory and connection I/O per protocol. Missing fields inherit; a configured idle_timeout of 0s disables the server-side idle close. Other zero values are unset and defaulted.
+.RS
+.IP \[bu] 2
+.B socket_map:
+Defaults: idle_timeout 15s, partial_request_timeout 10s, write_timeout 10s, max_request_bytes 1048576 and max_length_digits 10. Idle, partial and write timeouts range from 1ms to 1h except idle_timeout also accepts 0s. Maximum request size is 67108864 bytes and the length prefix is limited to ten digits.
+.IP \[bu] 2
+.B policy_service:
+Defaults: idle_timeout 0s, partial_request_timeout 10s, write_timeout 10s, max_request_bytes 1048576, max_line_bytes 65536 and max_attributes 256. Idle, partial and write timeouts use the same 0s/1ms-to-1h rules. Maximum request size is 67108864 bytes, maximum line size is 16777216 bytes and maximum attribute count is 1048576. max_line_bytes must not exceed max_request_bytes.
+.IP \[bu] 2
+.B dovecot_sasl:
+Defaults: idle_timeout 0s, partial_request_timeout 30s, write_timeout 10s and max_line_bytes 16384. Idle, partial and write timeouts use the same 0s/1ms-to-1h rules. The maximum line size is 1048576 bytes.
+.RE
+.IP
+Postfix SocketMap clients normally close idle connections after about ten seconds. Policy connections are reusable; upstream defaults include 300 seconds idle, 1000 seconds TTL and 100 seconds per operation. Inventory endpoint overrides and keep the complete Pfxhttp budget within the actual caller deadline. Size connection admission from Postfix process counts and persistent SASL connections plus restart and burst headroom; size request concurrency from backend capacity.
+
+.TP
+.B worker_pool
+Deprecated compatibility input. When present, Pfxhttp warns at startup and uses max_workers, max_queue and their sum only as defaults for max_inflight_requests, max_queued_requests and max_connections respectively. Explicit new limit fields win. Remove worker_pool after recording and configuring per-listener limits; the mapping does not restore the old connection-as-worker model.
+.IP
+SIGHUP validates the complete file, reloads backend mappings, HTTP, TLS, cache and logging settings and restarts only changed native listeners. Native listener replacement is not rollback-atomic: a bind failure leaves that listener unavailable until configuration is corrected and reloaded or the service is restarted. Adding, removing or changing a systemd-activated listener requires a service restart. run_as_user, run_as_group, chroot and observability endpoint lifecycle are also restart-only. A reload containing a startup-only change is rejected before runtime changes and the current configuration remains active.
 
 .TP
 .B observability
@@ -335,7 +402,7 @@ socket_maps:
       enabled: true
       configuration_uri: "https://your-auth.example.com/.well-known/openid-configuration"
       client_id: "your-client-id"
-      client_secret: "your-client-secret"
+      client_secret: "<set-in-deployment>"
     payload: >
       {
         "key": "{{ .Key }}"
@@ -405,7 +472,7 @@ policy_services:
       enabled: true
       configuration_uri: "https://your-auth.example.com/.well-known/openid-configuration"
       client_id: "your-client-id"
-      client_secret: "your-client-secret"
+      client_secret: "<set-in-deployment>"
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "policy.result"
@@ -560,7 +627,7 @@ socket_maps:
       enabled: true
       configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
       client_id: "your-client-id"
-      client_secret: "your-client-secret"
+      client_secret: "<set-in-deployment>"
 .fi
 
 .SH SEE ALSO
@@ -645,7 +712,7 @@ dovecot_sasl:
     transport: grpc
     mechanisms:
       - PLAIN
-    http_auth_basic: admin:admin-password
+    http_auth_basic: "<username>:<password>"
     default_local_port: "587"
     grpc:
       address: nauthilus.example.org:9444

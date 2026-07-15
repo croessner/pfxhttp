@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -26,6 +29,56 @@ func TestPackagedDefaultConfigIsValidAndConservative(t *testing.T) {
 
 	assertPackagedPolicySocketConfig(t, cfg)
 	assertPackagedConservativeDefaults(t, cfg)
+}
+
+func TestShippedConfigsShareLimitSemanticsAndContainNoCredentials(t *testing.T) {
+	defer viper.Reset()
+
+	load := func(path string) *Config {
+		t.Helper()
+		viper.Reset()
+		viper.SetConfigFile(path)
+
+		if err := viper.ReadInConfig(); err != nil {
+			t.Fatalf("ReadInConfig(%s) error = %v", path, err)
+		}
+
+		cfg := &Config{}
+		if err := cfg.HandleConfig(); err != nil {
+			t.Fatalf("HandleConfig(%s) error = %v", path, err)
+		}
+
+		return cfg
+	}
+
+	demo := load("pfxhttp.yml")
+	packaged := load("packaging/pfxhttp.yml")
+
+	if !reflect.DeepEqual(demo.Server.Limits, packaged.Server.Limits) {
+		t.Fatalf("shipped limit defaults differ: demo=%+v packaged=%+v", demo.Server.Limits, packaged.Server.Limits)
+	}
+
+	if !reflect.DeepEqual(demo.Server.ProtocolLimits, packaged.Server.ProtocolLimits) {
+		t.Fatalf("shipped protocol limits differ: demo=%+v packaged=%+v", demo.Server.ProtocolLimits, packaged.Server.ProtocolLimits)
+	}
+
+	if legacyWorkerPoolConfigured(demo) || legacyWorkerPoolConfigured(packaged) {
+		t.Fatal("shipped configurations must not use deprecated worker_pool input")
+	}
+
+	for _, path := range []string{"pfxhttp.yml", "packaging/pfxhttp.yml"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
+
+		text := string(data)
+		for _, forbidden := range []string{"Authorization: Basic ", "client_secret:", "http_auth_basic:"} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("%s contains credential-shaped example %q", path, forbidden)
+			}
+		}
+	}
 }
 
 func assertPackagedPolicySocketConfig(t *testing.T, cfg *Config) {

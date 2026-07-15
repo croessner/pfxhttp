@@ -23,16 +23,10 @@ server:
       # this FileDescriptorName instead of creating the socket itself.
       # systemd_socket_name: "policy"
 
-    - kind: "policy_service"
-      name: "oidc_policy"
-      type: "tcp"
-      address: "0.0.0.0"
-      port: 23452
-
     - kind: "dovecot_sasl"
       name: "dovecot_sasl"
       type: "tcp"
-      address: "0.0.0.0"
+      address: "127.0.0.1"
       port: 23453
 
   logging:
@@ -49,7 +43,7 @@ server:
 
   tls:
     enabled: true
-    skip_verify: true
+    skip_verify: false
     # root_ca: "/etc/ssl/certs/ca-certificates.crt"
 
   # Default Postfix limit
@@ -59,9 +53,38 @@ server:
     enabled: true
     ttl: 1m
 
-  worker_pool:
-    max_workers: 10
-    max_queue: 100
+  # Connection admission is independent from backend request concurrency.
+  # Listener-local blocks may override any value below.
+  limits:
+    max_connections: 1024
+    max_inflight_requests: 32
+    max_queued_requests: 320
+    request_queue_timeout: 2s
+    request_timeout: 4s
+    backend_timeout: 1s
+    response_write_reserve: 500ms
+
+  protocol_limits:
+    socket_map:
+      idle_timeout: 15s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_length_digits: 10
+    policy_service:
+      # Zero disables the server-side idle close for reusable policy connections.
+      idle_timeout: 0s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_line_bytes: 65536
+      max_attributes: 256
+    dovecot_sasl:
+      # Zero permits persistent Postfix SASL connections until peer close/shutdown.
+      idle_timeout: 0s
+      partial_request_timeout: 30s
+      write_timeout: 10s
+      max_line_bytes: 16384
 
   observability:
     # All observability features are opt-in.
@@ -71,7 +94,7 @@ server:
     prometheus_path: /metrics
     prometheus_runtime_metrics: false
     # Optional incoming Basic auth for the Prometheus endpoint.
-    # prometheus_http_auth_basic: "metrics:change-me"
+    # Configure prometheus_http_auth_basic through a protected deployment input.
     # Optional server-side TLS for the Prometheus endpoint.
     prometheus_tls:
       enabled: false
@@ -86,8 +109,7 @@ server:
     # otel_service_version: ""
     # Required when otel_enabled is true.
     # otel_exporter_otlp_endpoint: http://127.0.0.1:4318
-    # otel_exporter_otlp_headers:
-    #   authorization: "Bearer token"
+    # Configure otel_exporter_otlp_headers through a protected deployment input.
     otel_exporter_otlp_insecure: false
     otel_sample_ratio: 1.0
 
@@ -97,25 +119,6 @@ socket_maps:
     target: https://127.0.0.1:9443/api/v1/custom/postfix/socket_map
     http_request_compression: true
     http_response_compression: true
-    custom_headers:
-      # User 'test', password 'test'
-      - "Authorization: Basic dGVzdDp0ZXN0"
-    payload: >
-      {
-        "key": "{{ .Key }}"
-      }
-    status_code: 200
-    value_field: "demo_value"
-    error_field: "error"
-    no_error_value: "none"
-
-  oidc_demo:
-    target: https://127.0.0.1:9443/api/v1/custom/postfix/socket_map
-    oidc_auth:
-      enabled: true
-      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
-      client_id: admin
-      client_secret: admin-password
     payload: >
       {
         "key": "{{ .Key }}"
@@ -131,22 +134,6 @@ policy_services:
     target: https://127.0.0.1:9443/api/v1/custom/postfix/policy_service
     http_request_compression: false
     http_response_compression: true
-    custom_headers:
-      # User 'test', password 'test'
-      - "Authorization: Basic dGVzdDp0ZXN0"
-    payload: "{{ .Key }}"
-    status_code: 200
-    value_field: "result"
-    error_field: "error"
-    no_error_value: "none"
-
-  oidc_policy:
-    target: https://127.0.0.1:9443/api/v1/custom/postfix/policy_service
-    oidc_auth:
-      enabled: true
-      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
-      client_id: admin
-      client_secret: admin-password
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "result"
@@ -157,12 +144,6 @@ dovecot_sasl:
 
   dovecot_sasl:
     target: https://127.0.0.1:9443/api/v1/auth/json
-    oidc_auth:
-      enabled: true
-      configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
-      client_id: admin
-      client_secret: admin-password
-      # account_claim: "dovecot_account"
     # Note: For dovecot_sasl, the payload is generated internally according to Nauthilus
     # /api/v1/auth/json; a payload entry has no effect here.
     # Optional exact list of advertised SASL mechanisms. If unset, pfxhttp advertises
@@ -171,8 +152,7 @@ dovecot_sasl:
     #   enabled: true
     #   configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
     #   client_id: pfxhttp
-    #   # Use either client_secret or private_key_file for introspection client auth.
-    #   # client_secret: introspection-secret
+    #   # Use protected client_secret input or private_key_file for client auth.
     #   # private_key_file: /etc/pfxhttp/introspection-client.pem
     #   # auth_method: private_key_jwt
     #   validation: introspection
@@ -187,7 +167,6 @@ dovecot_sasl:
     transport: grpc
     mechanisms:
       - PLAIN
-    http_auth_basic: admin:admin-password
     default_local_port: "587"
     grpc:
       address: 127.0.0.1:9444

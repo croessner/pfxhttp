@@ -1,0 +1,67 @@
+services:
+  backend:
+    build:
+      context: ../../..
+      dockerfile: test/e2e/postfix/Dockerfile.harness
+    command: ["backend"]
+    networks: [e2e]
+
+  pfxhttp:
+    build:
+      context: ../../..
+      dockerfile: test/e2e/postfix/Dockerfile.pfxhttp
+      network: none
+    entrypoint: ["/usr/app/pfxhttp"]
+    command: ["--config=/etc/pfxhttp/e2e.yml"]
+    volumes:
+      - ./config/pfxhttp.yml:/etc/pfxhttp/e2e.yml:ro
+    depends_on:
+      - backend
+    networks: [e2e]
+
+  postfix:
+    image: ${PFXHTTP_E2E_POSTFIX_IMAGE:-chrroessner/postfix:latest}
+    hostname: postfix.example.test
+    environment:
+      PFXHTTP_E2E_AUTH_SECRET: ${PFXHTTP_E2E_AUTH_SECRET:?set PFXHTTP_E2E_AUTH_SECRET}
+      POSTFIX_RUNTIME_HOSTNAME: postfix.example.test
+      POSTFIX_RUNTIME_DOMAIN: example.test
+      POSTFIX_RUNTIME_DESTINATIONS: postfix.example.test,example.test,localhost.example.test,localhost
+      POSTFIX_inet_protocols: ipv4
+      POSTFIX_smtpd_delay_reject: "no"
+      POSTFIX_smtpd_reject_unlisted_recipient: "no"
+      POSTFIX_smtpd_relay_restrictions: permit_mynetworks,reject_unauth_destination
+      POSTFIX_smtpd_recipient_restrictions: check_policy_service inet:pfxhttp:23451
+      POSTFIX_smtpd_policy_service_timeout: 5s
+      POSTFIX_smtpd_policy_service_try_limit: "1"
+      POSTFIX_smtpd_policy_service_default_action: 451 4.3.5 Temporary policy failure
+      POSTFIX_smtpd_sasl_auth_enable: "yes"
+      POSTFIX_smtpd_sasl_type: dovecot
+      POSTFIX_smtpd_sasl_path: inet:pfxhttp:23453
+      POSTFIX_smtpd_tls_auth_only: "no"
+      POSTFIX_broken_sasl_auth_clients: "yes"
+    volumes:
+      - ./scripts/postfix-init.sh:/docker-entrypoint-init.d/50-pfxhttp-e2e.sh:ro
+    depends_on:
+      - pfxhttp
+    networks: [e2e]
+
+  probe:
+    build:
+      context: ../../..
+      dockerfile: test/e2e/postfix/Dockerfile.harness
+      network: none
+    entrypoint: ["/usr/local/bin/pfxhttp-e2e-harness", "probe"]
+    volumes:
+      - ${PFXHTTP_E2E_RUNTIME:?set PFXHTTP_E2E_RUNTIME}:/runtime
+    environment:
+      PFXHTTP_E2E_AUTH_SECRET: ${PFXHTTP_E2E_AUTH_SECRET:?set PFXHTTP_E2E_AUTH_SECRET}
+    depends_on:
+      - backend
+      - pfxhttp
+      - postfix
+    networks: [e2e]
+
+networks:
+  e2e:
+    internal: true

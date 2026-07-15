@@ -6,18 +6,18 @@ type NetData interface {
 	// String returns the string representation of the data contained in the implementing type.
 	String() string
 
-	// Length returns the length of the data as a 16-bit unsigned integer.
-	Length() uint16
+	// Length returns the length of the data.
+	Length() int
 
 	// Data retrieves the raw byte slice representing the network data.
 	Data() []byte
 }
 
 // NetString represents a data structure composed of a length-prefixed byte slice for network communication.
-// The length field, stored as a uint16, designates the size of the byte slice data.
+// The length field designates the size of the byte slice data.
 // This type is used to serialize and deserialize structured data in a network-friendly format.
 type NetString struct {
-	length uint16
+	length int
 	data   []byte
 }
 
@@ -26,8 +26,8 @@ func (ns *NetString) String() string {
 	return string(ns.data)
 }
 
-// Length returns the length of the NetString's data as a uint16 value.
-func (ns *NetString) Length() uint16 {
+// Length returns the length of the NetString's data.
+func (ns *NetString) Length() int {
 	return ns.length
 }
 
@@ -42,7 +42,7 @@ var _ NetData = (*NetString)(nil)
 // The length of the data is automatically computed and stored in the length field.
 func NewNetString(data []byte) *NetString {
 	return &NetString{
-		length: uint16(len(data)),
+		length: len(data),
 		data:   data,
 	}
 }
@@ -51,7 +51,7 @@ func NewNetString(data []byte) *NetString {
 // setting its length and byte slice data.
 func NewNetStringFromString(data string) NetData {
 	return &NetString{
-		length: uint16(len(data)),
+		length: len(data),
 		data:   []byte(data),
 	}
 }

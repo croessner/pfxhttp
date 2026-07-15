@@ -374,7 +374,7 @@ func (c *MapClient) SendAndReceiveContext(ctx context.Context) error {
 	_, _, err = addOIDCAuth(req, c.receiver.GetName(), settings.BackendOIDCAuth, c.oidcManager, c.logger)
 	if err != nil {
 		c.sender.SetStatus("TEMP")
-		c.sender.SetData(err.Error())
+		c.sender.SetData("authentication service unavailable")
 
 		return nil
 	}
@@ -409,7 +409,7 @@ func (c *MapClient) SendAndReceiveContext(ctx context.Context) error {
 func (c *MapClient) handleBackendError(err error) {
 	if c.respCache != nil {
 		if entry, ok := c.respCache.Get(c.receiver.GetName(), c.receiver.GetKey()); ok {
-			c.logBackendError("Backend request failed, serving cached response", err)
+			c.logBackendError("Backend request failed, serving cached response")
 			c.sender.SetStatus(entry.Status)
 			c.sender.SetData(entry.Data)
 
@@ -417,7 +417,7 @@ func (c *MapClient) handleBackendError(err error) {
 		}
 	}
 
-	c.logBackendError("Backend request failed, no cache entry", err)
+	c.logBackendError("Backend request failed, no cache entry")
 
 	if errors.Is(err, http.ErrHandlerTimeout) {
 		c.sender.SetStatus("TIMEOUT")
@@ -427,11 +427,11 @@ func (c *MapClient) handleBackendError(err error) {
 	}
 
 	c.sender.SetStatus("TEMP")
-	c.sender.SetData(err.Error())
+	c.sender.SetData("service temporarily unavailable")
 }
 
 // logBackendError writes a socket-map backend error with stable log fields.
-func (c *MapClient) logBackendError(message string, err error) {
+func (c *MapClient) logBackendError(message string) {
 	if c.logger == nil {
 		return
 	}
@@ -439,8 +439,7 @@ func (c *MapClient) logBackendError(message string, err error) {
 	c.logger.Error(message,
 		"component", componentSocketMap,
 		"name", c.receiver.GetName(),
-		"key", c.receiver.GetKey(),
-		"error", err.Error())
+		"result", resultError)
 }
 
 // cacheSuccessfulResponse stores definitive socket-map successes for later backend outages.
@@ -472,7 +471,7 @@ func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 	if request.HTTPResponseCompression && strings.EqualFold(resp.Header.Get("Content-Encoding"), gzipCompressor.Name()) {
 		zr, err := gzipCompressor.Decompress(resp.Body)
 		if err != nil {
-			return errors.New("failed to init gzip reader: " + err.Error())
+			return fmt.Errorf("failed to init gzip reader: %w", err)
 		}
 
 		defer func(zr io.ReadCloser) {
@@ -484,11 +483,11 @@ func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 
 	bodyBytes, err := io.ReadAll(reader)
 	if err != nil {
-		return errors.New("failed to read response body: " + err.Error())
+		return fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if err = json.Unmarshal(bodyBytes, &responseData); err != nil {
-		return errors.New("failed to unmarshal JSON: " + err.Error())
+		return fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
 	if request.ErrorField != "" {
@@ -522,9 +521,16 @@ func (c *MapClient) handleResponse(resp *http.Response, request Request) error {
 			return nil
 		}
 
-		if len(value) > c.config.Server.SockmapMaxReplySize {
+		maxReplySize := c.config.Server.SockmapMaxReplySize
+		if maxReplySize == 0 {
+			maxReplySize = defaultSockmapMaxReplySize
+		}
+
+		if len(value) > maxReplySize {
 			c.sender.SetStatus("PERM")
 			c.sender.SetData(fmt.Sprintf("value too long: %d", len(value)))
+
+			return nil
 		}
 
 		c.sender.SetStatus("OK")
@@ -625,7 +631,7 @@ func (p *PolicyClient) SendAndReceiveContext(ctx context.Context) error {
 	_, _, err = addOIDCAuth(req, p.receiver.GetName(), settings.BackendOIDCAuth, p.oidcManager, p.logger)
 	if err != nil {
 		p.sender.SetStatus("DEFER")
-		p.sender.SetData(err.Error())
+		p.sender.SetData(TempServerProblem)
 
 		return nil
 	}
@@ -660,7 +666,7 @@ func (p *PolicyClient) SendAndReceiveContext(ctx context.Context) error {
 func (p *PolicyClient) handleBackendError(err error) {
 	if p.respCache != nil {
 		if entry, ok := p.respCache.Get(p.receiver.GetName(), p.receiver.GetKey()); ok {
-			p.logBackendError("Backend request failed, serving cached response", err)
+			p.logBackendError("Backend request failed, serving cached response")
 			p.sender.SetStatus(entry.Status)
 			p.sender.SetData(entry.Data)
 
@@ -668,13 +674,13 @@ func (p *PolicyClient) handleBackendError(err error) {
 		}
 	}
 
-	p.logBackendError("Backend request failed, no cache entry", err)
+	p.logBackendError("Backend request failed, no cache entry")
 	p.sender.SetStatus("DEFER")
 	p.sender.SetData(TempServerProblem)
 }
 
 // logBackendError writes a policy backend error with stable log fields.
-func (p *PolicyClient) logBackendError(message string, err error) {
+func (p *PolicyClient) logBackendError(message string) {
 	if p.logger == nil {
 		return
 	}
@@ -682,8 +688,7 @@ func (p *PolicyClient) logBackendError(message string, err error) {
 	p.logger.Error(message,
 		"component", componentPolicyService,
 		"name", p.receiver.GetName(),
-		"key", p.receiver.GetKey(),
-		"error", err.Error())
+		"result", resultError)
 }
 
 // cacheSuccessfulResponse stores definitive policy actions for later backend outages.
@@ -715,7 +720,7 @@ func (p *PolicyClient) handleResponse(resp *http.Response, request Request) erro
 	if request.HTTPResponseCompression && strings.EqualFold(resp.Header.Get("Content-Encoding"), gzipCompressor.Name()) {
 		zr, err := gzipCompressor.Decompress(resp.Body)
 		if err != nil {
-			return errors.New("failed to init gzip reader: " + err.Error())
+			return fmt.Errorf("failed to init gzip reader: %w", err)
 		}
 
 		defer func(zr io.ReadCloser) {
@@ -727,11 +732,11 @@ func (p *PolicyClient) handleResponse(resp *http.Response, request Request) erro
 
 	bodyBytes, err := io.ReadAll(reader)
 	if err != nil {
-		return errors.New("failed to read response body: " + err.Error())
+		return fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if err = json.Unmarshal(bodyBytes, &responseData); err != nil {
-		return errors.New("failed to unmarshal JSON: " + err.Error())
+		return fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
 	if request.ErrorField != "" {

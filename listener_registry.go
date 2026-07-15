@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"reflect"
 	"sync"
 )
 
@@ -65,7 +66,7 @@ func (r *ListenerRegistry) Diff(newListeners []Listen) DiffResult {
 		newCfg, exists := newByKey[key]
 		if !exists {
 			result.Removed = append(result.Removed, key)
-		} else if entry.Config != newCfg {
+		} else if !listenersSemanticallyEqual(entry.Config, newCfg) {
 			result.Changed = append(result.Changed, newCfg)
 		} else {
 			result.Unchanged = append(result.Unchanged, key)
@@ -79,6 +80,26 @@ func (r *ListenerRegistry) Diff(newListeners []Listen) DiffResult {
 	}
 
 	return result
+}
+
+func listenersSemanticallyEqual(current, next Listen) bool {
+	current.ProtocolLimits = relevantProtocolLimits(current.Kind, current.ProtocolLimits)
+	next.ProtocolLimits = relevantProtocolLimits(next.Kind, next.ProtocolLimits)
+
+	return reflect.DeepEqual(current, next)
+}
+
+func relevantProtocolLimits(kind string, limits ProtocolLimitsConfig) ProtocolLimitsConfig {
+	switch kind {
+	case listenKindSocketMap:
+		return ProtocolLimitsConfig{SocketMap: limits.SocketMap}
+	case listenKindPolicyService:
+		return ProtocolLimitsConfig{PolicyService: limits.PolicyService}
+	case listenKindDovecotSASL:
+		return ProtocolLimitsConfig{DovecotSASL: limits.DovecotSASL}
+	default:
+		return limits
+	}
 }
 
 // Register adds a listener entry to the registry.
@@ -129,6 +150,7 @@ func (r *ListenerRegistry) Remove(key string) {
 	r.mu.Unlock()
 
 	if ok && entry != nil {
+		entry.Cancel()
 		entry.Server.Stop()
 		<-entry.Done
 	}
@@ -143,6 +165,7 @@ func (r *ListenerRegistry) StopAll() {
 	r.mu.Unlock()
 
 	for _, entry := range entries {
+		entry.Cancel()
 		entry.Server.Stop()
 		<-entry.Done
 	}
@@ -153,7 +176,6 @@ func (r *ListenerRegistry) startListener(
 	parentCtx context.Context,
 	deps *Deps,
 	instance Listen,
-	globalWorkerPool WorkerPool,
 	systemdSockets *SystemdSocketSet,
 	logger *slog.Logger,
 ) error {
@@ -166,12 +188,15 @@ func (r *ListenerRegistry) startListener(
 		return err
 	}
 
-	srv := NewMultiServer(listenerCtx, deps, globalWorkerPool)
+	supervisor := NewConnectionSupervisor(listenerCtx, instance.Limits.MaxConnections)
+
+	srv := NewMultiServer(listenerCtx, deps, supervisor)
 	if err := srv.Listen(instance, activatedListener); err != nil {
 		if activatedListener != nil {
 			_ = activatedListener.Close()
 		}
 		listenerCancel()
+		supervisor.Stop()
 
 		return fmt.Errorf("failed to listen %s: %w", listenKey(instance), err)
 	}
@@ -184,6 +209,7 @@ func (r *ListenerRegistry) startListener(
 	case listenKindPolicyService:
 		if instance.Name == "" {
 			listenerCancel()
+			srv.Stop()
 
 			return fmt.Errorf("policy service requires a name")
 		}
@@ -192,6 +218,7 @@ func (r *ListenerRegistry) startListener(
 	case listenKindDovecotSASL:
 		if instance.Name == "" {
 			listenerCancel()
+			srv.Stop()
 
 			return fmt.Errorf("dovecot SASL requires a name")
 		}
@@ -199,6 +226,7 @@ func (r *ListenerRegistry) startListener(
 		handler = srv.HandleDovecotSASLConnection
 	default:
 		listenerCancel()
+		srv.Stop()
 
 		return fmt.Errorf("invalid listen kind: %s", instance.Kind)
 	}
@@ -225,7 +253,7 @@ func (r *ListenerRegistry) startListener(
 		}()
 
 		if err := srv.Start(handler); err != nil {
-			logger.Error("Server error", slog.String("address", listenKey(instance)), slog.String("error", err.Error()))
+			logger.Error("Server error", slog.String("listener", listenKey(instance)), slog.String("reason", boundedErrorKind(err)))
 		}
 	}()
 

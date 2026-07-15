@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -144,7 +145,7 @@ func TestConfigValidation(t *testing.T) {
 				},
 			},
 			wantErr:     true,
-			errContains: []string{"field 'max_workers' (struct field: 'MaxWorkers') failed on the 'min' validation rule"},
+			errContains: []string{"server.worker_pool values must be between 0 and 1048576"},
 		},
 		{
 			name: "DovecotSASL gRPC transport without address",
@@ -619,6 +620,165 @@ func TestConfigValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+const (
+	testMaxConnectionsKey = "max_connections"
+	testMaxQueuedKey      = "max_queued_requests"
+	testBudgetError       = "request timeout must exceed"
+	testMaxLineBytesKey   = "max_line_bytes"
+)
+
+type limitValidationCase struct {
+	name   string
+	mutate func(*Config)
+	match  string
+}
+
+func TestConnectionRequestAndProtocolLimitValidation(t *testing.T) {
+	for _, test := range newLimitValidationCases() {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := newLimitValidationConfig()
+			test.mutate(&cfg)
+
+			err := cfg.HandleConfig()
+			if err == nil || !strings.Contains(err.Error(), test.match) {
+				t.Fatalf("HandleConfig() error = %v, want substring %q", err, test.match)
+			}
+		})
+	}
+}
+
+func newLimitValidationConfig() Config {
+	return Config{Server: Server{Listen: []Listen{{
+		Kind: listenKindSocketMap, Name: testFirst, Type: listenTypeTCP, Address: concurrencyTestHost, Port: 23456,
+	}}}}
+}
+
+func newLimitValidationCases() []limitValidationCase {
+	return []limitValidationCase{
+		{name: "negative connections", mutate: func(cfg *Config) { cfg.Server.Limits.MaxConnections = -1 }, match: testMaxConnectionsKey},
+		{name: "connections above maximum", mutate: func(cfg *Config) { cfg.Server.Limits.MaxConnections = 1048577 }, match: testMaxConnectionsKey},
+		{name: "negative inflight", mutate: func(cfg *Config) { cfg.Server.Limits.MaxInflightRequests = -1 }, match: "max_inflight_requests"},
+		{name: "negative queue", mutate: func(cfg *Config) { cfg.Server.Limits.MaxQueuedRequests = new(-1) }, match: testMaxQueuedKey},
+		{name: "queue above maximum", mutate: func(cfg *Config) { cfg.Server.Limits.MaxQueuedRequests = new(1048577) }, match: testMaxQueuedKey},
+		{name: "negative queue timeout", mutate: func(cfg *Config) { cfg.Server.Limits.RequestQueueTimeout = -time.Second }, match: "request_queue_timeout"},
+		{name: "request timeout above maximum", mutate: func(cfg *Config) { cfg.Server.Limits.RequestTimeout = time.Hour + time.Nanosecond }, match: "request_timeout"},
+		{name: "backend timeout above maximum", mutate: func(cfg *Config) { cfg.Server.Limits.BackendTimeout = time.Hour + time.Nanosecond }, match: testBudgetError},
+		{name: "write reserve above maximum", mutate: func(cfg *Config) { cfg.Server.Limits.ResponseWriteReserve = time.Minute + time.Nanosecond }, match: testBudgetError},
+		{name: "impossible total budget", mutate: impossibleTotalBudget, match: testBudgetError},
+		{name: "negative socket idle", mutate: func(cfg *Config) { cfg.Server.ProtocolLimits.SocketMap.IdleTimeout = new(-time.Second) }, match: "idle_timeout"},
+		{name: "socket payload above maximum", mutate: func(cfg *Config) { cfg.Server.ProtocolLimits.SocketMap.MaxRequestBytes = 67108865 }, match: "max_request_bytes"},
+		{name: "socket length digits above maximum", mutate: func(cfg *Config) { cfg.Server.ProtocolLimits.SocketMap.MaxLengthDigits = 11 }, match: "max_length_digits"},
+		{name: "policy line above maximum", mutate: policyLineAboveMaximum, match: testMaxLineBytesKey},
+		{name: "policy line exceeds request", mutate: policyLineExceedsRequest, match: "max line bytes must not exceed"},
+		{name: "policy attributes above maximum", mutate: func(cfg *Config) { cfg.Server.ProtocolLimits.PolicyService.MaxAttributes = 1048577 }, match: "max_attributes"},
+		{name: "dovecot line above maximum", mutate: func(cfg *Config) { cfg.Server.ProtocolLimits.DovecotSASL.MaxLineBytes = 1048577 }, match: testMaxLineBytesKey},
+		{name: "protocol partial timeout above maximum", mutate: func(cfg *Config) {
+			cfg.Server.ProtocolLimits.SocketMap.PartialRequestTimeout = time.Hour + time.Nanosecond
+		}, match: "partial_request_timeout"},
+		{name: "protocol write timeout above maximum", mutate: func(cfg *Config) { cfg.Server.ProtocolLimits.DovecotSASL.WriteTimeout = time.Hour + time.Nanosecond }, match: "write_timeout"},
+	}
+}
+
+func impossibleTotalBudget(cfg *Config) {
+	cfg.Server.Limits.RequestQueueTimeout = 2 * time.Second
+	cfg.Server.Limits.BackendTimeout = 2 * time.Second
+	cfg.Server.Limits.ResponseWriteReserve = time.Second
+	cfg.Server.Limits.RequestTimeout = 5 * time.Second
+}
+
+func policyLineAboveMaximum(cfg *Config) {
+	cfg.Server.ProtocolLimits.PolicyService.MaxRequestBytes = 16777217
+	cfg.Server.ProtocolLimits.PolicyService.MaxLineBytes = 16777217
+}
+
+func policyLineExceedsRequest(cfg *Config) {
+	cfg.Server.ProtocolLimits.PolicyService.MaxRequestBytes = 1024
+	cfg.Server.ProtocolLimits.PolicyService.MaxLineBytes = 2048
+}
+
+func TestZeroQueueRemovesQueueStageFromDeadlineBudget(t *testing.T) {
+	cfg := Config{Server: Server{
+		Limits: LimitsConfig{
+			MaxQueuedRequests:    new(0),
+			RequestQueueTimeout:  20 * time.Second,
+			RequestTimeout:       3 * time.Second,
+			BackendTimeout:       2 * time.Second,
+			ResponseWriteReserve: 500 * time.Millisecond,
+		},
+		Listen: []Listen{{Kind: listenKindSocketMap, Name: testFirst, Type: listenTypeTCP, Address: "127.0.0.1", Port: 23456}},
+	}}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig() rejected a disabled queue budget: %v", err)
+	}
+
+	if got := maxQueuedRequests(cfg.Server.Listen[0].Limits); got != 0 {
+		t.Fatalf("max_queued_requests = %d, want 0", got)
+	}
+}
+
+func TestMaximumCapacityAndProtocolLimitsAreAccepted(t *testing.T) {
+	cfg := newLimitValidationConfig()
+	cfg.Server.Limits = LimitsConfig{
+		MaxConnections:       1048576,
+		MaxInflightRequests:  1048576,
+		MaxQueuedRequests:    new(1048576),
+		RequestQueueTimeout:  time.Millisecond,
+		RequestTimeout:       time.Hour,
+		BackendTimeout:       time.Second,
+		ResponseWriteReserve: time.Minute,
+	}
+	cfg.Server.ProtocolLimits = maximumProtocolLimits()
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig() rejected documented maxima: %v", err)
+	}
+}
+
+func TestMaximumQueueTimeoutIsAcceptedWhenQueueIsDisabled(t *testing.T) {
+	cfg := newLimitValidationConfig()
+	cfg.Server.Limits = LimitsConfig{
+		MaxQueuedRequests:    new(0),
+		RequestQueueTimeout:  time.Hour,
+		RequestTimeout:       time.Hour,
+		BackendTimeout:       58 * time.Minute,
+		ResponseWriteReserve: time.Minute,
+	}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig() rejected maximum unused queue timeout: %v", err)
+	}
+}
+
+func TestMaximumBackendTimeoutIsRejectedByTotalBudget(t *testing.T) {
+	cfg := newLimitValidationConfig()
+	cfg.Server.Limits.MaxQueuedRequests = new(0)
+	cfg.Server.Limits.RequestTimeout = time.Hour
+	cfg.Server.Limits.BackendTimeout = time.Hour
+
+	err := cfg.HandleConfig()
+	if err == nil || !strings.Contains(err.Error(), testBudgetError) {
+		t.Fatalf("HandleConfig() error = %v, want total-budget rejection", err)
+	}
+}
+
+func maximumProtocolLimits() ProtocolLimitsConfig {
+	return ProtocolLimitsConfig{
+		SocketMap: SocketMapProtocolLimits{
+			IdleTimeout: new(time.Hour), PartialRequestTimeout: time.Hour,
+			WriteTimeout: time.Hour, MaxRequestBytes: 67108864, MaxLengthDigits: 10,
+		},
+		PolicyService: PolicyServiceProtocolLimits{
+			IdleTimeout: new(time.Hour), PartialRequestTimeout: time.Hour,
+			WriteTimeout: time.Hour, MaxRequestBytes: 67108864, MaxLineBytes: 16777216, MaxAttributes: 1048576,
+		},
+		DovecotSASL: DovecotSASLProtocolLimits{
+			IdleTimeout: new(time.Hour), PartialRequestTimeout: time.Hour,
+			WriteTimeout: time.Hour, MaxLineBytes: 1048576,
+		},
 	}
 }
 

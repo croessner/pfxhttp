@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -227,5 +228,36 @@ func TestOIDCManagerExpiration(t *testing.T) {
 	token2, _ := mgr.GetToken(ctx, logger, auth)
 	if token2 != "token-2" {
 		t.Errorf("Expected token-2, got %s", token2)
+	}
+}
+
+func TestOIDCCacheWaitHonorsContextDeadline(t *testing.T) {
+	mgr := NewOIDCManager(&http.Client{})
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := mgr.GetToken(ctx, slog.New(slog.DiscardHandler), BackendOIDCAuth{
+		ConfigurationURI: "https://idp.example.test/.well-known/openid-configuration",
+		ClientID:         "test-client",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetToken() error = %v, want context deadline", err)
+	}
+}
+
+func TestOIDCDiscoveryCacheWaitHonorsContextDeadline(t *testing.T) {
+	mgr := NewOIDCManager(&http.Client{})
+	mgr.discMu.Lock()
+	defer mgr.discMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := mgr.getDiscovery(ctx, "https://idp.example.test/.well-known/openid-configuration")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("getDiscovery() error = %v, want context deadline", err)
 	}
 }

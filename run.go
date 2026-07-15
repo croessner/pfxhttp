@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"reflect"
 	"syscall"
 
 	"go.uber.org/fx"
@@ -63,11 +64,15 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 
 	deps.GetLogger().Info("Starting server", slog.String("version", version))
 
+	if legacyWorkerPoolConfigured(cfg) {
+		deps.GetLogger().Warn("worker_pool is deprecated; migrate to limits because legacy values are used only as compatibility defaults")
+	}
+
 	registry := NewListenerRegistry()
 
 	systemdSockets, err := NewSystemdSocketSet(deps.GetLogger())
 	if err != nil {
-		deps.GetLogger().Error("Failed to initialize systemd socket activation", slog.String("error", err.Error()))
+		deps.GetLogger().Error("Failed to initialize systemd socket activation", slog.String("reason", boundedErrorKind(err)))
 
 		return
 	}
@@ -78,23 +83,16 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 	if cfg.Server.RunAsUser != "" || cfg.Server.RunAsGroup != "" {
 		creds, err = ResolveCredentials(cfg.Server.RunAsUser, cfg.Server.RunAsGroup)
 		if err != nil {
-			deps.GetLogger().Error("Failed to resolve credentials", slog.String("error", err.Error()))
+			deps.GetLogger().Error("Failed to resolve credentials", slog.String("reason", boundedErrorKind(err)))
 
 			return
 		}
 	}
 
-	// Create global worker pool if configured
-	var globalWorkerPool WorkerPool
-
-	if cfg.Server.WorkerPool.MaxWorkers > 0 {
-		globalWorkerPool = NewWorkerPool(ctx, cfg.Server.WorkerPool.MaxWorkers, cfg.Server.WorkerPool.MaxQueue, nil)
-	}
-
 	// Start initial listeners
 	for _, instance := range cfg.Server.Listen {
-		if err := registry.startListener(ctx, deps, instance, globalWorkerPool, systemdSockets, deps.GetLogger()); err != nil {
-			deps.GetLogger().Error("Failed to start listener", slog.String("error", err.Error()))
+		if err := registry.startListener(ctx, deps, instance, systemdSockets, deps.GetLogger()); err != nil {
+			deps.GetLogger().Error("Failed to start listener", slog.String("reason", boundedErrorKind(err)))
 
 			registry.StopAll()
 
@@ -105,7 +103,7 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 	// Perform chroot after binding listeners but before dropping privileges
 	if cfg.Server.Chroot != "" {
 		if err := PerformChroot(cfg.Server.Chroot, deps.GetLogger()); err != nil {
-			deps.GetLogger().Error("Failed to chroot", slog.String("error", err.Error()))
+			deps.GetLogger().Error("Failed to chroot", slog.String("reason", boundedErrorKind(err)))
 
 			registry.StopAll()
 
@@ -116,7 +114,7 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 	// Drop privileges using pre-resolved credentials
 	if creds != nil {
 		if err := DropPrivileges(creds, deps.GetLogger()); err != nil {
-			deps.GetLogger().Error("Failed to drop privileges", slog.String("error", err.Error()))
+			deps.GetLogger().Error("Failed to drop privileges", slog.String("reason", boundedErrorKind(err)))
 
 			registry.StopAll()
 
@@ -146,19 +144,43 @@ func runServerLoop(ctx context.Context, deps *Deps) {
 			return
 
 		case <-sighup:
-			handleReload(ctx, deps, registry, globalWorkerPool, systemdSockets)
+			handleReload(ctx, deps, registry, systemdSockets)
 		}
 	}
 }
 
+func legacyWorkerPoolConfigured(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+
+	if cfg.Server.LegacyWorkerPool {
+		return true
+	}
+
+	for _, listener := range cfg.Server.Listen {
+		if listener.LegacyWorkerPool {
+			return true
+		}
+	}
+
+	return false
+}
+
 // handleReload re-reads configuration and applies changes to listeners and settings.
-func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, globalWorkerPool WorkerPool, systemdSockets *SystemdSocketSet) {
+func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, systemdSockets *SystemdSocketSet) {
 	logger := deps.GetLogger()
 	logger.Info("Received SIGHUP, reloading configuration...")
 
 	newCfg, err := ReloadConfig()
 	if err != nil {
-		logger.Error("Failed to reload configuration, keeping current settings", slog.String("error", err.Error()))
+		logger.Error("Failed to reload configuration, keeping current settings", slog.String("reason", boundedErrorKind(err)))
+
+		return
+	}
+
+	if restartOnlyConfigChanged(deps.GetConfig(), newCfg) {
+		logger.Error("SIGHUP reload changes startup-only settings; keeping current configuration and requiring a service restart")
 
 		return
 	}
@@ -179,6 +201,20 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 		return
 	}
 
+	applyListenerReload(ctx, deps, registry, systemdSockets, newCfg, diff)
+	logger.Info("Configuration reload complete")
+}
+
+func applyListenerReload(
+	ctx context.Context,
+	deps *Deps,
+	registry *ListenerRegistry,
+	systemdSockets *SystemdSocketSet,
+	newCfg *Config,
+	diff DiffResult,
+) {
+	logger := deps.GetLogger()
+
 	// Stop removed listeners
 	for _, key := range diff.Removed {
 		logger.Info("Stopping removed listener", slog.String("listener", key))
@@ -197,8 +233,8 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 
 	// Start changed listeners with new config
 	for _, listenCfg := range diff.Changed {
-		if err := registry.startListener(ctx, deps, listenCfg, globalWorkerPool, systemdSockets, logger); err != nil {
-			logger.Error("Failed to restart changed listener", slog.String("listener", listenKey(listenCfg)), slog.String("error", err.Error()))
+		if err := registry.startListener(ctx, deps, listenCfg, systemdSockets, logger); err != nil {
+			logger.Error("Failed to restart changed listener", slog.String("listener", listenKey(listenCfg)), slog.String("reason", boundedErrorKind(err)))
 		}
 	}
 
@@ -206,8 +242,8 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 	for _, listenCfg := range diff.Added {
 		logger.Info("Starting new listener", slog.String("listener", listenKey(listenCfg)))
 
-		if err := registry.startListener(ctx, deps, listenCfg, globalWorkerPool, systemdSockets, logger); err != nil {
-			logger.Error("Failed to start new listener", slog.String("listener", listenKey(listenCfg)), slog.String("error", err.Error()))
+		if err := registry.startListener(ctx, deps, listenCfg, systemdSockets, logger); err != nil {
+			logger.Error("Failed to start new listener", slog.String("listener", listenKey(listenCfg)), slog.String("reason", boundedErrorKind(err)))
 		}
 	}
 
@@ -215,8 +251,17 @@ func handleReload(ctx context.Context, deps *Deps, registry *ListenerRegistry, g
 	for _, key := range diff.Unchanged {
 		logger.Debug("Listener unchanged, keeping active", slog.String("listener", key))
 	}
+}
 
-	logger.Info("Configuration reload complete")
+func restartOnlyConfigChanged(current, next *Config) bool {
+	if current == nil || next == nil {
+		return current != next
+	}
+
+	return current.Server.RunAsUser != next.Server.RunAsUser ||
+		current.Server.RunAsGroup != next.Server.RunAsGroup ||
+		current.Server.Chroot != next.Server.Chroot ||
+		!reflect.DeepEqual(current.Server.Observability, next.Server.Observability)
 }
 
 // reloadDependencies rebuilds reloadable dependencies and swaps them into the shared dependency holder.

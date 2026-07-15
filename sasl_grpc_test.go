@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -34,6 +35,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+const grpcTestSASLEntry = "smtp_auth"
 
 // --- Mapping unit tests ---
 
@@ -255,6 +258,23 @@ func TestClassifyGRPCError(t *testing.T) {
 	}
 }
 
+func TestClassifyGRPCErrorOmitsRawStatusMessage(t *testing.T) {
+	const rawStatusMessage = "raw-secret-grpc-status-message"
+
+	var logOutput bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+
+	result := classifyGRPCError(status.Error(codes.PermissionDenied, rawStatusMessage), logger)
+	if strings.Contains(logOutput.String(), rawStatusMessage) {
+		t.Fatalf("gRPC error log exposes raw status message: %q", logOutput.String())
+	}
+
+	if strings.Contains(result.Reason, rawStatusMessage) {
+		t.Fatalf("gRPC failure reason exposes raw status message: %q", result.Reason)
+	}
+}
+
 func TestBasicAuthorizationValue(t *testing.T) {
 	got := basicAuthorizationValue("admin:s")
 	if got != "Basic YWRtaW46cw==" {
@@ -267,12 +287,13 @@ func TestBasicAuthorizationValue(t *testing.T) {
 type fakeAuthServer struct {
 	authv1.UnimplementedAuthServiceServer
 
-	wantAuth  string
-	authSeen  atomic.Value // string, captured authorization metadata
-	mdSeen    atomic.Value // metadata.MD, captured incoming metadata
-	response  *authv1.AuthResponse
-	rpcErr    error
-	callCount atomic.Int64
+	wantAuth       string
+	authSeen       atomic.Value // string, captured authorization metadata
+	mdSeen         atomic.Value // metadata.MD, captured incoming metadata
+	response       *authv1.AuthResponse
+	rpcErr         error
+	waitForContext bool
+	callCount      atomic.Int64
 }
 
 func (f *fakeAuthServer) Authenticate(ctx context.Context, req *authv1.AuthRequest) (*authv1.AuthResponse, error) {
@@ -297,7 +318,54 @@ func (f *fakeAuthServer) Authenticate(ctx context.Context, req *authv1.AuthReque
 		return nil, f.rpcErr
 	}
 
+	if f.waitForContext {
+		<-ctx.Done()
+
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+
 	return f.response, nil
+}
+
+func TestNauthilusGRPCSASLAuthenticatorHonorsEarlierParentDeadline(t *testing.T) {
+	fake := &fakeAuthServer{waitForContext: true}
+
+	address, stop := startFakeAuthServer(t, fake)
+	defer stop()
+
+	pool := NewGRPCConnPool()
+	defer pool.CloseAll()
+
+	authenticator := NewNauthilusGRPCSASLAuthenticator(&Config{DovecotSASL: map[string]Request{
+		grpcTestSASLEntry: {
+			Transport: transportGRPC,
+			GRPC: GRPCRequest{
+				Address: address,
+				Timeout: 2 * time.Second,
+			},
+		},
+	}}, grpcTestSASLEntry, pool, nil, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+
+	result, err := authenticator.AuthenticatePassword(ctx, "synthetic-user", "synthetic-password", &DovecotAuthRequest{
+		Service:   "smtp",
+		Mechanism: saslMechanismPlain,
+	})
+	if err != nil {
+		t.Fatalf("AuthenticatePassword returned transport error: %v", err)
+	}
+
+	if result == nil || !result.Temporary {
+		t.Fatalf("deadline result = %+v, want temporary failure", result)
+	}
+
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("gRPC call took %s, want earlier parent deadline below backend timeout", elapsed)
+	}
 }
 
 func startFakeAuthServer(t *testing.T, srv *fakeAuthServer) (string, func()) {
@@ -339,7 +407,7 @@ func TestNauthilusGRPCSASLAuthenticatorPasswordSuccess(t *testing.T) {
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
-			"smtp_auth": {
+			grpcTestSASLEntry: {
 				Transport:     transportGRPC,
 				HTTPAuthBasic: "admin:s",
 				GRPC: GRPCRequest{
@@ -356,7 +424,7 @@ func TestNauthilusGRPCSASLAuthenticatorPasswordSuccess(t *testing.T) {
 	pool := NewGRPCConnPool()
 	defer pool.CloseAll()
 
-	auth := NewNauthilusGRPCSASLAuthenticator(cfg, "smtp_auth", pool, nil, nil)
+	auth := NewNauthilusGRPCSASLAuthenticator(cfg, grpcTestSASLEntry, pool, nil, nil)
 
 	res, err := auth.AuthenticatePassword(context.Background(), "alice", "secret",
 		&DovecotAuthRequest{Service: "smtp", Mechanism: "PLAIN"})
@@ -386,7 +454,7 @@ func TestNauthilusGRPCSASLAuthenticatorPropagatesTraceContext(t *testing.T) {
 	obs, recorder := newTraceTestObservability(t)
 	fake, auth := newTracedGRPCAuthFixture(t)
 
-	ctx, parentSpan := obs.StartSpanWithKind(t.Context(), dovecotSASLSpanName("smtp_auth"), oteltrace.SpanKindServer)
+	ctx, parentSpan := obs.StartSpanWithKind(t.Context(), dovecotSASLSpanName(grpcTestSASLEntry), oteltrace.SpanKindServer)
 	ctx = ContextWithObservability(ctx, obs)
 
 	res, err := auth.AuthenticatePassword(ctx, "alice", "secret",
@@ -406,9 +474,9 @@ func TestNauthilusGRPCSASLAuthenticatorPropagatesTraceContext(t *testing.T) {
 		t.Fatalf("traceparent metadata not propagated: got %v", got)
 	}
 
-	parent, ok := recorder.findSpan(dovecotSASLSpanName("smtp_auth"))
+	parent, ok := recorder.findSpan(dovecotSASLSpanName(grpcTestSASLEntry))
 	if !ok {
-		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName("smtp_auth"))
+		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName(grpcTestSASLEntry))
 	}
 
 	child, ok := recorder.findSpan(grpcClientSpanName("Authenticate"))
@@ -465,7 +533,7 @@ func newTracedGRPCAuthFixture(t *testing.T) (*fakeAuthServer, SASLAuthenticator)
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
-			"smtp_auth": {
+			grpcTestSASLEntry: {
 				Transport: transportGRPC,
 				GRPC: GRPCRequest{
 					Address: addr,
@@ -475,7 +543,7 @@ func newTracedGRPCAuthFixture(t *testing.T) (*fakeAuthServer, SASLAuthenticator)
 		},
 	}
 
-	return fake, NewNauthilusGRPCSASLAuthenticator(cfg, "smtp_auth", pool, nil, nil)
+	return fake, NewNauthilusGRPCSASLAuthenticator(cfg, grpcTestSASLEntry, pool, nil, nil)
 }
 
 func TestNauthilusGRPCSASLAuthenticatorRejectsBadCallerAuth(t *testing.T) {
@@ -486,7 +554,7 @@ func TestNauthilusGRPCSASLAuthenticatorRejectsBadCallerAuth(t *testing.T) {
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
-			"smtp_auth": {
+			grpcTestSASLEntry: {
 				Transport:     transportGRPC,
 				HTTPAuthBasic: "wrong",
 				GRPC:          GRPCRequest{Address: addr, Timeout: 2 * time.Second},
@@ -497,7 +565,7 @@ func TestNauthilusGRPCSASLAuthenticatorRejectsBadCallerAuth(t *testing.T) {
 	pool := NewGRPCConnPool()
 	defer pool.CloseAll()
 
-	auth := NewNauthilusGRPCSASLAuthenticator(cfg, "smtp_auth", pool, nil, nil)
+	auth := NewNauthilusGRPCSASLAuthenticator(cfg, grpcTestSASLEntry, pool, nil, nil)
 
 	res, err := auth.AuthenticatePassword(context.Background(), "alice", "secret",
 		&DovecotAuthRequest{Service: "smtp", Mechanism: "PLAIN"})
@@ -523,11 +591,11 @@ func TestNauthilusGRPCSASLAuthenticatorTokenDelegatesToFallback(t *testing.T) {
 
 	cfg := &Config{
 		DovecotSASL: map[string]Request{
-			"smtp_auth": {Transport: transportGRPC},
+			grpcTestSASLEntry: {Transport: transportGRPC},
 		},
 	}
 
-	auth := NewNauthilusGRPCSASLAuthenticator(cfg, "smtp_auth", NewGRPCConnPool(), nil, fallback)
+	auth := NewNauthilusGRPCSASLAuthenticator(cfg, grpcTestSASLEntry, NewGRPCConnPool(), nil, fallback)
 
 	res, err := auth.AuthenticateToken(context.Background(), "user", "tok", &DovecotAuthRequest{Service: "smtp"})
 	if err != nil {
@@ -570,7 +638,7 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 
 	deps := &Deps{
 		Config: &Config{DovecotSASL: map[string]Request{
-			"smtp_auth": {
+			grpcTestSASLEntry: {
 				Transport: transportGRPC,
 				GRPC:      GRPCRequest{Address: oldAddr, Timeout: 2 * time.Second},
 			},
@@ -582,7 +650,7 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 	}
 	defer deps.GRPCConnPool.CloseAll()
 
-	server := &MultiServer{name: "smtp_auth", deps: deps, ctx: context.Background()}
+	server := &MultiServer{name: grpcTestSASLEntry, deps: deps, ctx: context.Background()}
 	logger := slog.New(slog.DiscardHandler)
 
 	first := runHandleSASLResultForTest(t, server, logger, "1")
@@ -591,7 +659,7 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 	}
 
 	deps.Reload(&Config{DovecotSASL: map[string]Request{
-		"smtp_auth": {
+		grpcTestSASLEntry: {
 			Transport: transportGRPC,
 			GRPC:      GRPCRequest{Address: newAddr, Timeout: 2 * time.Second},
 		},
@@ -608,16 +676,18 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 }
 
 func TestHandleSASLResultKeepsContinuationSpanOpen(t *testing.T) {
+	var logOutput bytes.Buffer
+
 	obs, recorder := newTraceTestObservability(t)
 	server := &MultiServer{
-		name: "smtp_auth",
+		name: grpcTestSASLEntry,
 		deps: &Deps{
 			Logger:        slog.New(slog.DiscardHandler),
 			Observability: obs,
 		},
 		ctx: context.Background(),
 	}
-	logger := slog.New(slog.DiscardHandler)
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
 	authReq := &DovecotAuthRequest{ID: "1", Service: "smtp", Mechanism: new(LoginMechanism).Name()}
 	activeMechanisms := make(map[string]SASLMechanism)
 	activeAuthRequests := make(map[string]*DovecotAuthRequest)
@@ -631,29 +701,85 @@ func TestHandleSASLResultKeepsContinuationSpanOpen(t *testing.T) {
 		t.Fatalf("first response = %q, want CONT", first)
 	}
 
-	if got := recorder.countSpans(dovecotSASLSpanName("smtp_auth")); got != 0 {
+	if got := recorder.countSpans(dovecotSASLSpanName(grpcTestSASLEntry)); got != 0 {
 		t.Fatalf("ended Dovecot SASL spans after CONT = %d, want 0", got)
 	}
 
 	second := runObservedHandleSASLResultForTest(t, server, logger, authReq, &SASLAuthResult{
 		Success: false,
-		Reason:  "denied",
+		Reason:  "sensitive-backend-denial-reason",
 	}, nil, activeMechanisms, activeAuthRequests, activeObservabilityStates)
 	if !strings.HasPrefix(second, "FAIL\t1\t") {
 		t.Fatalf("second response = %q, want FAIL", second)
 	}
 
-	if got := recorder.countSpans(dovecotSASLSpanName("smtp_auth")); got != 1 {
+	if got := recorder.countSpans(dovecotSASLSpanName(grpcTestSASLEntry)); got != 1 {
 		t.Fatalf("ended Dovecot SASL spans after final result = %d, want 1", got)
 	}
 
-	parent, ok := recorder.findSpan(dovecotSASLSpanName("smtp_auth"))
+	parent, ok := recorder.findSpan(dovecotSASLSpanName(grpcTestSASLEntry))
 	if !ok {
-		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName("smtp_auth"))
+		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName(grpcTestSASLEntry))
 	}
 
-	assertChildSpan(t, recorder, parent, dovecotSASLWaitSpanName)
+	waitSpan := assertChildSpan(t, recorder, parent, dovecotSASLWaitSpanName)
+	assertSpanOmitsAttribute(t, waitSpan, "pfxhttp.sasl.id")
 	assertChildSpan(t, recorder, parent, dovecotSASLResponseSpanName)
+
+	if strings.Contains(logOutput.String(), "sensitive-backend-denial-reason") {
+		t.Fatalf("Dovecot logs expose backend denial reason: %q", logOutput.String())
+	}
+}
+
+func TestDovecotContinuationWaitEndsBeforeBackendSpan(t *testing.T) {
+	obs, recorder := newTraceTestObservability(t)
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Auth-User", "alice@example.test")
+		writer.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(backend.Close)
+
+	server := &MultiServer{
+		name: grpcTestSASLEntry,
+		deps: &Deps{
+			Config: &Config{DovecotSASL: map[string]Request{
+				grpcTestSASLEntry: {Target: backend.URL, StatusCode: http.StatusOK},
+			}},
+			Logger:        slog.New(slog.DiscardHandler),
+			HTTPClient:    backend.Client(),
+			Observability: obs,
+		},
+		ctx: context.Background(),
+	}
+	authReq := &DovecotAuthRequest{ID: "continuation-id", Service: "smtp", Mechanism: saslMechanismLogin}
+	activeMechanisms := make(map[string]SASLMechanism)
+	activeAuthRequests := make(map[string]*DovecotAuthRequest)
+	states := make(map[string]*saslObservabilityState)
+
+	runObservedHandleSASLResultForTest(t, server, slog.New(slog.DiscardHandler), authReq, &SASLAuthResult{
+		NeedContinuation:      true,
+		ContinuationChallenge: []byte("Password:"),
+	}, nil, activeMechanisms, activeAuthRequests, states)
+
+	response := runObservedHandleSASLResultForTest(t, server, slog.New(slog.DiscardHandler), authReq, &SASLAuthResult{Success: true}, &SASLCredentials{
+		Username: "alice@example.test",
+		Password: "synthetic-password",
+	}, activeMechanisms, activeAuthRequests, states)
+	if !strings.HasPrefix(response, string(DovecotCmdOK)+"\t") {
+		t.Fatalf("final Dovecot response = %q, want OK", response)
+	}
+
+	parent, ok := recorder.findSpan(dovecotSASLSpanName(grpcTestSASLEntry))
+	if !ok {
+		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName(grpcTestSASLEntry))
+	}
+
+	waitSpan := assertChildSpan(t, recorder, parent, dovecotSASLWaitSpanName)
+
+	backendSpan := assertChildSpan(t, recorder, parent, dovecotSASLBackendSpanName)
+	if waitSpan.end.After(backendSpan.start) {
+		t.Fatalf("continuation wait ended at %s after backend started at %s", waitSpan.end, backendSpan.start)
+	}
 }
 
 func TestHandleSASLResultRecordsBackendAndResponseSpans(t *testing.T) {
@@ -673,7 +799,7 @@ func TestHandleSASLResultRecordsBackendAndResponseSpans(t *testing.T) {
 
 	deps := &Deps{
 		Config: &Config{DovecotSASL: map[string]Request{
-			"smtp_auth": {
+			grpcTestSASLEntry: {
 				Transport: transportGRPC,
 				GRPC:      GRPCRequest{Address: addr, Timeout: 2 * time.Second},
 			},
@@ -686,16 +812,16 @@ func TestHandleSASLResultRecordsBackendAndResponseSpans(t *testing.T) {
 	}
 	defer deps.GRPCConnPool.CloseAll()
 
-	server := &MultiServer{name: "smtp_auth", deps: deps, ctx: context.Background()}
+	server := &MultiServer{name: grpcTestSASLEntry, deps: deps, ctx: context.Background()}
 
 	response := runHandleSASLResultForTest(t, server, slog.New(slog.DiscardHandler), "1")
 	if !strings.Contains(response, "user=alice@example.com") {
 		t.Fatalf("response = %q, want gRPC backend user", response)
 	}
 
-	parent, ok := recorder.findSpan(dovecotSASLSpanName("smtp_auth"))
+	parent, ok := recorder.findSpan(dovecotSASLSpanName(grpcTestSASLEntry))
 	if !ok {
-		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName("smtp_auth"))
+		t.Fatalf("parent span %q not recorded", dovecotSASLSpanName(grpcTestSASLEntry))
 	}
 
 	backendSpan := assertChildSpan(t, recorder, parent, dovecotSASLBackendSpanName)

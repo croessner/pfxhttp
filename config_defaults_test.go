@@ -2,15 +2,18 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 )
 
-func TestWorkerPoolDefaults(t *testing.T) {
+//go:fix inline
+func TestIndependentLimitDefaults(t *testing.T) {
 	cfg := &Config{
 		Server: Server{
 			Listen: []Listen{
@@ -34,12 +37,226 @@ func TestWorkerPoolDefaults(t *testing.T) {
 	expectedMaxWorkers := numCPU * 2
 	expectedMaxQueue := expectedMaxWorkers * 10
 
-	if cfg.Server.WorkerPool.MaxWorkers != expectedMaxWorkers {
-		t.Errorf("Expected MaxWorkers %d, got %d", expectedMaxWorkers, cfg.Server.WorkerPool.MaxWorkers)
+	if cfg.Server.WorkerPool != (WorkerPoolConfig{}) {
+		t.Fatalf("worker_pool must remain absent when not configured: %+v", cfg.Server.WorkerPool)
 	}
 
-	if cfg.Server.WorkerPool.MaxQueue != expectedMaxQueue {
-		t.Errorf("Expected MaxQueue %d, got %d", expectedMaxQueue, cfg.Server.WorkerPool.MaxQueue)
+	if cfg.Server.SockmapMaxReplySize != defaultSockmapMaxReplySize {
+		t.Fatalf("socketmap_max_reply_size = %d, want %d", cfg.Server.SockmapMaxReplySize, defaultSockmapMaxReplySize)
+	}
+
+	if cfg.Server.Limits.MaxConnections != defaultMaxConnections ||
+		cfg.Server.Limits.MaxInflightRequests != expectedMaxWorkers ||
+		maxQueuedRequests(cfg.Server.Limits) != expectedMaxQueue {
+		t.Fatalf("independent defaults = %+v", cfg.Server.Limits)
+	}
+}
+
+func TestProtocolLimitDefaultsAndZeroSemantics(t *testing.T) {
+	cfg := &Config{Server: Server{Listen: []Listen{{
+		Kind: listenKindSocketMap, Name: testFirst, Type: listenTypeTCP, Address: concurrencyTestHost, Port: 23450,
+	}}}}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	want := ProtocolLimitsConfig{
+		SocketMap: SocketMapProtocolLimits{
+			IdleTimeout: new(15 * time.Second), PartialRequestTimeout: 10 * time.Second,
+			WriteTimeout: 10 * time.Second, MaxRequestBytes: 1048576, MaxLengthDigits: 10,
+		},
+		PolicyService: PolicyServiceProtocolLimits{
+			IdleTimeout: new(time.Duration(0)), PartialRequestTimeout: 10 * time.Second,
+			WriteTimeout: 10 * time.Second, MaxRequestBytes: 1048576, MaxLineBytes: 65536, MaxAttributes: 256,
+		},
+		DovecotSASL: DovecotSASLProtocolLimits{
+			IdleTimeout: new(time.Duration(0)), PartialRequestTimeout: 30 * time.Second,
+			WriteTimeout: 10 * time.Second, MaxLineBytes: 16384,
+		},
+	}
+
+	if !reflect.DeepEqual(cfg.Server.ProtocolLimits, want) {
+		t.Fatalf("protocol defaults = %+v, want %+v", cfg.Server.ProtocolLimits, want)
+	}
+}
+
+func TestConnectionLimitDefaultsAreInheritedByValue(t *testing.T) {
+	cfg := &Config{Server: Server{
+		Limits: LimitsConfig{MaxConnections: 37},
+		Listen: []Listen{
+			{Kind: listenKindSocketMap, Name: testFirst, Type: listenTypeTCP, Address: concurrencyTestHost, Port: 23450},
+			{Kind: listenKindSocketMap, Name: testSecond, Type: listenTypeTCP, Address: concurrencyTestHost, Port: 23451},
+		},
+	}}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	for index, listener := range cfg.Server.Listen {
+		if listener.Limits.MaxConnections != 37 {
+			t.Fatalf("listener %d max connections = %d, want 37", index, listener.Limits.MaxConnections)
+		}
+	}
+
+	cfg.Server.Listen[0].Limits.MaxConnections = 5
+	if cfg.Server.Listen[1].Limits.MaxConnections != 37 {
+		t.Fatal("listener connection limits share mutable runtime state")
+	}
+}
+
+func TestWorkerPoolCompatibilityMapsConservativelyToLimits(t *testing.T) {
+	cfg := &Config{Server: Server{
+		WorkerPool: WorkerPoolConfig{MaxWorkers: 10, MaxQueue: 20},
+		Listen: []Listen{{
+			Kind:       listenKindSocketMap,
+			Name:       testFirst,
+			Type:       listenTypeTCP,
+			Address:    "127.0.0.1",
+			Port:       23450,
+			WorkerPool: WorkerPoolConfig{MaxWorkers: 3, MaxQueue: 4},
+		}},
+	}}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	if cfg.Server.Limits.MaxConnections != 30 || cfg.Server.Limits.MaxInflightRequests != 10 || maxQueuedRequests(cfg.Server.Limits) != 20 {
+		t.Fatalf("server compatibility limits = %+v", cfg.Server.Limits)
+	}
+
+	listenerLimits := cfg.Server.Listen[0].Limits
+	if listenerLimits.MaxConnections != 7 || listenerLimits.MaxInflightRequests != 3 || maxQueuedRequests(listenerLimits) != 4 {
+		t.Fatalf("listener compatibility limits = %+v", listenerLimits)
+	}
+}
+
+func TestLimitAndProtocolDefaultsInheritWithoutSharedPointers(t *testing.T) {
+	serverSocketIdle := 20 * time.Second
+	serverPolicyIdle := 45 * time.Second
+	zeroQueue := 0
+	cfg := &Config{Server: Server{
+		Limits: LimitsConfig{
+			MaxConnections:       80,
+			MaxInflightRequests:  12,
+			MaxQueuedRequests:    &zeroQueue,
+			RequestQueueTimeout:  3 * time.Second,
+			RequestTimeout:       6 * time.Second,
+			BackendTimeout:       2 * time.Second,
+			ResponseWriteReserve: time.Second,
+		},
+		ProtocolLimits: ProtocolLimitsConfig{
+			SocketMap:     SocketMapProtocolLimits{IdleTimeout: &serverSocketIdle, MaxRequestBytes: 2048},
+			PolicyService: PolicyServiceProtocolLimits{IdleTimeout: &serverPolicyIdle, MaxAttributes: 40},
+		},
+		Listen: []Listen{
+			{Kind: listenKindSocketMap, Name: testFirst, Type: listenTypeTCP, Address: "127.0.0.1", Port: 23450},
+			{Kind: listenKindSocketMap, Name: testSecond, Type: listenTypeTCP, Address: "127.0.0.1", Port: 23451},
+		},
+	}}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	for index := range cfg.Server.Listen {
+		listener := cfg.Server.Listen[index]
+		if !reflect.DeepEqual(listener.Limits, cfg.Server.Limits) {
+			t.Fatalf("listener %d limits = %+v", index, listener.Limits)
+		}
+
+		if !reflect.DeepEqual(listener.ProtocolLimits, cfg.Server.ProtocolLimits) {
+			t.Fatalf("listener %d protocol limits = %+v", index, listener.ProtocolLimits)
+		}
+	}
+
+	if cfg.Server.Listen[0].Limits.MaxQueuedRequests == cfg.Server.Listen[1].Limits.MaxQueuedRequests ||
+		cfg.Server.Listen[0].ProtocolLimits.SocketMap.IdleTimeout == cfg.Server.Listen[1].ProtocolLimits.SocketMap.IdleTimeout {
+		t.Fatal("listeners inherited shared configuration pointers")
+	}
+
+	*cfg.Server.Listen[0].Limits.MaxQueuedRequests = 7
+	*cfg.Server.Listen[0].ProtocolLimits.SocketMap.IdleTimeout = time.Second
+
+	if maxQueuedRequests(cfg.Server.Listen[1].Limits) != 0 ||
+		protocolIdleTimeout(cfg.Server.Listen[1].ProtocolLimits.SocketMap.IdleTimeout) != 20*time.Second {
+		t.Fatal("mutating one listener changed another listener")
+	}
+}
+
+func TestProtocolIdleTimeoutExplicitZeroOverridesInheritedValue(t *testing.T) {
+	serverIdle := 30 * time.Second
+	disabled := time.Duration(0)
+	cfg := &Config{Server: Server{
+		ProtocolLimits: ProtocolLimitsConfig{SocketMap: SocketMapProtocolLimits{IdleTimeout: &serverIdle}},
+		Listen: []Listen{{
+			Kind: listenKindSocketMap, Name: testFirst, Type: listenTypeTCP, Address: "127.0.0.1", Port: 23450,
+			ProtocolLimits: ProtocolLimitsConfig{SocketMap: SocketMapProtocolLimits{IdleTimeout: &disabled}},
+		}},
+	}}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	if got := protocolIdleTimeout(cfg.Server.Listen[0].ProtocolLimits.SocketMap.IdleTimeout); got != 0 {
+		t.Fatalf("explicit idle_timeout=0 = %s, want disabled", got)
+	}
+}
+
+func TestExplicitNewLimitsOverrideLegacyCompatibilityValues(t *testing.T) {
+	queued := 2
+	cfg := &Config{Server: Server{
+		WorkerPool: WorkerPoolConfig{MaxWorkers: 20, MaxQueue: 40},
+		Limits: LimitsConfig{
+			MaxConnections:      9,
+			MaxInflightRequests: 4,
+			MaxQueuedRequests:   &queued,
+		},
+		Listen: []Listen{{Kind: listenKindSocketMap, Name: testFirst, Type: listenTypeTCP, Address: "127.0.0.1", Port: 23450}},
+	}}
+
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	limits := cfg.Server.Listen[0].Limits
+	if limits.MaxConnections != 9 || limits.MaxInflightRequests != 4 || maxQueuedRequests(limits) != 2 {
+		t.Fatalf("explicit limits were overwritten by worker_pool migration: %+v", limits)
+	}
+}
+
+func TestZeroValuedLegacyWorkerPoolBlockIsDetectedAsConfigured(t *testing.T) {
+	viper.Reset()
+	defer viper.Reset()
+
+	viper.SetConfigType("yaml")
+
+	if err := viper.ReadConfig(strings.NewReader(`
+server:
+  worker_pool:
+    max_workers: 0
+  listen:
+    - kind: socket_map
+      name: first
+      type: tcp
+      address: 127.0.0.1
+      port: 23450
+      worker_pool:
+        max_queue: 0
+`)); err != nil {
+		t.Fatalf("ReadConfig failed: %v", err)
+	}
+
+	cfg := &Config{}
+	if err := cfg.HandleConfig(); err != nil {
+		t.Fatalf("HandleConfig failed: %v", err)
+	}
+
+	if !cfg.Server.LegacyWorkerPool || !cfg.Server.Listen[0].LegacyWorkerPool {
+		t.Fatalf("zero-valued legacy blocks were not marked: server=%t listener=%t", cfg.Server.LegacyWorkerPool, cfg.Server.Listen[0].LegacyWorkerPool)
 	}
 }
 

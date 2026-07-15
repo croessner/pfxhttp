@@ -84,7 +84,7 @@ func (p *GRPCConnPool) CloseAll() {
 
 	for name, pc := range p.conns {
 		if cerr := pc.conn.Close(); cerr != nil {
-			slog.Default().Warn("failed to close gRPC connection", slog.String("entry", name), slog.String("error", cerr.Error()))
+			slog.Default().Warn("failed to close gRPC connection", slog.String("entry", name), slog.String("reason", boundedErrorKind(cerr)))
 		}
 	}
 
@@ -104,7 +104,7 @@ func (p *GRPCConnPool) RetainOnly(keepNames map[string]struct{}) {
 		}
 
 		if cerr := pc.conn.Close(); cerr != nil {
-			slog.Default().Warn("failed to close gRPC connection", slog.String("entry", name), slog.String("error", cerr.Error()))
+			slog.Default().Warn("failed to close gRPC connection", slog.String("entry", name), slog.String("reason", boundedErrorKind(cerr)))
 		}
 
 		delete(p.conns, name)

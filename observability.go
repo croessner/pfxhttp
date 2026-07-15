@@ -29,6 +29,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -46,9 +47,8 @@ const (
 	componentPolicyService = "policy_service"
 	componentSocketMap     = "socket_map"
 
-	eventAccept    = "accept"
-	eventClose     = "close"
-	eventQueueFull = "queue_full"
+	eventAccept = "accept"
+	eventClose  = "close"
 
 	defaultBackendName  = "default"
 	statusClassError    = "error"
@@ -61,6 +61,8 @@ const (
 	labelName        = "name"
 	labelOutcome     = "outcome"
 	labelResult      = "result"
+	labelReason      = "reason"
+	labelState       = "state"
 	labelStatus      = "status"
 	labelStatusClass = "status_class"
 
@@ -92,6 +94,7 @@ const (
 	dovecotSASLBackendSpanName   = "dovecot_sasl backend auth"
 	dovecotSASLResponseSpanName  = "dovecot_sasl write response"
 	dovecotSASLWaitSpanName      = "dovecot_sasl continuation wait"
+	requestQueueSpanName         = "listener request queue"
 )
 
 const (
@@ -150,6 +153,12 @@ type prometheusMetrics struct {
 	listenerConnections    *prometheus.CounterVec
 	listenerActive         *prometheus.GaugeVec
 	listenerDuration       *prometheus.HistogramVec
+	listenerState          *prometheus.GaugeVec
+	listenerDrains         *prometheus.CounterVec
+	requestState           *prometheus.GaugeVec
+	requestAdmissions      *prometheus.CounterVec
+	requestQueueWait       *prometheus.HistogramVec
+	protocolFailures       *prometheus.CounterVec
 	applicationRequests    *prometheus.CounterVec
 	applicationDuration    *prometheus.HistogramVec
 	backendHTTPRequests    *prometheus.CounterVec
@@ -165,6 +174,12 @@ type otelMetricInstruments struct {
 	listenerConnections metric.Int64Counter
 	listenerActive      metric.Int64UpDownCounter
 	listenerDuration    metric.Float64Histogram
+	listenerState       metric.Int64UpDownCounter
+	listenerDrains      metric.Int64Counter
+	requestState        metric.Int64UpDownCounter
+	requestAdmissions   metric.Int64Counter
+	requestQueueWait    metric.Float64Histogram
+	protocolFailures    metric.Int64Counter
 	applicationRequests metric.Int64Counter
 	applicationDuration metric.Float64Histogram
 	backendHTTPRequests metric.Int64Counter
@@ -402,6 +417,30 @@ func (o *Observability) initializeOpenTelemetryInstruments() error {
 		return err
 	}
 
+	if instruments.listenerState, err = o.meter.Int64UpDownCounter("pfxhttp_listener_connection_state"); err != nil {
+		return err
+	}
+
+	if instruments.listenerDrains, err = o.meter.Int64Counter("pfxhttp_listener_drains"); err != nil {
+		return err
+	}
+
+	if instruments.requestState, err = o.meter.Int64UpDownCounter("pfxhttp_listener_request_state"); err != nil {
+		return err
+	}
+
+	if instruments.requestAdmissions, err = o.meter.Int64Counter("pfxhttp_listener_request_admissions"); err != nil {
+		return err
+	}
+
+	if instruments.requestQueueWait, err = o.meter.Float64Histogram("pfxhttp_listener_request_queue_wait", metric.WithUnit("s")); err != nil {
+		return err
+	}
+
+	if instruments.protocolFailures, err = o.meter.Int64Counter("pfxhttp_listener_protocol_failures"); err != nil {
+		return err
+	}
+
 	if instruments.applicationRequests, err = o.meter.Int64Counter("pfxhttp_application_requests"); err != nil {
 		return err
 	}
@@ -443,6 +482,12 @@ func newPrometheusMetrics(registry *prometheus.Registry, runtimeMetrics bool) *p
 		metrics.listenerConnections,
 		metrics.listenerActive,
 		metrics.listenerDuration,
+		metrics.listenerState,
+		metrics.listenerDrains,
+		metrics.requestState,
+		metrics.requestAdmissions,
+		metrics.requestQueueWait,
+		metrics.protocolFailures,
 		metrics.applicationRequests,
 		metrics.applicationDuration,
 		metrics.backendHTTPRequests,
@@ -462,6 +507,12 @@ func buildPrometheusMetrics() *prometheusMetrics {
 		listenerConnections: newCounterVec("pfxhttp_listener_connections_total", "Total listener connection events.", labelComponent, labelName, labelEvent, labelResult),
 		listenerActive:      newGaugeVec("pfxhttp_listener_active_connections", "Currently active listener connections.", labelComponent, labelName),
 		listenerDuration:    newDurationVec("pfxhttp_listener_connection_duration_seconds", "Listener connection duration in seconds.", labelComponent, labelName, labelResult),
+		listenerState:       newGaugeVec("pfxhttp_listener_connection_state", "Current listener connections by bounded protocol state.", labelComponent, labelName, labelState),
+		listenerDrains:      newCounterVec("pfxhttp_listener_drains_total", "Listener drain outcomes.", labelComponent, labelName, labelResult),
+		requestState:        newGaugeVec("pfxhttp_listener_request_state", "Current listener requests by scheduler state.", labelComponent, labelName, labelState),
+		requestAdmissions:   newCounterVec("pfxhttp_listener_request_admissions_total", "Listener request admission outcomes.", labelComponent, labelName, labelOutcome),
+		requestQueueWait:    newDurationVec("pfxhttp_listener_request_queue_wait_seconds", "Listener request queue wait in seconds.", labelComponent, labelName, labelOutcome),
+		protocolFailures:    newCounterVec("pfxhttp_listener_protocol_failures_total", "Listener protocol failures by bounded reason.", labelComponent, labelName, labelReason),
 		applicationRequests: newCounterVec(
 			"pfxhttp_application_requests_total",
 			"Total application-level requests by component, name, and outcome.",
@@ -546,7 +597,7 @@ func (o *Observability) StartPrometheusServer() error {
 		}
 
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			o.logger.Error("Prometheus endpoint stopped", slog.String("error", serveErr.Error()))
+			o.logger.Error("Prometheus endpoint stopped", slog.String("reason", boundedErrorKind(serveErr)))
 		}
 	}()
 
@@ -733,8 +784,36 @@ func (o *Observability) RecordSpanError(span trace.Span, err error) {
 		return
 	}
 
-	span.RecordError(err)
-	span.SetStatus(codes.Error, err.Error())
+	errorType := boundedErrorKind(err)
+	span.SetAttributes(attribute.String("error.type", errorType))
+	span.SetStatus(codes.Error, errorType)
+}
+
+func boundedErrorKind(err error) string {
+	if err == nil {
+		return resultOK
+	}
+
+	if kind, ok := protocolErrorKindOf(err); ok {
+		return string(kind)
+	}
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	}
+
+	if grpcStatus, ok := status.FromError(err); ok {
+		return "grpc_" + strings.ToLower(grpcStatus.Code().String())
+	}
+
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+		return "network_timeout"
+	}
+
+	return "internal_error"
 }
 
 // InstrumentHTTPClient wraps a client transport with outbound HTTP metrics, spans, and trace propagation.
@@ -798,6 +877,104 @@ func (o *Observability) ObserveListenerDuration(ctx context.Context, component, 
 			attribute.String(labelComponent, component),
 			attribute.String(labelName, name),
 			attribute.String(labelResult, result),
+		))
+	}
+}
+
+func (o *Observability) ObserveListenerState(ctx context.Context, component, name, state string, delta int64) {
+	if o == nil || delta == 0 {
+		return
+	}
+
+	if o.metrics != nil {
+		o.metrics.listenerState.WithLabelValues(component, name, state).Add(float64(delta))
+	}
+
+	if o.otelMetrics != nil {
+		o.otelMetrics.listenerState.Add(ctx, delta, metric.WithAttributes(
+			attribute.String(labelComponent, component),
+			attribute.String(labelName, name),
+			attribute.String(labelState, state),
+		))
+	}
+}
+
+func (o *Observability) ObserveListenerDrain(ctx context.Context, component, name, result string) {
+	if o == nil {
+		return
+	}
+
+	if o.metrics != nil {
+		o.metrics.listenerDrains.WithLabelValues(component, name, result).Inc()
+	}
+
+	if o.otelMetrics != nil {
+		o.otelMetrics.listenerDrains.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(labelComponent, component),
+			attribute.String(labelName, name),
+			attribute.String(labelResult, result),
+		))
+	}
+}
+
+func (o *Observability) ObserveRequestLimiter(ctx context.Context, component, name string, event requestLimiterEvent) {
+	if o == nil {
+		return
+	}
+
+	if o.metrics != nil {
+		if event.inFlightDelta != 0 {
+			o.metrics.requestState.WithLabelValues(component, name, "inflight").Add(float64(event.inFlightDelta))
+		}
+
+		if event.queuedDelta != 0 {
+			o.metrics.requestState.WithLabelValues(component, name, "queued").Add(float64(event.queuedDelta))
+		}
+
+		if event.outcome != "" {
+			o.metrics.requestAdmissions.WithLabelValues(component, name, string(event.outcome)).Inc()
+
+			if event.queueWait > 0 {
+				o.metrics.requestQueueWait.WithLabelValues(component, name, string(event.outcome)).Observe(event.queueWait.Seconds())
+			}
+		}
+	}
+
+	if o.otelMetrics != nil {
+		base := []attribute.KeyValue{attribute.String(labelComponent, component), attribute.String(labelName, name)}
+		if event.inFlightDelta != 0 {
+			o.otelMetrics.requestState.Add(ctx, int64(event.inFlightDelta), metric.WithAttributes(append(base, attribute.String(labelState, "inflight"))...))
+		}
+
+		if event.queuedDelta != 0 {
+			o.otelMetrics.requestState.Add(ctx, int64(event.queuedDelta), metric.WithAttributes(append(base, attribute.String(labelState, "queued"))...))
+		}
+
+		if event.outcome != "" {
+			attrs := append(base, attribute.String(labelOutcome, string(event.outcome)))
+			o.otelMetrics.requestAdmissions.Add(ctx, 1, metric.WithAttributes(attrs...))
+
+			if event.queueWait > 0 {
+				o.otelMetrics.requestQueueWait.Record(ctx, event.queueWait.Seconds(), metric.WithAttributes(attrs...))
+			}
+		}
+	}
+}
+
+func (o *Observability) ObserveProtocolFailure(ctx context.Context, component, name string, reason protocolErrorKind) {
+	if o == nil {
+		return
+	}
+
+	if o.metrics != nil {
+		o.metrics.protocolFailures.WithLabelValues(component, name, string(reason)).Inc()
+	}
+
+	if o.otelMetrics != nil {
+		o.otelMetrics.protocolFailures.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(labelComponent, component),
+			attribute.String(labelName, name),
+			attribute.String(labelReason, string(reason)),
 		))
 	}
 }

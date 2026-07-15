@@ -19,6 +19,16 @@ import (
 	"github.com/spf13/viper"
 )
 
+const defaultMaxConnections = 1024
+const defaultSockmapMaxReplySize = 100000
+
+const (
+	defaultRequestQueueTimeout  = 2 * time.Second
+	defaultRequestTimeout       = 4 * time.Second
+	defaultBackendTimeout       = 1 * time.Second
+	defaultResponseWriteReserve = 500 * time.Millisecond
+)
+
 type Config struct {
 	Server         Server             `mapstructure:"server" validate:"required"`
 	SocketMaps     map[string]Request `mapstructure:"socket_maps" validate:"omitempty,dive"`
@@ -27,17 +37,20 @@ type Config struct {
 }
 
 type Server struct {
-	Listen              []Listen            `mapstructure:"listen" validate:"required,min=1,dive"`
-	RunAsUser           string              `mapstructure:"run_as_user" validate:"omitempty"`
-	RunAsGroup          string              `mapstructure:"run_as_group" validate:"omitempty"`
-	Chroot              string              `mapstructure:"chroot" validate:"omitempty,dir"`
-	Logging             Logging             `mapstructure:"logging" validate:"omitempty"`
-	HTTPClient          HTTPClient          `mapstructure:"http_client" validate:"omitempty"`
-	TLS                 TLS                 `mapstructure:"tls" validate:"omitempty"`
-	SockmapMaxReplySize int                 `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
-	ResponseCache       ResponseCacheConfig `mapstructure:"response_cache" validate:"omitempty"`
-	WorkerPool          WorkerPoolConfig    `mapstructure:"worker_pool" validate:"omitempty"`
-	Observability       ObservabilityConfig `mapstructure:"observability" validate:"omitempty"`
+	Listen              []Listen             `mapstructure:"listen" validate:"required,min=1,dive"`
+	RunAsUser           string               `mapstructure:"run_as_user" validate:"omitempty"`
+	RunAsGroup          string               `mapstructure:"run_as_group" validate:"omitempty"`
+	Chroot              string               `mapstructure:"chroot" validate:"omitempty,dir"`
+	Logging             Logging              `mapstructure:"logging" validate:"omitempty"`
+	HTTPClient          HTTPClient           `mapstructure:"http_client" validate:"omitempty"`
+	TLS                 TLS                  `mapstructure:"tls" validate:"omitempty"`
+	SockmapMaxReplySize int                  `mapstructure:"socketmap_max_reply_size" validate:"omitempty,min=1,max=1000000000"`
+	ResponseCache       ResponseCacheConfig  `mapstructure:"response_cache" validate:"omitempty"`
+	WorkerPool          WorkerPoolConfig     `mapstructure:"worker_pool" validate:"omitempty"`
+	Limits              LimitsConfig         `mapstructure:"limits" validate:"omitempty"`
+	ProtocolLimits      ProtocolLimitsConfig `mapstructure:"protocol_limits" validate:"omitempty"`
+	Observability       ObservabilityConfig  `mapstructure:"observability" validate:"omitempty"`
+	LegacyWorkerPool    bool                 `mapstructure:"-"`
 }
 
 type Listen struct {
@@ -50,13 +63,61 @@ type Listen struct {
 	User    string `mapstructure:"user" validate:"omitempty"`
 	Group   string `mapstructure:"group" validate:"omitempty"`
 	// SystemdSocketName selects a systemd FileDescriptorName to consume instead of creating a native listener.
-	SystemdSocketName string           `mapstructure:"systemd_socket_name" validate:"omitempty,printascii"`
-	WorkerPool        WorkerPoolConfig `mapstructure:"worker_pool" validate:"omitempty"`
+	SystemdSocketName string               `mapstructure:"systemd_socket_name" validate:"omitempty,printascii"`
+	WorkerPool        WorkerPoolConfig     `mapstructure:"worker_pool" validate:"omitempty"`
+	Limits            LimitsConfig         `mapstructure:"limits" validate:"omitempty"`
+	ProtocolLimits    ProtocolLimitsConfig `mapstructure:"protocol_limits" validate:"omitempty"`
+	LegacyWorkerPool  bool                 `mapstructure:"-"`
 }
 
 type WorkerPoolConfig struct {
-	MaxWorkers int `mapstructure:"max_workers" validate:"omitempty,min=1"`
-	MaxQueue   int `mapstructure:"max_queue" validate:"omitempty,min=1"`
+	MaxWorkers int `mapstructure:"max_workers" validate:"omitempty,min=1,max=1048576"`
+	MaxQueue   int `mapstructure:"max_queue" validate:"omitempty,min=1,max=1048576"`
+}
+
+// LimitsConfig bounds listener-owned runtime resources independently of request execution limits.
+type LimitsConfig struct {
+	MaxConnections       int           `mapstructure:"max_connections" validate:"omitempty,min=1,max=1048576"`
+	MaxInflightRequests  int           `mapstructure:"max_inflight_requests" validate:"omitempty,min=1,max=1048576"`
+	MaxQueuedRequests    *int          `mapstructure:"max_queued_requests" validate:"omitempty,gte=0,max=1048576"`
+	RequestQueueTimeout  time.Duration `mapstructure:"request_queue_timeout" validate:"omitempty,min=1ms,max=1h"`
+	RequestTimeout       time.Duration `mapstructure:"request_timeout" validate:"omitempty,min=1s,max=1h"`
+	BackendTimeout       time.Duration `mapstructure:"backend_timeout" validate:"omitempty,min=1ms,max=1h"`
+	ResponseWriteReserve time.Duration `mapstructure:"response_write_reserve" validate:"omitempty,min=1ms,max=1m"`
+}
+
+// ProtocolLimitsConfig bounds framing and connection I/O independently for each supported ingress protocol.
+type ProtocolLimitsConfig struct {
+	SocketMap     SocketMapProtocolLimits     `mapstructure:"socket_map" validate:"omitempty"`
+	PolicyService PolicyServiceProtocolLimits `mapstructure:"policy_service" validate:"omitempty"`
+	DovecotSASL   DovecotSASLProtocolLimits   `mapstructure:"dovecot_sasl" validate:"omitempty"`
+}
+
+// SocketMapProtocolLimits defines the complete SocketMap framing contract.
+type SocketMapProtocolLimits struct {
+	IdleTimeout           *time.Duration `mapstructure:"idle_timeout" validate:"omitempty,gte=0,max=1h"`
+	PartialRequestTimeout time.Duration  `mapstructure:"partial_request_timeout" validate:"omitempty,min=1ms,max=1h"`
+	WriteTimeout          time.Duration  `mapstructure:"write_timeout" validate:"omitempty,min=1ms,max=1h"`
+	MaxRequestBytes       int            `mapstructure:"max_request_bytes" validate:"omitempty,min=1,max=67108864"`
+	MaxLengthDigits       int            `mapstructure:"max_length_digits" validate:"omitempty,min=1,max=10"`
+}
+
+// PolicyServiceProtocolLimits defines policy request framing and persistent-connection timing.
+type PolicyServiceProtocolLimits struct {
+	IdleTimeout           *time.Duration `mapstructure:"idle_timeout" validate:"omitempty,gte=0,max=1h"`
+	PartialRequestTimeout time.Duration  `mapstructure:"partial_request_timeout" validate:"omitempty,min=1ms,max=1h"`
+	WriteTimeout          time.Duration  `mapstructure:"write_timeout" validate:"omitempty,min=1ms,max=1h"`
+	MaxRequestBytes       int            `mapstructure:"max_request_bytes" validate:"omitempty,min=1,max=67108864"`
+	MaxLineBytes          int            `mapstructure:"max_line_bytes" validate:"omitempty,min=1,max=16777216"`
+	MaxAttributes         int            `mapstructure:"max_attributes" validate:"omitempty,min=1,max=1048576"`
+}
+
+// DovecotSASLProtocolLimits defines Dovecot auth-client connection timing.
+type DovecotSASLProtocolLimits struct {
+	IdleTimeout           *time.Duration `mapstructure:"idle_timeout" validate:"omitempty,gte=0,max=1h"`
+	PartialRequestTimeout time.Duration  `mapstructure:"partial_request_timeout" validate:"omitempty,min=1ms,max=1h"`
+	WriteTimeout          time.Duration  `mapstructure:"write_timeout" validate:"omitempty,min=1ms,max=1h"`
+	MaxLineBytes          int            `mapstructure:"max_line_bytes" validate:"omitempty,min=1,max=1048576"`
 }
 
 type Logging struct {
@@ -665,10 +726,216 @@ func splitBasicAuthCredentials(credentials string) (string, string, error) {
 	return username, password, nil
 }
 
+func maxQueuedRequests(limits LimitsConfig) int {
+	if limits.MaxQueuedRequests == nil {
+		return 0
+	}
+
+	return *limits.MaxQueuedRequests
+}
+
+func defaultProtocolLimitsConfig() ProtocolLimitsConfig {
+	socketMapIdle := 15 * time.Second
+	policyIdle := time.Duration(0)
+	dovecotIdle := time.Duration(0)
+
+	return ProtocolLimitsConfig{
+		SocketMap: SocketMapProtocolLimits{
+			IdleTimeout:           &socketMapIdle,
+			PartialRequestTimeout: defaultPartialRequestTimeout,
+			WriteTimeout:          10 * time.Second,
+			MaxRequestBytes:       defaultSocketMapRequestBytes,
+			MaxLengthDigits:       defaultSocketMapLengthDigits,
+		},
+		PolicyService: PolicyServiceProtocolLimits{
+			IdleTimeout:           &policyIdle,
+			PartialRequestTimeout: defaultPartialRequestTimeout,
+			WriteTimeout:          10 * time.Second,
+			MaxRequestBytes:       defaultPolicyRequestBytes,
+			MaxLineBytes:          defaultPolicyLineBytes,
+			MaxAttributes:         defaultPolicyAttributes,
+		},
+		DovecotSASL: DovecotSASLProtocolLimits{
+			IdleTimeout:           &dovecotIdle,
+			PartialRequestTimeout: 30 * time.Second,
+			WriteTimeout:          defaultDovecotWriteTimeout,
+			MaxLineBytes:          defaultDovecotLineBytes,
+		},
+	}
+}
+
+func resolveProtocolLimits(base, override ProtocolLimitsConfig) ProtocolLimitsConfig {
+	return ProtocolLimitsConfig{
+		SocketMap:     resolveSocketMapProtocolLimits(base.SocketMap, override.SocketMap),
+		PolicyService: resolvePolicyProtocolLimits(base.PolicyService, override.PolicyService),
+		DovecotSASL:   resolveDovecotProtocolLimits(base.DovecotSASL, override.DovecotSASL),
+	}
+}
+
+func resolveSocketMapProtocolLimits(base, override SocketMapProtocolLimits) SocketMapProtocolLimits {
+	resolved := base
+
+	if override.IdleTimeout != nil {
+		resolved.IdleTimeout = new(*override.IdleTimeout)
+	} else if base.IdleTimeout != nil {
+		resolved.IdleTimeout = new(*base.IdleTimeout)
+	}
+
+	if override.PartialRequestTimeout != 0 {
+		resolved.PartialRequestTimeout = override.PartialRequestTimeout
+	}
+
+	if override.WriteTimeout != 0 {
+		resolved.WriteTimeout = override.WriteTimeout
+	}
+
+	if override.MaxRequestBytes != 0 {
+		resolved.MaxRequestBytes = override.MaxRequestBytes
+	}
+
+	if override.MaxLengthDigits != 0 {
+		resolved.MaxLengthDigits = override.MaxLengthDigits
+	}
+
+	return resolved
+}
+
+func resolvePolicyProtocolLimits(base, override PolicyServiceProtocolLimits) PolicyServiceProtocolLimits {
+	resolved := base
+
+	if override.IdleTimeout != nil {
+		resolved.IdleTimeout = new(*override.IdleTimeout)
+	} else if base.IdleTimeout != nil {
+		resolved.IdleTimeout = new(*base.IdleTimeout)
+	}
+
+	if override.PartialRequestTimeout != 0 {
+		resolved.PartialRequestTimeout = override.PartialRequestTimeout
+	}
+
+	if override.WriteTimeout != 0 {
+		resolved.WriteTimeout = override.WriteTimeout
+	}
+
+	if override.MaxRequestBytes != 0 {
+		resolved.MaxRequestBytes = override.MaxRequestBytes
+	}
+
+	if override.MaxLineBytes != 0 {
+		resolved.MaxLineBytes = override.MaxLineBytes
+	}
+
+	if override.MaxAttributes != 0 {
+		resolved.MaxAttributes = override.MaxAttributes
+	}
+
+	return resolved
+}
+
+func resolveDovecotProtocolLimits(base, override DovecotSASLProtocolLimits) DovecotSASLProtocolLimits {
+	resolved := base
+
+	if override.IdleTimeout != nil {
+		resolved.IdleTimeout = new(*override.IdleTimeout)
+	} else if base.IdleTimeout != nil {
+		resolved.IdleTimeout = new(*base.IdleTimeout)
+	}
+
+	if override.PartialRequestTimeout != 0 {
+		resolved.PartialRequestTimeout = override.PartialRequestTimeout
+	}
+
+	if override.WriteTimeout != 0 {
+		resolved.WriteTimeout = override.WriteTimeout
+	}
+
+	if override.MaxLineBytes != 0 {
+		resolved.MaxLineBytes = override.MaxLineBytes
+	}
+
+	return resolved
+}
+
+func protocolIdleTimeout(value *time.Duration) time.Duration {
+	if value == nil {
+		return 0
+	}
+
+	return *value
+}
+
+func validateLegacyWorkerPoolBounds(cfg *Config) error {
+	const maximum = 1048576
+
+	validatePool := func(path string, pool WorkerPoolConfig) error {
+		if pool.MaxWorkers < 0 || pool.MaxWorkers > maximum || pool.MaxQueue < 0 || pool.MaxQueue > maximum {
+			return fmt.Errorf("%s values must be between 0 and %d", path, maximum)
+		}
+
+		return nil
+	}
+
+	if err := validatePool("server.worker_pool", cfg.Server.WorkerPool); err != nil {
+		return err
+	}
+
+	for index, listener := range cfg.Server.Listen {
+		if err := validatePool(fmt.Sprintf("server.listen[%d].worker_pool", index), listener.WorkerPool); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func legacyWorkerPoolInputPresence(cfg *Config) (bool, map[int]bool) {
+	serverPresent := cfg.Server.WorkerPool.MaxWorkers != 0 || cfg.Server.WorkerPool.MaxQueue != 0
+
+	listenerPresent := make(map[int]bool)
+	for index, listener := range cfg.Server.Listen {
+		listenerPresent[index] = listener.WorkerPool.MaxWorkers != 0 || listener.WorkerPool.MaxQueue != 0
+	}
+
+	serverSettings, ok := viper.AllSettings()["server"].(map[string]any)
+	if !ok {
+		return serverPresent, listenerPresent
+	}
+
+	if _, ok := serverSettings["worker_pool"]; ok {
+		serverPresent = true
+	}
+
+	rawListeners, ok := serverSettings["listen"].([]any)
+	if !ok {
+		return serverPresent, listenerPresent
+	}
+
+	for index, rawListener := range rawListeners {
+		listenerSettings, ok := rawListener.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		if _, ok := listenerSettings["worker_pool"]; ok {
+			listenerPresent[index] = true
+		}
+	}
+
+	return serverPresent, listenerPresent
+}
+
 func (cfg *Config) HandleConfig() error {
 
 	err := viper.Unmarshal(cfg)
 	if err != nil {
+		return err
+	}
+
+	if cfg.Server.SockmapMaxReplySize == 0 {
+		cfg.Server.SockmapMaxReplySize = defaultSockmapMaxReplySize
+	}
+
+	if err := validateLegacyWorkerPoolBounds(cfg); err != nil {
 		return err
 	}
 
@@ -721,23 +988,137 @@ func (cfg *Config) HandleConfig() error {
 		return err
 	}
 
-	// Apply defaults for worker pool if not configured
-	numCPU := runtime.GOMAXPROCS(0)
-	if cfg.Server.WorkerPool.MaxWorkers == 0 {
-		cfg.Server.WorkerPool.MaxWorkers = numCPU * 2
+	cfg.Server.ProtocolLimits = resolveProtocolLimits(defaultProtocolLimitsConfig(), cfg.Server.ProtocolLimits)
+
+	// Capture actual legacy input before applying independent connection/request defaults.
+	serverLegacyWorkerPool, listenerLegacyWorkerPool := legacyWorkerPoolInputPresence(cfg)
+	cfg.Server.LegacyWorkerPool = serverLegacyWorkerPool
+
+	for i := range cfg.Server.Listen {
+		cfg.Server.Listen[i].LegacyWorkerPool = listenerLegacyWorkerPool[i]
 	}
-	if cfg.Server.WorkerPool.MaxQueue == 0 {
+
+	numCPU := runtime.GOMAXPROCS(0)
+	defaultMaxInFlight := max(1, numCPU*2)
+	defaultMaxQueued := defaultMaxInFlight * 10
+
+	if cfg.Server.LegacyWorkerPool && cfg.Server.WorkerPool.MaxWorkers == 0 {
+		cfg.Server.WorkerPool.MaxWorkers = defaultMaxInFlight
+	}
+
+	if cfg.Server.LegacyWorkerPool && cfg.Server.WorkerPool.MaxQueue == 0 {
 		cfg.Server.WorkerPool.MaxQueue = cfg.Server.WorkerPool.MaxWorkers * 10
 	}
 
+	if cfg.Server.Limits.MaxConnections == 0 {
+		if cfg.Server.LegacyWorkerPool {
+			cfg.Server.Limits.MaxConnections = cfg.Server.WorkerPool.MaxWorkers + cfg.Server.WorkerPool.MaxQueue
+		} else {
+			cfg.Server.Limits.MaxConnections = defaultMaxConnections
+		}
+	}
+
+	if cfg.Server.Limits.MaxInflightRequests == 0 {
+		if cfg.Server.LegacyWorkerPool {
+			cfg.Server.Limits.MaxInflightRequests = cfg.Server.WorkerPool.MaxWorkers
+		} else {
+			cfg.Server.Limits.MaxInflightRequests = defaultMaxInFlight
+		}
+	}
+
+	if cfg.Server.Limits.MaxQueuedRequests == nil {
+		if cfg.Server.LegacyWorkerPool {
+			cfg.Server.Limits.MaxQueuedRequests = new(cfg.Server.WorkerPool.MaxQueue)
+		} else {
+			cfg.Server.Limits.MaxQueuedRequests = new(defaultMaxQueued)
+		}
+	} else {
+		cfg.Server.Limits.MaxQueuedRequests = new(*cfg.Server.Limits.MaxQueuedRequests)
+	}
+
+	if cfg.Server.Limits.RequestQueueTimeout == 0 {
+		cfg.Server.Limits.RequestQueueTimeout = defaultRequestQueueTimeout
+	}
+
+	if cfg.Server.Limits.RequestTimeout == 0 {
+		cfg.Server.Limits.RequestTimeout = defaultRequestTimeout
+	}
+
+	if cfg.Server.Limits.BackendTimeout == 0 {
+		cfg.Server.Limits.BackendTimeout = defaultBackendTimeout
+	}
+
+	if cfg.Server.Limits.ResponseWriteReserve == 0 {
+		cfg.Server.Limits.ResponseWriteReserve = defaultResponseWriteReserve
+	}
+
 	for i := range cfg.Server.Listen {
-		if cfg.Server.Listen[i].WorkerPool.MaxWorkers == 0 {
-			// If per-listener pool is not configured, we don't automatically
-			// set it here because we want it to fall back to the global pool.
-			// But if it IS partially configured (e.g. only MaxWorkers), we should
-			// provide a default for MaxQueue.
-		} else if cfg.Server.Listen[i].WorkerPool.MaxQueue == 0 {
+		cfg.Server.Listen[i].ProtocolLimits = resolveProtocolLimits(cfg.Server.ProtocolLimits, cfg.Server.Listen[i].ProtocolLimits)
+
+		if cfg.Server.Listen[i].LegacyWorkerPool && cfg.Server.Listen[i].WorkerPool.MaxWorkers == 0 {
+			cfg.Server.Listen[i].WorkerPool.MaxWorkers = cfg.Server.Limits.MaxInflightRequests
+		}
+
+		if cfg.Server.Listen[i].LegacyWorkerPool && cfg.Server.Listen[i].WorkerPool.MaxQueue == 0 {
 			cfg.Server.Listen[i].WorkerPool.MaxQueue = cfg.Server.Listen[i].WorkerPool.MaxWorkers * 10
+		}
+
+		if cfg.Server.Listen[i].Limits.MaxConnections == 0 {
+			if cfg.Server.Listen[i].LegacyWorkerPool {
+				cfg.Server.Listen[i].Limits.MaxConnections = cfg.Server.Listen[i].WorkerPool.MaxWorkers + cfg.Server.Listen[i].WorkerPool.MaxQueue
+			} else {
+				cfg.Server.Listen[i].Limits.MaxConnections = cfg.Server.Limits.MaxConnections
+			}
+		}
+
+		if cfg.Server.Listen[i].Limits.MaxInflightRequests == 0 {
+			if cfg.Server.Listen[i].LegacyWorkerPool {
+				cfg.Server.Listen[i].Limits.MaxInflightRequests = cfg.Server.Listen[i].WorkerPool.MaxWorkers
+			} else {
+				cfg.Server.Listen[i].Limits.MaxInflightRequests = cfg.Server.Limits.MaxInflightRequests
+			}
+		}
+
+		if cfg.Server.Listen[i].Limits.MaxQueuedRequests == nil {
+			if cfg.Server.Listen[i].LegacyWorkerPool {
+				cfg.Server.Listen[i].Limits.MaxQueuedRequests = new(cfg.Server.Listen[i].WorkerPool.MaxQueue)
+			} else {
+				cfg.Server.Listen[i].Limits.MaxQueuedRequests = new(maxQueuedRequests(cfg.Server.Limits))
+			}
+		} else {
+			cfg.Server.Listen[i].Limits.MaxQueuedRequests = new(*cfg.Server.Listen[i].Limits.MaxQueuedRequests)
+		}
+
+		if cfg.Server.Listen[i].Limits.RequestQueueTimeout == 0 {
+			cfg.Server.Listen[i].Limits.RequestQueueTimeout = cfg.Server.Limits.RequestQueueTimeout
+		}
+
+		if cfg.Server.Listen[i].Limits.RequestTimeout == 0 {
+			cfg.Server.Listen[i].Limits.RequestTimeout = cfg.Server.Limits.RequestTimeout
+		}
+
+		if cfg.Server.Listen[i].Limits.BackendTimeout == 0 {
+			cfg.Server.Listen[i].Limits.BackendTimeout = cfg.Server.Limits.BackendTimeout
+		}
+
+		if cfg.Server.Listen[i].Limits.ResponseWriteReserve == 0 {
+			cfg.Server.Listen[i].Limits.ResponseWriteReserve = cfg.Server.Limits.ResponseWriteReserve
+		}
+
+		queueBudget := time.Duration(0)
+		if maxQueuedRequests(cfg.Server.Listen[i].Limits) > 0 {
+			queueBudget = cfg.Server.Listen[i].Limits.RequestQueueTimeout
+		}
+
+		if queueBudget+cfg.Server.Listen[i].Limits.BackendTimeout+
+			cfg.Server.Listen[i].Limits.ResponseWriteReserve >=
+			cfg.Server.Listen[i].Limits.RequestTimeout {
+			return fmt.Errorf("listener %s request timeout must exceed queue timeout plus backend timeout plus response write reserve", listenKey(cfg.Server.Listen[i]))
+		}
+
+		policyLimits := cfg.Server.Listen[i].ProtocolLimits.PolicyService
+		if policyLimits.MaxLineBytes > policyLimits.MaxRequestBytes {
+			return fmt.Errorf("listener %s policy max line bytes must not exceed max request bytes", listenKey(cfg.Server.Listen[i]))
 		}
 	}
 
@@ -858,7 +1239,7 @@ func NewConfigFile() (cfg *Config, err error) {
 	// Attempt to read configuration
 	err = viper.ReadInConfig()
 	if err != nil {
-		slog.Warn("Configuration file not found, using defaults", "error", err)
+		slog.Warn("Configuration file not found, using defaults", "reason", boundedErrorKind(err))
 	} else {
 		slog.Info("Using configuration file", "file", viper.ConfigFileUsed())
 	}

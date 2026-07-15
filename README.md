@@ -20,7 +20,7 @@ Pfxhttp is a lightweight HTTP proxy designed to integrate Postfix with external 
     * [Section Defaults](#section-defaults)
     * [HTTP Basic Authentication](#http-basic-authentication)
     * [Response Cache](#response-cache)
-    * [Worker Pool](#worker-pool)
+    * [Connection, Request and Protocol Limits](#connection-request-and-protocol-limits)
     * [Observability](#observability)
     * [Privilege Dropping & Chroot](#privilege-dropping--chroot)
       * [Privilege Dropping](#privilege-dropping)
@@ -258,7 +258,7 @@ The `server` section contains global options, including:
 - **HTTP Client Options**: Configure connection limits, timeouts, and optional TLS settings.
 - **OIDC Authentication**: Configure OIDC authentication (Client Credentials Flow) for HTTP requests with automatic token management.
 - **Response Cache**: Optional in-memory cache to serve responses when the backend is unavailable.
-- **Worker Pool**: Controlled performance by limiting the number of concurrent connections and providing back-pressure via a job queue.
+- **Listener-owned limits**: Bound admitted connections, backend work, queueing, framing memory and protocol deadlines independently for every listener.
 - **Systemd Socket Activation**: Optionally bind a listener to a named systemd `FileDescriptorName` via `systemd_socket_name`.
 - **Observability**: Optional Prometheus endpoint and OpenTelemetry OTLP HTTP export for listener, request, HTTP backend, gRPC backend, and OIDC activity.
 
@@ -287,7 +287,7 @@ server:
     - kind: "dovecot_sasl"
       name: "dovecot_sasl"
       type: "tcp"
-      address: "0.0.0.0"
+      address: "127.0.0.1"
       port: 23453
 
   logging:
@@ -297,7 +297,7 @@ server:
 
   tls:
     enabled: true
-    skip_verify: true
+    skip_verify: false
     root_ca: "/etc/ssl/certs/ca-certificates.crt"
 
   http_client:
@@ -319,7 +319,7 @@ server:
     prometheus_port: 9464
     prometheus_path: "/metrics"
     prometheus_runtime_metrics: false
-    # prometheus_http_auth_basic: "metrics:change-me"
+    # prometheus_http_auth_basic: "<username>:<password>"
     prometheus_tls:
       enabled: false
       # cert: "/etc/pfxhttp/metrics.crt"
@@ -356,7 +356,7 @@ socket_maps:
       enabled: true
       configuration_uri: "https://example.com/.well-known/openid-configuration"
       client_id: "foobar"
-      client_secret: "secret"
+      client_secret: "<set-in-deployment>"
     payload: >
       {
         "key": "{{ .Key }}"
@@ -383,7 +383,7 @@ policy_services:
       enabled: true
       configuration_uri: "https://example.com/.well-known/openid-configuration"
       client_id: "foobar"
-      client_secret: "secret"
+      client_secret: "<set-in-deployment>"
     payload: "{{ .Key }}"
     status_code: 200
     value_field: "policy.result"
@@ -398,13 +398,13 @@ dovecot_sasl:
       enabled: true
       configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
       client_id: pfxhttp
-      client_secret: backend-secret
+      client_secret: "<set-in-deployment>"
     # Validation of incoming XOAUTH2/OAUTHBEARER tokens
     sasl_oidc_auth:
       enabled: true
       configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
       client_id: roundcube
-      client_secret: introspection-secret
+      client_secret: "<set-in-deployment>"
       # OR private_key_file for private_key_jwt:
       # private_key_file: /etc/pfxhttp/introspection-client.pem
       # auth_method: private_key_jwt
@@ -439,7 +439,7 @@ Example with defaults:
 socket_maps:
   defaults:
     target: "https://api.example.com/postfix/map"
-    http_auth_basic: "user:secret"
+    http_auth_basic: "<username>:<password>"
     http_response_compression: true
     payload: >
       {
@@ -469,7 +469,7 @@ Each entry inherits `target`, `http_auth_basic`, `payload`, `status_code`, etc. 
 Instead of manually adding an `Authorization: Basic ...` header, you can use the `http_auth_basic` field:
 
 ```yaml
-http_auth_basic: "user:password"
+http_auth_basic: "<username>:<password>"
 ```
 
 The value is automatically Base64-encoded and set as an `Authorization: Basic <base64>` header for HTTP transports. For `dovecot_sasl` gRPC entries, the same value is sent as `authorization: Basic <base64>` gRPC metadata. This field can be used both in `defaults` and in individual entries.
@@ -498,48 +498,84 @@ Notes:
 - Cache is in-memory and per-process; it is cleared on restart.
 - Keys are derived from the tuple (name, key). For policy services, the key is the JSON of the policy payload.
 
-### Worker Pool
+### Connection, Request and Protocol Limits
 
-Pfxhttp uses a worker pool to manage concurrent connections efficiently. This prevents the server from spawning an unlimited number of goroutines, which could lead to resource exhaustion under high load. You can configure a global worker pool for all listeners or a dedicated pool per listener.
+Connections and backend requests are deliberately separate resources. Every listener owns its own connection supervisor and request limiter, even when it inherits server defaults. Long-lived Postfix policy or SASL connections therefore cannot consume another listener's backend request capacity.
 
-Configuration (server section for global pool):
 ```yaml
 server:
-  worker_pool:
-    max_workers: 10   # Number of concurrent workers
-    max_queue: 100    # Maximum number of connections waiting in the queue
-```
-
-Configuration (listen section for per-listener pool):
-```yaml
-server:
+  limits:
+    max_connections: 1024
+    max_inflight_requests: 32
+    max_queued_requests: 320
+    request_queue_timeout: 2s
+    request_timeout: 4s
+    backend_timeout: 1s
+    response_write_reserve: 500ms
+  protocol_limits:
+    socket_map:
+      idle_timeout: 15s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_length_digits: 10
+    policy_service:
+      idle_timeout: 0s
+      partial_request_timeout: 10s
+      write_timeout: 10s
+      max_request_bytes: 1048576
+      max_line_bytes: 65536
+      max_attributes: 256
+    dovecot_sasl:
+      idle_timeout: 0s
+      partial_request_timeout: 30s
+      write_timeout: 10s
+      max_line_bytes: 16384
   listen:
-    - kind: "socket_map"
-      name: "demo_map"
-      type: "tcp"
-      address: "[::]"
+    - kind: socket_map
+      name: demo
+      type: tcp
+      address: 127.0.0.1
       port: 23450
-      worker_pool:
-        max_workers: 5
-        max_queue: 20
+      limits:
+        max_connections: 256
+        max_inflight_requests: 16
+        max_queued_requests: 0
 ```
 
-Behavior:
-- **Max Workers**: Defines how many connections are processed simultaneously.
-- **Max Queue**: Defines how many connections can be queued before the server starts applying back-pressure (blocking the `accept` call).
-- **Back-Pressure**: When the queue is full, the server will wait until a worker becomes available before accepting more connections. This naturally slows down the sender (Postfix).
-- **Precedence**: A worker pool defined in the `listen` section takes precedence over the global `worker_pool` in the `server` section.
-- **Defaults**: If no `worker_pool` is configured in the `server` section, Pfxhttp automatically initializes a global worker pool with `max_workers` set to `2 * GOMAXPROCS` and `max_queue` set to `10 * max_workers`.
+Missing listener values inherit the corresponding normalized server value. Missing server values use the defaults above, except `max_inflight_requests`, which defaults to `2 * GOMAXPROCS` (at least one), and `max_queued_requests`, which defaults to ten times that value. A configured `max_queued_requests: 0` disables queueing; it does not mean unlimited. For each protocol, an omitted `idle_timeout` inherits, while an explicit `0s` disables the server-side idle close. All other numeric or duration zero values mean “not set” and are replaced by defaults; there is no unlimited connection, in-flight, frame-size or write-timeout value.
+
+Connection, in-flight, queued-request and attribute counts are capped at 1,048,576. Queue, request, backend, idle, partial-frame and write timeouts are capped at one hour; `response_write_reserve` is capped at one minute. SocketMap and policy requests are capped at 67,108,864 bytes, SocketMap length prefixes at 10 digits, policy lines at 16,777,216 bytes, and Dovecot SASL lines at 1,048,576 bytes. Positive timeouts have a one-millisecond minimum except `request_timeout`, whose minimum is one second. Cross-field budget validation may make an individual field's maximum unusable with another maximum, such as a one-hour backend budget inside a one-hour total request budget.
+
+`max_connections` bounds admitted client connections. `max_inflight_requests` bounds requests currently using backend/cache execution. `max_queued_requests` bounds complete, decoded requests waiting for an execution permit. Queue saturation never permits mail silently: SocketMap returns a valid `TEMP` reply, policy service returns `action=defer_if_permit ...`, and Dovecot SASL returns a temporary authentication failure where protocol state permits it or closes the connection.
+
+The request deadline is one total budget shared by queueing, every HTTP or gRPC backend attempt/retry, and the response reserve. Configuration is rejected unless:
+
+```text
+request_timeout > request_queue_timeout + backend_timeout + response_write_reserve
+```
+
+The queue term is zero when queueing is disabled. The backend context is capped by both `backend_timeout` and the remaining request deadline before `response_write_reserve`; retries do not receive a fresh full budget. `server.http_client.timeout` and per-entry `grpc.timeout` are additional upper bounds, not budgets that extend the surrounding request.
+
+Inventory the effective caller settings before choosing values. Postfix SocketMap normally has 100-second connect/send/receive/active limits and closes an idle connection after about 10 seconds. Policy clients intentionally reuse connections; upstream defaults include 300 seconds idle, 1000 seconds TTL, 100 seconds per operation, two attempts, and a one-second retry delay, with endpoint-specific overrides available. A deployment using a five-second policy timeout must keep framing remainder plus the complete Pfxhttp request budget below those five seconds; increasing the Postfix timeout alone does not repair an oversized backend budget. See the official [SocketMap table](https://www.postfix.org/socketmap_table.5.html), [policy delegation guide](https://www.postfix.org/SMTPD_POLICY_README.html), [postconf reference](https://www.postfix.org/postconf.5.html), and [postmap reference](https://www.postfix.org/postmap.1.html).
+
+Size `max_connections` from the relevant Postfix process limits, persistent Dovecot SASL connections, planned restart overlap and burst headroom. Size `max_inflight_requests` from measured backend capacity, then choose a small bounded queue that can drain inside `request_queue_timeout`. Unix-domain Dovecot SASL sockets are preferred; TCP carries the auth protocol without transport encryption and must be confined to a trusted private path as described in the official [Postfix SASL guide](https://www.postfix.org/SASL_README.html).
+
+The legacy `worker_pool` block is deprecated. When it is present, Pfxhttp logs a startup warning and maps `max_workers` conservatively to request concurrency, `max_queue` to request queue depth, and their sum to connection admission only for new fields that were not explicitly configured. This compatibility mapping does not preserve the old connection-as-worker execution model. Migrate by recording the effective warning values, adding explicit `limits` values per listener, validating normal Postfix reuse, and then removing `worker_pool`.
+
+SIGHUP validates the complete new file before applying backend mappings, HTTP/TLS/cache/logging settings and native-listener changes. Changing a native listener's limit or relevant protocol block restarts only that listener. Native listener replacement is not rollback-atomic: if rebinding the changed endpoint fails after validation, that listener remains unavailable and the operator must correct the configuration and reload or restart. Adding, removing or changing a systemd-activated listener requires a service restart while its `.socket` unit remains active. Changes to `run_as_user`, `run_as_group`, `chroot` or observability endpoint lifecycle are restart-only; a reload containing any such change is rejected before runtime changes and the current configuration remains active.
 
 ### Observability
 
-Observability is disabled by default. When enabled, Pfxhttp records listener connection events, protocol-level requests, outgoing HTTP backend requests, outgoing gRPC `Authenticate` calls, and OIDC discovery/token/JWKS/introspection traffic. Request contexts are delegated through these paths so outbound HTTP headers and gRPC metadata receive the active W3C trace context.
+Observability is disabled by default. When enabled, Pfxhttp records bounded listener connection and drain outcomes, idle versus partial framing state, request admission and queue state, complete protocol-level requests, outgoing HTTP backend requests, outgoing gRPC `Authenticate` calls, and OIDC discovery/token/JWKS/introspection traffic. Request contexts are delegated through these paths so outbound HTTP headers and gRPC metadata receive the active W3C trace context.
 
-Ingress protocol traces include child spans for the listener protocol steps. Socket-map requests expose request read, decode, backend exchange, response encoding, and response write spans. Policy-service requests expose the same read/decode/backend/encode/write shape for policy payloads. Dovecot SASL requests expose mechanism-step, backend-auth, response-write, and continuation-wait spans so multi-step SASL exchanges show the time spent waiting for the next Postfix/client continuation instead of hiding it in the root auth span.
+Application spans start only after a complete protocol frame has been read. Idle connections and incomplete frames therefore do not create request spans. Socket-map and policy-service requests expose decode, request-queue, backend, response-encode, and response-write child spans in execution order. Dovecot SASL requests expose request-queue, mechanism-step, backend-auth, response-write, and continuation-wait spans so multi-step SASL exchanges show the time spent waiting for the next continuation without overlapping backend work. Raw requests, credentials, continuation IDs, backend payloads, and backend denial reasons are not recorded in spans or logs.
 
 gRPC-backed SASL traces also split the pre-call preparation into `gRPC connection`, `gRPC metadata`, and `gRPC request build` spans. When OIDC caller authentication is enabled, token cache lookups, cache-lock waits, discovery, token fetches, client assertions, and JWKS validation are traced as child spans without recording secrets or token values.
 
 Application request metrics keep the request-side name in the `name` label and add the configured listener name in the `listener` label. This lets dashboards show ingress latency per listener while still preserving map/backend-specific views for the outbound side.
+
+The Prometheus and OpenTelemetry metric sets include `pfxhttp_listener_connection_state` (`idle` and `partial`), `pfxhttp_listener_drains`, `pfxhttp_listener_request_state` (`inflight` and `queued`), `pfxhttp_listener_request_admissions`, `pfxhttp_listener_request_queue_wait`, and `pfxhttp_listener_protocol_failures`. Their labels use configured listener or backend names and bounded outcome values; unknown client-supplied SocketMap names collapse to `unknown`. These process metrics explain capacity and framing behavior, but they are not a substitute for an end-to-end Postfix or Dovecot protocol probe when deciding service health.
 
 Prometheus uses a dedicated HTTP endpoint:
 
@@ -551,7 +587,7 @@ server:
     prometheus_port: 9464
     prometheus_path: "/metrics"
     prometheus_runtime_metrics: false
-    prometheus_http_auth_basic: "metrics:secret"
+    prometheus_http_auth_basic: "<username>:<password>"
     prometheus_tls:
       enabled: true
       cert: "/etc/pfxhttp/metrics.crt"
@@ -564,7 +600,7 @@ server:
 Scrape example:
 
 ```bash
-curl --cacert /etc/pfxhttp/metrics.crt -u metrics:secret https://127.0.0.1:9464/metrics
+curl --cacert /etc/pfxhttp/metrics.crt -u "$PFXHTTP_METRICS_BASIC_AUTH" https://127.0.0.1:9464/metrics
 ```
 
 OpenTelemetry uses OTLP over HTTP. `otel_enabled` is the master switch; traces and metrics remain separate opt-in controls:
@@ -717,7 +753,7 @@ socket_maps:
       configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
       client_id: "your-client-id"
       # Use either client_secret:
-      client_secret: "your-client-secret"
+      client_secret: "<set-in-deployment>"
       # OR private_key_file for private_key_jwt:
       # private_key_file: "/path/to/private-key.pem"
       # Optional: list of scopes
@@ -773,7 +809,7 @@ To configure Postfix to use a socket map, simply add it to your `main.cf`:
 
 ```plaintext
 # main.cf
-virtual_mailbox_domains = socketmap:tcp:127.0.0.1:23450:demo_map
+virtual_mailbox_domains = socketmap:inet:127.0.0.1:23450:demo_map
 ```
 
 Here, Postfix connects to the TCP socket map listener defined in `pfxhttp.yml` for `demo_map`.
@@ -791,6 +827,14 @@ smtpd_recipient_restrictions =
 ```
 
 This setup enables Postfix to query the policy service defined in `pfxhttp.yml` for `example_policy`.
+
+#### Docker interoperability proof
+
+`make test-postfix-interop` runs the production PfxHTTP binary with real
+`postmap`, SMTP policy, and Postfix-to-PfxHTTP Dovecot SASL clients on an
+isolated Docker network. It does not start or reconfigure Postfix or Dovecot on
+the host. See [the Docker Postfix interoperability lane](test/e2e/postfix/README.md)
+for image prerequisites, assertions, stable blocker behavior, and cleanup.
 
 #### Dovecot SASL
 
@@ -898,7 +942,7 @@ Notes:
   - `backend_oidc_auth.enabled: true` → the OIDC manager fetches a token via
     Client Credentials / `private_key_jwt` and the result is sent as
     `authorization: Bearer <token>` metadata.
-  - Otherwise `http_auth_basic: "user:secret"` is encoded and sent as
+  - Otherwise `http_auth_basic: "<username>:<password>"` is encoded and sent as
     `authorization: Basic <base64>` metadata.
 - Additional gRPC request metadata is configured explicitly under
   `grpc.metadata`. Keys are normalized to lowercase. The `authorization` key,
@@ -1057,7 +1101,7 @@ socket_maps:
       enabled: true
       configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
       client_id: "your-client-id"
-      client_secret: "your-client-secret"
+      client_secret: "<set-in-deployment>"
       # Use POST body instead of Basic Auth:
       auth_method: client_secret_post
     # SASL token validation strategy (for dovecot_sasl only):
@@ -1065,7 +1109,7 @@ socket_maps:
       enabled: true
       configuration_uri: "https://auth.example.com/.well-known/openid-configuration"
       client_id: "roundcube"
-      client_secret: "introspection-secret"
+      client_secret: "<set-in-deployment>"
       # OR private_key_file: "/etc/pfxhttp/introspection-client.pem"
       # auth_method: private_key_jwt
       validation: auto  # or: introspection | jwks

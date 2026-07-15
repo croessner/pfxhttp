@@ -1,0 +1,143 @@
+server:
+  listen:
+    - kind: socket_map
+      name: map
+      type: tcp
+      address: 0.0.0.0
+      port: 23450
+    - kind: policy_service
+      name: policy
+      type: tcp
+      address: 0.0.0.0
+      port: 23451
+    - kind: dovecot_sasl
+      name: sasl_http
+      type: tcp
+      address: 0.0.0.0
+      port: 23453
+    - kind: policy_service
+      name: overload
+      type: tcp
+      address: 0.0.0.0
+      port: 23455
+      limits:
+        max_connections: 32
+        max_inflight_requests: 1
+        max_queued_requests: 0
+        request_queue_timeout: 2s
+        request_timeout: 4s
+        backend_timeout: 2s
+        response_write_reserve: 500ms
+    - kind: dovecot_sasl
+      name: sasl_grpc
+      type: tcp
+      address: 0.0.0.0
+      port: 23456
+      limits:
+        max_connections: 32
+        max_inflight_requests: 2
+        max_queued_requests: 0
+        request_queue_timeout: 2s
+        request_timeout: 4s
+        backend_timeout: 2s
+        response_write_reserve: 500ms
+    - kind: socket_map
+      name: access
+      type: tcp
+      address: 0.0.0.0
+      port: 23458
+      protocol_limits:
+        socket_map:
+          idle_timeout: 11s
+
+  logging:
+    json: false
+    level: info
+
+  http_client:
+    timeout: 30s
+    max_connections_per_host: 32
+    max_idle_connections: 32
+    max_idle_connections_per_host: 32
+    idle_connection_timeout: 30s
+
+  limits:
+    max_connections: 128
+    max_inflight_requests: 16
+    max_queued_requests: 32
+    request_queue_timeout: 1s
+    request_timeout: 4s
+    backend_timeout: 2s
+    response_write_reserve: 500ms
+
+  protocol_limits:
+    socket_map:
+      idle_timeout: 15s
+      partial_request_timeout: 10s
+      write_timeout: 5s
+      max_request_bytes: 1048576
+      max_length_digits: 10
+    policy_service:
+      idle_timeout: 0s
+      partial_request_timeout: 10s
+      write_timeout: 5s
+      max_request_bytes: 1048576
+      max_line_bytes: 65536
+      max_attributes: 256
+    dovecot_sasl:
+      idle_timeout: 0s
+      partial_request_timeout: 10s
+      write_timeout: 5s
+      max_line_bytes: 16384
+
+  observability:
+    prometheus_enabled: true
+    prometheus_address: 0.0.0.0
+    prometheus_port: 9464
+    prometheus_path: /metrics
+
+socket_maps:
+  map:
+    target: http://backend:8080/map
+    payload: '{}'
+    status_code: 200
+    value_field: value
+    error_field: error
+    no_error_value: none
+  access:
+    target: http://backend:8080/access
+    payload: '{}'
+    status_code: 200
+    value_field: value
+    error_field: error
+    no_error_value: none
+
+policy_services:
+  policy:
+    target: http://backend:8080/policy
+    payload: '{}'
+    status_code: 200
+    value_field: result
+    error_field: error
+    no_error_value: none
+  overload:
+    target: http://backend:8080/slow-policy
+    payload: '{}'
+    status_code: 200
+    value_field: result
+    error_field: error
+    no_error_value: none
+
+dovecot_sasl:
+  sasl_http:
+    target: http://backend:8080/auth
+    mechanisms: [PLAIN]
+    status_code: 200
+  sasl_grpc:
+    transport: grpc
+    mechanisms: [PLAIN]
+    grpc:
+      address: backend:8081
+      timeout: 30s
+      tls:
+        enabled: false

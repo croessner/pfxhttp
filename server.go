@@ -25,12 +25,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const LogKeyClient = "client"
-const LogKeySession = "session"
-const LogKeySubSession = "sub_session"
+const socketMapTemporaryResponse = "TEMP service temporarily unavailable"
+const policyTemporaryResponse = "action=DEFER_IF_PERMIT Service temporarily unavailable\n\n"
+const defaultDovecotWriteTimeout = 10 * time.Second
+const unknownBackendName = "unknown"
 
-// generateSessionID creates a short random hex string for session tracking.
-func generateSessionID() string {
+// generateExternalSessionID creates an opaque backend correlation value. It is
+// never attached to logs, metrics, or traces.
+func generateExternalSessionID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 
@@ -72,20 +74,29 @@ type MultiServer struct {
 	ctx        context.Context
 	closer     context.CancelFunc
 	listener   net.Listener
-	wg         sync.WaitGroup
-	workerPool WorkerPool
+	supervisor *ConnectionSupervisor
+	limiter    *RequestLimiter
+
+	requestTimeout       time.Duration
+	backendTimeout       time.Duration
+	responseWriteReserve time.Duration
+	protocolLimits       ProtocolLimitsConfig
+	stopOnce             sync.Once
+	overloadLogCounter   atomic.Uint64
 }
 
 // NewMultiServer creates and initializes a new MultiServer instance with the provided context and dependencies.
-func NewMultiServer(ctx context.Context, deps *Deps, wp WorkerPool) GenericServer {
+func NewMultiServer(ctx context.Context, deps *Deps, supervisor *ConnectionSupervisor) GenericServer {
 	childCtx, closer := context.WithCancel(ctx)
+	if supervisor == nil {
+		supervisor = NewConnectionSupervisor(childCtx, defaultMaxConnections)
+	}
 
 	return &MultiServer{
 		deps:       deps,
 		ctx:        childCtx,
 		closer:     closer,
-		wg:         sync.WaitGroup{},
-		workerPool: wp,
+		supervisor: supervisor,
 	}
 }
 
@@ -93,9 +104,45 @@ func NewMultiServer(ctx context.Context, deps *Deps, wp WorkerPool) GenericServe
 func (s *MultiServer) Listen(instance Listen, activatedListener net.Listener) error {
 	s.setEndpoint(instance)
 	s.kind = instance.Kind
+	s.protocolLimits = instance.ProtocolLimits
+
+	s.requestTimeout = instance.Limits.RequestTimeout
+	if s.requestTimeout <= 0 {
+		s.requestTimeout = defaultRequestTimeout
+	}
+
+	s.backendTimeout = instance.Limits.BackendTimeout
+	if s.backendTimeout <= 0 {
+		s.backendTimeout = defaultBackendTimeout
+	}
+
+	s.responseWriteReserve = instance.Limits.ResponseWriteReserve
+	if s.responseWriteReserve <= 0 {
+		s.responseWriteReserve = defaultResponseWriteReserve
+	}
+
+	if s.limiter == nil {
+		queueTimeout := instance.Limits.RequestQueueTimeout
+		if queueTimeout <= 0 {
+			queueTimeout = defaultRequestQueueTimeout
+		}
+
+		s.limiter = NewRequestLimiter(
+			s.ctx,
+			instance.Limits.MaxInflightRequests,
+			maxQueuedRequests(instance.Limits),
+			queueTimeout,
+		)
+	}
 
 	if instance.Name != "" {
 		s.name = instance.Name
+	}
+
+	if obs := s.deps.GetObservability(); obs != nil {
+		s.limiter.SetObserver(func(event requestLimiterEvent) {
+			obs.ObserveRequestLimiter(s.ctx, s.kind, safeMetricName(s.name), event)
+		})
 	}
 
 	if activatedListener != nil {
@@ -104,13 +151,54 @@ func (s *MultiServer) Listen(instance Listen, activatedListener net.Listener) er
 		return err
 	}
 
-	s.deps.GetLogger().Info("Server is listening", slog.String("type", instance.Type), slog.String("address", s.address), slog.String("name", s.name), slog.String("kind", instance.Kind))
-
-	if instance.WorkerPool.MaxWorkers > 0 {
-		s.workerPool = NewWorkerPool(s.ctx, instance.WorkerPool.MaxWorkers, instance.WorkerPool.MaxQueue, &s.wg)
+	logAttributes := []any{
+		slog.String("type", instance.Type),
+		slog.String("address", s.address),
+		slog.String("name", s.name),
+		slog.String("kind", instance.Kind),
+		slog.Int("max_connections", instance.Limits.MaxConnections),
+		slog.Int("max_inflight_requests", instance.Limits.MaxInflightRequests),
+		slog.Int("max_queued_requests", maxQueuedRequests(instance.Limits)),
+		slog.Duration("request_queue_timeout", instance.Limits.RequestQueueTimeout),
+		slog.Duration("request_timeout", s.requestTimeout),
+		slog.Duration("backend_timeout", s.backendTimeout),
+		slog.Duration("response_write_reserve", s.responseWriteReserve),
 	}
+	logAttributes = append(logAttributes, protocolLimitLogAttributes(instance.Kind, s.effectiveProtocolLimits())...)
+	s.deps.GetLogger().Info("Server is listening", logAttributes...)
 
 	return nil
+}
+
+func protocolLimitLogAttributes(kind string, limits ProtocolLimitsConfig) []any {
+	switch kind {
+	case listenKindSocketMap:
+		return []any{
+			slog.Duration("idle_timeout", protocolIdleTimeout(limits.SocketMap.IdleTimeout)),
+			slog.Duration("partial_request_timeout", limits.SocketMap.PartialRequestTimeout),
+			slog.Duration("write_timeout", limits.SocketMap.WriteTimeout),
+			slog.Int("max_request_bytes", limits.SocketMap.MaxRequestBytes),
+			slog.Int("max_length_digits", limits.SocketMap.MaxLengthDigits),
+		}
+	case listenKindPolicyService:
+		return []any{
+			slog.Duration("idle_timeout", protocolIdleTimeout(limits.PolicyService.IdleTimeout)),
+			slog.Duration("partial_request_timeout", limits.PolicyService.PartialRequestTimeout),
+			slog.Duration("write_timeout", limits.PolicyService.WriteTimeout),
+			slog.Int("max_request_bytes", limits.PolicyService.MaxRequestBytes),
+			slog.Int("max_line_bytes", limits.PolicyService.MaxLineBytes),
+			slog.Int("max_attributes", limits.PolicyService.MaxAttributes),
+		}
+	case listenKindDovecotSASL:
+		return []any{
+			slog.Duration("idle_timeout", protocolIdleTimeout(limits.DovecotSASL.IdleTimeout)),
+			slog.Duration("partial_request_timeout", limits.DovecotSASL.PartialRequestTimeout),
+			slog.Duration("write_timeout", limits.DovecotSASL.WriteTimeout),
+			slog.Int("max_line_bytes", limits.DovecotSASL.MaxLineBytes),
+		}
+	default:
+		return nil
+	}
 }
 
 // setEndpoint derives the concrete network address used for binding and logging.
@@ -182,13 +270,13 @@ func (s *MultiServer) applyUnixSocketMode(instance Listen) {
 
 	mode, err := strconv.ParseInt(instance.Mode, 8, 64)
 	if err != nil {
-		s.deps.GetLogger().Error("Could not parse socket mode", slog.String("error", err.Error()))
+		s.deps.GetLogger().Error("Could not parse socket mode", slog.String("reason", boundedErrorKind(err)))
 
 		return
 	}
 
 	if err = os.Chmod(instance.Address, os.FileMode(mode)); err != nil {
-		s.deps.GetLogger().Error("Could not set permissions on socket", slog.String("error", err.Error()))
+		s.deps.GetLogger().Error("Could not set permissions on socket", slog.String("reason", boundedErrorKind(err)))
 	}
 }
 
@@ -204,7 +292,7 @@ func (s *MultiServer) applyUnixSocketOwnership(instance Listen) {
 	}
 
 	if err := os.Chown(instance.Address, uid, gid); err != nil {
-		s.deps.GetLogger().Error("Could not set ownership on socket", slog.String("error", err.Error()))
+		s.deps.GetLogger().Error("Could not set ownership on socket", slog.String("reason", boundedErrorKind(err)))
 	}
 }
 
@@ -215,7 +303,7 @@ func lookupSocketOwner(instance Listen, logger *slog.Logger) (int, int) {
 	if instance.User != "" {
 		u, err := user.Lookup(instance.User)
 		if err != nil {
-			logger.Error("Could not lookup user", slog.String("user", instance.User), slog.String("error", err.Error()))
+			logger.Error("Could not lookup socket owner", slog.String("reason", boundedErrorKind(err)))
 		} else {
 			uid, _ = strconv.Atoi(u.Uid)
 		}
@@ -224,7 +312,7 @@ func lookupSocketOwner(instance Listen, logger *slog.Logger) (int, int) {
 	if instance.Group != "" {
 		g, err := user.LookupGroup(instance.Group)
 		if err != nil {
-			logger.Error("Could not lookup group", slog.String("group", instance.Group), slog.String("error", err.Error()))
+			logger.Error("Could not lookup socket group", slog.String("reason", boundedErrorKind(err)))
 		} else {
 			gid, _ = strconv.Atoi(g.Gid)
 		}
@@ -249,7 +337,7 @@ func (s *MultiServer) Start(handler func(conn net.Conn)) error {
 		}
 
 		if err != nil {
-			s.deps.GetLogger().Error("Error accepting connection", slog.String("error", err.Error()))
+			s.deps.GetLogger().Error("Error accepting connection", slog.String("reason", boundedErrorKind(err)))
 
 			if obs := s.deps.GetObservability(); obs != nil {
 				obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventAccept, resultError, 0)
@@ -262,65 +350,222 @@ func (s *MultiServer) Start(handler func(conn net.Conn)) error {
 			obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventAccept, resultOK, 1)
 		}
 
-		s.wg.Add(1)
-
-		if s.workerPool != nil {
-			job := Job{
-				Conn:    conn,
-				Handler: handler,
+		if !s.supervisor.Admit(conn, handler) {
+			if obs := s.deps.GetObservability(); obs != nil {
+				obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), "admission_reject", resultError, -1)
 			}
-
-			if !s.workerPool.Submit(job) {
-				_ = conn.Close()
-
-				if obs := s.deps.GetObservability(); obs != nil {
-					obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventQueueFull, resultError, -1)
-				}
-
-				s.wg.Done()
-			}
-		} else {
-			go func(c net.Conn) {
-				defer s.wg.Done()
-				handler(c)
-			}(conn)
 		}
 	}
 }
 
 // Stop gracefully shuts down the MultiServer by stopping connections, waiting for all routines to complete, and closing the listener.
 func (s *MultiServer) Stop() {
-	if s.closer != nil {
-		s.closer()
-	}
+	s.stopOnce.Do(func() {
+		if s.closer != nil {
+			s.closer()
+		}
 
-	_ = s.listener.Close()
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
 
-	s.wg.Wait()
+		if s.limiter != nil {
+			s.limiter.Stop()
+		}
+
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), defaultConnectionDrainTimeout)
+		defer cancelDrain()
+
+		drained := s.supervisor.StopContext(drainCtx)
+		if obs := s.deps.GetObservability(); obs != nil {
+			result := resultOK
+			if !drained {
+				result = resultError
+			}
+
+			obs.ObserveListenerDrain(context.Background(), s.kind, safeMetricName(s.name), result)
+		}
+	})
 }
 
 func (s *MultiServer) GetContext() context.Context {
 	return s.ctx
 }
 
+func (s *MultiServer) requestContext(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.requestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+
+	return context.WithTimeout(parent, timeout)
+}
+
+func (s *MultiServer) requestContextForConnection(parent context.Context, conn net.Conn) (context.Context, context.CancelFunc) {
+	peerCtx, cancelPeer := contextWithPeerClose(parent, conn)
+	requestCtx, cancelRequest := s.requestContext(peerCtx)
+
+	return requestCtx, func() {
+		cancelRequest()
+		cancelPeer()
+	}
+}
+
+func (s *MultiServer) backendContext(parent context.Context) (context.Context, context.CancelFunc) {
+	backendTimeout := s.backendTimeout
+	if backendTimeout <= 0 {
+		backendTimeout = defaultBackendTimeout
+	}
+
+	backendDeadline := time.Now().Add(backendTimeout)
+	if deadline, ok := parent.Deadline(); ok && s.responseWriteReserve > 0 {
+		reservedDeadline := deadline.Add(-s.responseWriteReserve)
+		if reservedDeadline.Before(backendDeadline) {
+			backendDeadline = reservedDeadline
+		}
+	}
+
+	return context.WithDeadline(parent, backendDeadline)
+}
+
+func (s *MultiServer) executeRequest(
+	ctx context.Context,
+	work func(context.Context) error,
+) (outcome RequestAdmissionOutcome, err error) {
+	if s.limiter == nil {
+		return requestAdmitted, work(ctx)
+	}
+
+	permit, outcome := s.acquireRequest(ctx)
+	if permit == nil {
+		return outcome, nil
+	}
+	defer permit.Release()
+	defer func() {
+		if recover() != nil {
+			err = errRequestExecutionPanic
+		}
+	}()
+
+	return outcome, work(ctx)
+}
+
+func (s *MultiServer) acquireRequest(ctx context.Context) (*RequestPermit, RequestAdmissionOutcome) {
+	if s.limiter == nil {
+		return nil, requestAdmitted
+	}
+
+	queueCtx, obs, span := startInternalSpanFromContext(ctx,
+		requestQueueSpanName,
+		attribute.String("pfxhttp.component", s.kind),
+		attribute.String("pfxhttp.listener", safeMetricName(s.name)),
+	)
+	permit, outcome := s.limiter.Acquire(queueCtx)
+	setSpanAttributes(span, attribute.String(labelOutcome, string(outcome)))
+	finishObservedSpan(obs, span, nil)
+
+	return permit, outcome
+}
+
+func requestOverloaded(outcome RequestAdmissionOutcome) bool {
+	return outcome == requestQueueFull || outcome == requestQueueTimeout ||
+		outcome == requestCallerCanceled || outcome == requestServerShutdown
+}
+
+func configuredSocketMapName(config *Config, requested string) string {
+	if config == nil {
+		return unknownBackendName
+	}
+
+	if _, ok := config.SocketMaps[requested]; !ok {
+		return unknownBackendName
+	}
+
+	return safeMetricName(requested)
+}
+
+func (s *MultiServer) logRequestOverload(logger *slog.Logger, outcome RequestAdmissionOutcome) {
+	count := s.overloadLogCounter.Add(1)
+	if count != 1 && count%100 != 0 {
+		return
+	}
+
+	logger.Warn("Listener request admission rejected",
+		slog.String("listener", safeMetricName(s.name)),
+		slog.String("component", s.kind),
+		slog.String("outcome", string(outcome)),
+		slog.Uint64("occurrences", count))
+}
+
+func setWriteDeadlineFromContext(ctx context.Context, conn net.Conn) (func(), error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return func() {}, nil
+	}
+
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return nil, err
+	}
+
+	return func() { _ = conn.SetWriteDeadline(time.Time{}) }, nil
+}
+
+func contextWithOptionalTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+
+	deadline := time.Now().Add(timeout)
+	if parentDeadline, ok := parent.Deadline(); ok && parentDeadline.Before(deadline) {
+		return context.WithCancel(parent)
+	}
+
+	return context.WithDeadline(parent, deadline)
+}
+
 var _ GenericServer = (*MultiServer)(nil)
 
-// setupConnection initializes a new client connection by generating a session ID, creating a session logger,
-// and logging the connection establishment. It returns the client address, the session logger factory,
-// and a cleanup function that should be deferred by the caller.
+func (s *MultiServer) effectiveProtocolLimits() ProtocolLimitsConfig {
+	return resolveProtocolLimits(defaultProtocolLimitsConfig(), s.protocolLimits)
+}
+
+func (s *MultiServer) socketMapFramingLimits() socketMapFramingLimits {
+	limits := s.effectiveProtocolLimits().SocketMap
+
+	return socketMapFramingLimits{
+		idleTimeout:     protocolIdleTimeout(limits.IdleTimeout),
+		partialTimeout:  limits.PartialRequestTimeout,
+		maxRequestBytes: limits.MaxRequestBytes,
+		maxLengthDigits: limits.MaxLengthDigits,
+	}
+}
+
+func (s *MultiServer) policyFramingLimits() policyFramingLimits {
+	limits := s.effectiveProtocolLimits().PolicyService
+
+	return policyFramingLimits{
+		idleTimeout:     protocolIdleTimeout(limits.IdleTimeout),
+		partialTimeout:  limits.PartialRequestTimeout,
+		maxRequestBytes: limits.MaxRequestBytes,
+		maxLineBytes:    limits.MaxLineBytes,
+		maxAttributes:   limits.MaxAttributes,
+	}
+}
+
+// setupConnection initializes connection logging and returns the client address,
+// a reload-aware logger factory, and a cleanup function that should be deferred by the caller.
 func (s *MultiServer) setupConnection(conn net.Conn) (clientAddr string, sessionLogger func() *slog.Logger, cleanup func()) {
 	clientAddr = conn.RemoteAddr().String()
-	sessionID := generateSessionID()
 	start := time.Now()
 
 	sessionLogger = func() *slog.Logger {
-		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
+		return s.deps.GetLogger()
 	}
 
-	sessionLogger().Info("New connection established", slog.String(LogKeyClient, clientAddr))
+	sessionLogger().Info("New connection established")
 
 	cleanup = func() {
-		sessionLogger().Info("Connection closed", slog.String(LogKeyClient, clientAddr))
+		sessionLogger().Info("Connection closed")
 
 		_ = conn.Close()
 
@@ -328,8 +573,6 @@ func (s *MultiServer) setupConnection(conn net.Conn) (clientAddr string, session
 			obs.ObserveListenerConnection(s.ctx, s.kind, safeMetricName(s.name), eventClose, resultOK, -1)
 			obs.ObserveListenerDuration(s.ctx, s.kind, safeMetricName(s.name), resultOK, time.Since(start))
 		}
-
-		s.wg.Done()
 	}
 
 	return
@@ -340,49 +583,40 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 	clientAddr, sessionLogger, cleanup := s.setupConnection(conn)
 	defer cleanup()
 
+	reader := newSocketMapReader(conn, s.socketMapFramingLimits())
+	if obs := s.deps.GetObservability(); obs != nil {
+		reader.SetStateObserver(func(state string, delta int64) {
+			obs.ObserveListenerState(s.ctx, s.kind, safeMetricName(s.name), state, delta)
+		})
+	}
+
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		default:
+			netString, err := reader.Read(s.ctx)
+			if err != nil {
+				if reason, ok := protocolErrorKindOf(err); ok {
+					if obs := s.deps.GetObservability(); obs != nil {
+						obs.ObserveProtocolFailure(s.ctx, s.kind, safeMetricName(s.name), reason)
+					}
+				}
+
+				if errors.Is(err, io.EOF) || protocolErrorIs(err, protocolErrorClientClosed) || protocolErrorIs(err, protocolErrorServerShutdown) {
+					return
+				}
+
+				sessionLogger().Error("Error reading NetString", slog.String("reason", boundedErrorKind(err)))
+
+				return
+			}
+
 			requestCtx, obs, span := s.startApplicationSpan(componentSocketMap, defaultBackendName, clientAddr)
+			requestCtx, cancelRequest := s.requestContextForConnection(requestCtx, conn)
 			start := time.Now()
 
-			_, readObs, readSpan := startInternalSpanFromContext(requestCtx,
-				socketMapReadSpanName,
-				attribute.String("pfxhttp.component", componentSocketMap),
-				attribute.String("pfxhttp.listener", safeMetricName(s.name)),
-			)
-			netString, err := s.readNetString(conn)
-			finishObservedSpan(readObs, readSpan, err)
-			if err != nil {
-				if obs != nil {
-					obs.RecordSpanError(span, err)
-					span.End()
-				}
-
-				if errors.Is(err, io.EOF) {
-					break
-				}
-
-				sessionLogger().Error("Error reading NetString", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
-
-				return
-			}
-
-			// Client closed connection
-			if netString == nil {
-				if obs != nil {
-					span.End()
-				}
-
-				return
-			}
-
-			subSessionID := generateSessionID()
-			reqLogger := sessionLogger().With(slog.String(LogKeySubSession, subSessionID))
-
-			reqLogger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", netString.String()))
+			reqLogger := sessionLogger()
 
 			received := NewPostfixMapReceiver()
 
@@ -397,69 +631,88 @@ func (s *MultiServer) HandleNetStringConnection(conn net.Conn) {
 				if obs != nil {
 					obs.RecordSpanError(span, err)
 				}
-				reqLogger.Error("Error reading request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+
+				reqLogger.Error("Error reading request", slog.String("reason", boundedErrorKind(err)))
 				s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, defaultBackendName, outcomeError, start)
+				cancelRequest()
 
 				return
 			}
 
-			span.SetName(applicationSpanName(componentSocketMap, received.GetName()))
-			span.SetAttributes(attribute.String("pfxhttp.name", safeMetricName(received.GetName())))
+			telemetryName := configuredSocketMapName(s.deps.GetConfig(), received.GetName())
+			span.SetName(applicationSpanName(componentSocketMap, telemetryName))
+			span.SetAttributes(attribute.String("pfxhttp.name", telemetryName))
+			reqLogger.Debug("SocketMap request decoded",
+				slog.String("map", telemetryName))
 
-			client := NewMapClient(s.deps, reqLogger)
-			client.SetReceiver(received)
+			outcome := outcomeError
+			responseData := ""
+			admission, requestErr := s.executeRequest(requestCtx, func(executionCtx context.Context) error {
+				client := NewMapClient(s.deps, reqLogger)
+				client.SetReceiver(received)
 
-			backendCtx, backendObs, backendSpan := startInternalSpanFromContext(requestCtx,
-				socketMapBackendSpanName,
-				attribute.String("pfxhttp.component", componentSocketMap),
-				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
-			)
-			err = client.SendAndReceiveContext(backendCtx)
-			finishObservedSpan(backendObs, backendSpan, err)
-			if err != nil {
-				if obs != nil {
-					obs.RecordSpanError(span, err)
-				}
-				reqLogger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
-				s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, received.GetName(), outcomeError, start)
+				backendCtx, cancelBackend := s.backendContext(executionCtx)
+				defer cancelBackend()
 
-				return
-			}
+				backendCtx, backendObs, backendSpan := startInternalSpanFromContext(backendCtx,
+					socketMapBackendSpanName,
+					attribute.String("pfxhttp.component", componentSocketMap),
+					attribute.String("pfxhttp.name", telemetryName),
+				)
+				backendErr := client.SendAndReceiveContext(backendCtx)
+				finishObservedSpan(backendObs, backendSpan, backendErr)
 
-			outcome := outcomeFromSender(client.GetSender())
-
-			_, encodeObs, encodeSpan := startInternalSpanFromContext(requestCtx,
-				socketMapEncodeSpanName,
-				attribute.String("pfxhttp.component", componentSocketMap),
-				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
-			)
-			responseData := client.GetSender().String()
-			response := NewNetStringFromString(responseData)
-
-			finishObservedSpan(encodeObs, encodeSpan, nil)
-
-			_, writeObs, writeSpan := startInternalSpanFromContext(requestCtx,
-				socketMapWriteSpanName,
-				attribute.String("pfxhttp.component", componentSocketMap),
-				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
-			)
-			err = s.writeNetString(conn, response)
-			finishObservedSpan(writeObs, writeSpan, err)
-			if err != nil {
-				outcome = outcomeError
-
-				if obs != nil {
-					obs.RecordSpanError(span, err)
+				if backendErr != nil {
+					return backendErr
 				}
 
-				reqLogger.Error("Error writing response", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
-				s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, received.GetName(), outcome, start)
+				outcome = outcomeFromSender(client.GetSender())
+				_, encodeObs, encodeSpan := startInternalSpanFromContext(executionCtx,
+					socketMapEncodeSpanName,
+					attribute.String("pfxhttp.component", componentSocketMap),
+					attribute.String("pfxhttp.name", telemetryName),
+				)
+				responseData = client.GetSender().String()
+				response := NewNetStringFromString(responseData)
+
+				finishObservedSpan(encodeObs, encodeSpan, nil)
+
+				_, writeObs, writeSpan := startInternalSpanFromContext(executionCtx,
+					socketMapWriteSpanName,
+					attribute.String("pfxhttp.component", componentSocketMap),
+					attribute.String("pfxhttp.name", telemetryName),
+				)
+				writeErr := s.writeNetStringContext(executionCtx, conn, response)
+				finishObservedSpan(writeObs, writeSpan, writeErr)
+
+				return writeErr
+			})
+
+			if requestOverloaded(admission) {
+				s.logRequestOverload(reqLogger, admission)
+
+				outcome = outcomeTempfail
+				requestErr = s.writeNetStringContext(requestCtx, conn, NewNetStringFromString(socketMapTemporaryResponse))
+			} else if requestErr != nil && errors.Is(requestErr, context.DeadlineExceeded) && requestCtx.Err() == nil {
+				outcome = outcomeTempfail
+				requestErr = s.writeNetStringContext(requestCtx, conn, NewNetStringFromString(socketMapTemporaryResponse))
+			}
+
+			if requestErr != nil {
+				if obs != nil {
+					obs.RecordSpanError(span, requestErr)
+				}
+
+				reqLogger.Error("SocketMap request failed", slog.String("reason", boundedErrorKind(requestErr)))
+				s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, telemetryName, outcome, start)
+				cancelRequest()
 
 				return
 			}
 
-			reqLogger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
-			s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, received.GetName(), outcome, start)
+			reqLogger.Debug("SocketMap response sent")
+			s.finishApplicationSpan(requestCtx, obs, span, componentSocketMap, telemetryName, outcome, start)
+			cancelRequest()
 		}
 	}
 }
@@ -469,40 +722,40 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 	clientAddr, sessionLogger, cleanup := s.setupConnection(conn)
 	defer cleanup()
 
+	reader := newPolicyReader(conn, s.policyFramingLimits())
+	if obs := s.deps.GetObservability(); obs != nil {
+		reader.SetStateObserver(func(state string, delta int64) {
+			obs.ObserveListenerState(s.ctx, s.kind, safeMetricName(s.name), state, delta)
+		})
+	}
+
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		default:
-			requestCtx, obs, span := s.startApplicationSpan(componentPolicyService, s.name, clientAddr)
-			start := time.Now()
-
-			_, readObs, readSpan := startInternalSpanFromContext(requestCtx,
-				policyServiceReadSpanName,
-				attribute.String("pfxhttp.component", componentPolicyService),
-				attribute.String("pfxhttp.name", safeMetricName(s.name)),
-			)
-			policy, err := s.readPolicy(conn)
-			finishObservedSpan(readObs, readSpan, err)
+			policy, err := reader.Read(s.ctx)
 			if err != nil {
-				if obs != nil {
-					obs.RecordSpanError(span, err)
-					span.End()
+				if reason, ok := protocolErrorKindOf(err); ok {
+					if obs := s.deps.GetObservability(); obs != nil {
+						obs.ObserveProtocolFailure(s.ctx, s.kind, safeMetricName(s.name), reason)
+					}
 				}
 
-				if errors.Is(err, io.EOF) {
-					break
+				if errors.Is(err, io.EOF) || protocolErrorIs(err, protocolErrorClientClosed) || protocolErrorIs(err, protocolErrorServerShutdown) {
+					return
 				}
 
-				sessionLogger().Error("Error reading policy", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Error reading policy", slog.String("reason", boundedErrorKind(err)))
 
 				return
 			}
 
-			subSessionID := generateSessionID()
-			reqLogger := sessionLogger().With(slog.String(LogKeySubSession, subSessionID))
+			requestCtx, obs, span := s.startApplicationSpan(componentPolicyService, s.name, clientAddr)
+			requestCtx, cancelRequest := s.requestContextForConnection(requestCtx, conn)
+			start := time.Now()
 
-			reqLogger.Debug("Received request", slog.String(LogKeyClient, clientAddr), slog.String("request", policy.String()))
+			reqLogger := sessionLogger()
 
 			received := NewPostfixPolicyReceiver(s.name)
 
@@ -519,72 +772,87 @@ func (s *MultiServer) HandlePolicyServiceConnection(conn net.Conn) {
 					obs.RecordSpanError(span, err)
 				}
 
-				reqLogger.Error("Error reading request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				reqLogger.Error("Error reading request", slog.String("reason", boundedErrorKind(err)))
 				s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcomeError, start)
+				cancelRequest()
 
 				return
 			}
 
-			client := NewPolicyClient(s.deps, reqLogger)
-			client.SetReceiver(received)
+			reqLogger.Debug("Policy request decoded",
+				slog.String("service", safeMetricName(received.GetName())))
 
-			backendCtx, backendObs, backendSpan := startInternalSpanFromContext(requestCtx,
-				policyServiceBackendSpanName,
-				attribute.String("pfxhttp.component", componentPolicyService),
-				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
-			)
-			err = client.SendAndReceiveContext(backendCtx)
-			finishObservedSpan(backendObs, backendSpan, err)
-			if err != nil {
-				if obs != nil {
-					obs.RecordSpanError(span, err)
+			outcome := outcomeError
+			responseData := ""
+			admission, requestErr := s.executeRequest(requestCtx, func(executionCtx context.Context) error {
+				client := NewPolicyClient(s.deps, reqLogger)
+				client.SetReceiver(received)
+
+				backendCtx, cancelBackend := s.backendContext(executionCtx)
+				defer cancelBackend()
+
+				backendCtx, backendObs, backendSpan := startInternalSpanFromContext(backendCtx,
+					policyServiceBackendSpanName,
+					attribute.String("pfxhttp.component", componentPolicyService),
+					attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+				)
+				backendErr := client.SendAndReceiveContext(backendCtx)
+				finishObservedSpan(backendObs, backendSpan, backendErr)
+
+				if backendErr != nil {
+					return backendErr
 				}
-				reqLogger.Error("Error sending request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
-				s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcomeError, start)
 
-				return
+				outcome = outcomeFromSender(client.GetSender())
+				_, encodeObs, encodeSpan := startInternalSpanFromContext(executionCtx,
+					policyServiceEncodeSpanName,
+					attribute.String("pfxhttp.component", componentPolicyService),
+					attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+				)
+				responseData = fmt.Sprintf("action=%s\n\n", strings.TrimSpace(client.GetSender().String()))
+
+				finishObservedSpan(encodeObs, encodeSpan, nil)
+
+				_, writeObs, writeSpan := startInternalSpanFromContext(executionCtx,
+					policyServiceWriteSpanName,
+					attribute.String("pfxhttp.component", componentPolicyService),
+					attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
+				)
+				writeErr := s.writePolicyResultContext(executionCtx, conn, responseData)
+				finishObservedSpan(writeObs, writeSpan, writeErr)
+
+				return writeErr
+			})
+
+			if requestOverloaded(admission) {
+				s.logRequestOverload(reqLogger, admission)
+
+				outcome = outcomeTempfail
+				responseData = policyTemporaryResponse
+				requestErr = s.writePolicyResultContext(requestCtx, conn, responseData)
+			} else if requestErr != nil && errors.Is(requestErr, context.DeadlineExceeded) && requestCtx.Err() == nil {
+				outcome = outcomeTempfail
+				responseData = policyTemporaryResponse
+				requestErr = s.writePolicyResultContext(requestCtx, conn, responseData)
 			}
 
-			outcome := outcomeFromSender(client.GetSender())
-
-			_, encodeObs, encodeSpan := startInternalSpanFromContext(requestCtx,
-				policyServiceEncodeSpanName,
-				attribute.String("pfxhttp.component", componentPolicyService),
-				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
-			)
-			responseData := fmt.Sprintf("action=%s\n\n", strings.TrimSpace(client.GetSender().String()))
-
-			finishObservedSpan(encodeObs, encodeSpan, nil)
-
-			_, writeObs, writeSpan := startInternalSpanFromContext(requestCtx,
-				policyServiceWriteSpanName,
-				attribute.String("pfxhttp.component", componentPolicyService),
-				attribute.String("pfxhttp.name", safeMetricName(received.GetName())),
-			)
-			err = s.writePolicyResult(conn, responseData)
-			finishObservedSpan(writeObs, writeSpan, err)
-			if err != nil {
+			if requestErr != nil {
 				outcome = outcomeError
 
 				if obs != nil {
-					obs.RecordSpanError(span, err)
+					obs.RecordSpanError(span, requestErr)
 				}
 
-				if errors.Is(err, os.ErrDeadlineExceeded) {
-					reqLogger.Warn("Write deadline exceeded, closing connection", slog.String(LogKeyClient, conn.RemoteAddr().String()))
-				} else if strings.Contains(err.Error(), "broken pipe") {
-					reqLogger.Info("Broken pipe detected, client likely disconnected", slog.String(LogKeyClient, conn.RemoteAddr().String()))
-				} else {
-					reqLogger.Error("Error writing response", slog.String(LogKeyClient, conn.RemoteAddr().String()), slog.String("error", err.Error()))
-				}
-
+				reqLogger.Error("Policy request failed", slog.String("reason", boundedErrorKind(requestErr)))
 				s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcome, start)
+				cancelRequest()
 
 				return
 			}
 
-			reqLogger.Debug("Response sent", slog.String(LogKeyClient, clientAddr), slog.String("response", responseData))
+			reqLogger.Debug("Policy response sent")
 			s.finishApplicationSpan(requestCtx, obs, span, componentPolicyService, received.GetName(), outcome, start)
+			cancelRequest()
 		}
 	}
 }
@@ -594,6 +862,7 @@ var dovecotCUIDCounter atomic.Uint64
 
 type saslObservabilityState struct {
 	ctx      context.Context
+	cancel   context.CancelFunc
 	obs      *Observability
 	span     trace.Span
 	start    time.Time
@@ -613,22 +882,22 @@ func generateCookie() string {
 // It performs the server handshake, reads client handshake, then processes AUTH/CONT requests.
 func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
-	sessionID := generateSessionID()
+	externalSessionID := generateExternalSessionID()
 	connectionStart := time.Now()
 
-	// Helper that always returns a fresh logger with the session ID attached.
+	// Always resolve the current logger so reloads take effect on persistent connections.
 	sessionLogger := func() *slog.Logger {
-		return s.deps.GetLogger().With(slog.String(LogKeySession, sessionID))
+		return s.deps.GetLogger()
 	}
 
 	var activeObservabilityStates map[string]*saslObservabilityState
 
 	config := s.deps.GetConfig()
 
-	sessionLogger().Info("New Dovecot SASL connection established", slog.String(LogKeyClient, clientAddr))
+	sessionLogger().Info("New Dovecot SASL connection established")
 
 	defer func() {
-		sessionLogger().Info("Dovecot SASL connection closed", slog.String(LogKeyClient, clientAddr))
+		sessionLogger().Info("Dovecot SASL connection closed")
 		_ = conn.Close()
 
 		if obs := s.deps.GetObservability(); obs != nil {
@@ -636,18 +905,19 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 			obs.ObserveListenerDuration(s.ctx, s.kind, safeMetricName(s.name), resultOK, time.Since(connectionStart))
 		}
 
-		for id, state := range activeObservabilityStates {
-			sessionLogger().Warn("Dovecot SASL authentication abandoned", slog.String("id", id), slog.String(LogKeyClient, clientAddr))
+		for _, state := range activeObservabilityStates {
+			sessionLogger().Warn("Dovecot SASL authentication abandoned")
 			finishSASLContinuationWait(state, errors.New("authentication abandoned"))
 			s.finishApplicationSpan(state.ctx, state.obs, state.span, componentDovecotSASL, s.name, outcomeError, state.start)
+			state.cancel()
 		}
 
-		s.wg.Done()
 	}()
 
 	decoder := &DovecotDecoder{}
 	encoder := &DovecotEncoder{}
 	reader := bufio.NewReader(conn)
+	dovecotLimits := s.effectiveProtocolLimits().DovecotSASL
 
 	settings := config.DovecotSASL[s.name]
 	mechanisms := dovecotSASLMechanisms(settings)
@@ -663,23 +933,28 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 
 	// Send server handshake
 	for _, line := range encoder.EncodeHandshake(handshake) {
-		if _, err := conn.Write([]byte(line)); err != nil {
-			sessionLogger().Error("Error writing handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+		if err := s.writeDovecotConnectionResponse(conn, line); err != nil {
+			sessionLogger().Error("Error writing handshake", slog.String("reason", boundedErrorKind(err)))
 			return
 		}
 	}
 
-	sessionLogger().Debug("Handshake sent", slog.String(LogKeyClient, clientAddr))
+	sessionLogger().Debug("Handshake sent")
 
 	// Read client handshake (VERSION + CPID)
 	clientHandshakeDone := false
+
+	if err := conn.SetReadDeadline(time.Now().Add(dovecotLimits.PartialRequestTimeout)); err != nil {
+		return
+	}
 	for !clientHandshakeDone {
-		line, err := reader.ReadString('\n')
+		line, err := readBoundedLine(reader, dovecotLimits.MaxLineBytes)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return
 			}
-			sessionLogger().Error("Error reading client handshake", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+
+			sessionLogger().Error("Error reading client handshake", slog.String("reason", boundedErrorKind(err)))
 			return
 		}
 
@@ -688,24 +963,29 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 		case DovecotCmdVersion:
 			major, _, err := decoder.DecodeVersion(args)
 			if err != nil {
-				sessionLogger().Error("Invalid client VERSION", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Invalid client VERSION", slog.String("reason", string(protocolErrorInvalidFrame)))
 				return
 			}
 			if major != DovecotProtoVersionMajor {
-				sessionLogger().Error("Unsupported protocol version", slog.String(LogKeyClient, clientAddr), slog.Int("major", major))
+				sessionLogger().Error("Unsupported protocol version", slog.Int("major", major))
 				return
 			}
 		case DovecotCmdCPID:
-			cpid, err := decoder.DecodeCPID(args)
+			_, err := decoder.DecodeCPID(args)
 			if err != nil {
-				sessionLogger().Error("Invalid CPID", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+				sessionLogger().Error("Invalid CPID", slog.String("reason", string(protocolErrorInvalidFrame)))
 				return
 			}
-			sessionLogger().Debug("Client CPID received", slog.String(LogKeyClient, clientAddr), slog.String("cpid", cpid))
+
+			sessionLogger().Debug("Client CPID received")
 			clientHandshakeDone = true
 		default:
-			sessionLogger().Warn("Unexpected command during handshake", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
+			sessionLogger().Warn("Unexpected command during handshake", slog.String("command", unknownBackendName))
 		}
+	}
+
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return
 	}
 
 	// Track active mechanism sessions for multi-step auth (keyed by request ID)
@@ -719,63 +999,126 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 		case <-s.ctx.Done():
 			return
 		default:
-			if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			obs := s.deps.GetObservability()
+			if obs != nil {
+				obs.ObserveListenerState(s.ctx, s.kind, safeMetricName(s.name), "idle", 1)
+			}
+
+			if err := conn.SetReadDeadline(s.nextDovecotReadDeadline(activeObservabilityStates)); err != nil {
+				if obs != nil {
+					obs.ObserveListenerState(s.ctx, s.kind, safeMetricName(s.name), "idle", -1)
+				}
 				return
 			}
 
-			line, err := reader.ReadString('\n')
+			first, err := reader.ReadByte()
+
+			if obs != nil {
+				obs.ObserveListenerState(s.ctx, s.kind, safeMetricName(s.name), "idle", -1)
+			}
+
+			line := ""
+
+			if err == nil {
+				if obs != nil {
+					obs.ObserveListenerState(s.ctx, s.kind, safeMetricName(s.name), "partial", 1)
+				}
+
+				if deadlineErr := conn.SetReadDeadline(s.nextDovecotPartialDeadline(activeObservabilityStates)); deadlineErr != nil {
+					err = deadlineErr
+				} else {
+					line, err = readBoundedLineFromFirst(reader, first, dovecotLimits.MaxLineBytes)
+				}
+
+				if obs != nil {
+					obs.ObserveListenerState(s.ctx, s.kind, safeMetricName(s.name), "partial", -1)
+				}
+			}
+
 			if err != nil {
 				if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+					if len(line) > 0 {
+						if obs != nil {
+							obs.ObserveProtocolFailure(s.ctx, s.kind, safeMetricName(s.name), protocolErrorPartialTimeout)
+						}
+
+						sessionLogger().Warn("Dovecot SASL partial command timed out",
+							slog.String("reason", string(protocolErrorPartialTimeout)))
+
+						return
+					}
+
+					if len(activeObservabilityStates) == 0 && protocolIdleTimeout(dovecotLimits.IdleTimeout) > 0 {
+						if obs != nil {
+							obs.ObserveProtocolFailure(s.ctx, s.kind, safeMetricName(s.name), protocolErrorIdleTimeout)
+						}
+
+						return
+					}
+
+					s.expireDovecotAuthRequests(conn, encoder, sessionLogger(), activeMechanisms, activeAuthRequests, activeObservabilityStates)
 					continue
 				}
+
+				if reason, ok := protocolErrorKindOf(err); ok && obs != nil {
+					obs.ObserveProtocolFailure(s.ctx, s.kind, safeMetricName(s.name), reason)
+				}
+
 				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || isConnectionResetError(err) {
+					if obs != nil {
+						reason := protocolErrorClientClosed
+
+						if s.ctx.Err() != nil {
+							reason = protocolErrorServerShutdown
+						}
+
+						obs.ObserveProtocolFailure(s.ctx, s.kind, safeMetricName(s.name), reason)
+					}
 					return
 				}
-				sessionLogger().Error("Error reading command", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+
+				sessionLogger().Error("Error reading command", slog.String("reason", boundedErrorKind(err)))
 				return
 			}
 
-			subSessionID := generateSessionID()
-			reqLogger := sessionLogger().With(slog.String(LogKeySubSession, subSessionID))
-
-			redacted := redactDovecotLine(strings.TrimSpace(line))
-			reqLogger.Debug("Incoming Dovecot SASL request", slog.String(LogKeyClient, clientAddr), slog.String("request", redacted))
+			reqLogger := sessionLogger()
 
 			cmd, args := decoder.ParseLine(line)
 			if cmd == "" {
 				continue
 			}
 
+			reqLogger.Debug("Incoming Dovecot SASL command",
+				slog.String("command", boundedDovecotCommand(cmd)))
+
 			switch cmd {
 			case DovecotCmdAuth:
 				authReq, err := decoder.DecodeAuthRequest(args)
 				if err != nil {
-					reqLogger.Error("Invalid AUTH request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
-					if _, wErr := conn.Write([]byte(encoder.EncodeFail("0", "invalid request", "", false))); wErr != nil {
+					reqLogger.Error("Invalid AUTH request", slog.String("reason", string(protocolErrorInvalidFrame)))
+
+					if wErr := s.writeDovecotConnectionResponse(conn, encoder.EncodeFail("0", "invalid request", "", false)); wErr != nil {
 						return
 					}
 					continue
 				}
 
-				ensureDovecotAuthExternalSessionID(authReq, sessionID)
-
-				reqLogger.Debug("AUTH request received",
-					slog.String(LogKeyClient, clientAddr),
-					slog.String("id", authReq.ID),
-					slog.String("mechanism", authReq.Mechanism),
-					slog.String("service", authReq.Service))
+				ensureDovecotAuthExternalSessionID(authReq, externalSessionID)
 
 				if !dovecotSASLMechanismAllowed(allowedMechanisms, authReq.Mechanism) {
-					if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, "unsupported mechanism", "", false))); wErr != nil {
+					if wErr := s.writeDovecotConnectionResponse(conn, encoder.EncodeFail(authReq.ID, "unsupported mechanism", "", false)); wErr != nil {
 						return
 					}
 
 					continue
 				}
+
+				reqLogger.Debug("AUTH request received",
+					slog.String("mechanism", authReq.Mechanism))
 
 				mech := NewSASLMechanism(authReq.Mechanism)
 				if mech == nil {
-					if _, wErr := conn.Write([]byte(encoder.EncodeFail(authReq.ID, "unsupported mechanism", "", false))); wErr != nil {
+					if wErr := s.writeDovecotConnectionResponse(conn, encoder.EncodeFail(authReq.ID, "unsupported mechanism", "", false)); wErr != nil {
 						return
 					}
 					continue
@@ -783,7 +1126,7 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 
 				state := activeObservabilityStates[authReq.ID]
 				if state == nil {
-					state = s.startDovecotSASLObservabilityState(clientAddr)
+					state = s.startDovecotSASLObservabilityState(clientAddr, conn)
 					activeObservabilityStates[authReq.ID] = state
 				}
 
@@ -804,13 +1147,13 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 			case DovecotCmdCont:
 				contReq, err := decoder.DecodeContRequest(args)
 				if err != nil {
-					reqLogger.Error("Invalid CONT request", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+					reqLogger.Error("Invalid CONT request", slog.String("reason", string(protocolErrorInvalidFrame)))
 					continue
 				}
 
 				mech, ok := activeMechanisms[contReq.ID]
 				if !ok {
-					if _, wErr := conn.Write([]byte(encoder.EncodeFail(contReq.ID, "no active auth session", "", false))); wErr != nil {
+					if wErr := s.writeDovecotConnectionResponse(conn, encoder.EncodeFail(contReq.ID, "no active auth session", "", false)); wErr != nil {
 						return
 					}
 					continue
@@ -847,9 +1190,18 @@ func (s *MultiServer) HandleDovecotSASLConnection(conn net.Conn) {
 				s.handleSASLResult(conn, encoder, reqLogger, clientAddr, authReq, mech, result, creds, activeMechanisms, activeAuthRequests, activeObservabilityStates)
 
 			default:
-				reqLogger.Warn("Unknown command", slog.String(LogKeyClient, clientAddr), slog.String("command", string(cmd)))
+				reqLogger.Warn("Unknown command", slog.String("command", unknownBackendName))
 			}
 		}
+	}
+}
+
+func boundedDovecotCommand(command DovecotCommand) string {
+	switch command {
+	case DovecotCmdVersion, DovecotCmdCPID, DovecotCmdAuth, DovecotCmdCont:
+		return string(command)
+	default:
+		return unknownBackendName
 	}
 }
 
@@ -948,14 +1300,95 @@ func redactDovecotLine(line string) string {
 	return strings.Join(fields, " ")
 }
 
-func (s *MultiServer) startDovecotSASLObservabilityState(clientAddr string) *saslObservabilityState {
+func (s *MultiServer) startDovecotSASLObservabilityState(clientAddr string, conn net.Conn) *saslObservabilityState {
 	authCtx, obs, span := s.startApplicationSpan(componentDovecotSASL, s.name, clientAddr)
+	authCtx, cancel := s.requestContextForConnection(authCtx, conn)
 
 	return &saslObservabilityState{
-		ctx:   authCtx,
-		obs:   obs,
-		span:  span,
-		start: time.Now(),
+		ctx:    authCtx,
+		cancel: cancel,
+		obs:    obs,
+		span:   span,
+		start:  time.Now(),
+	}
+}
+
+func (s *MultiServer) nextDovecotReadDeadline(states map[string]*saslObservabilityState) time.Time {
+	var deadline time.Time
+
+	idleTimeout := protocolIdleTimeout(s.effectiveProtocolLimits().DovecotSASL.IdleTimeout)
+	if len(states) == 0 && idleTimeout > 0 {
+		deadline = time.Now().Add(idleTimeout)
+	}
+
+	for _, state := range states {
+		stateDeadline, ok := state.ctx.Deadline()
+		if !ok {
+			continue
+		}
+
+		stateDeadline = stateDeadline.Add(-s.responseWriteReserve)
+		if deadline.IsZero() || stateDeadline.Before(deadline) {
+			deadline = stateDeadline
+		}
+	}
+
+	return deadline
+}
+
+func (s *MultiServer) nextDovecotPartialDeadline(states map[string]*saslObservabilityState) time.Time {
+	deadline := time.Now().Add(s.effectiveProtocolLimits().DovecotSASL.PartialRequestTimeout)
+
+	for _, state := range states {
+		stateDeadline, ok := state.ctx.Deadline()
+		if !ok {
+			continue
+		}
+
+		stateDeadline = stateDeadline.Add(-s.responseWriteReserve)
+		if stateDeadline.Before(deadline) {
+			deadline = stateDeadline
+		}
+	}
+
+	return deadline
+}
+
+func (s *MultiServer) expireDovecotAuthRequests(
+	conn net.Conn,
+	encoder *DovecotEncoder,
+	logger *slog.Logger,
+	activeMechanisms map[string]SASLMechanism,
+	activeAuthRequests map[string]*DovecotAuthRequest,
+	states map[string]*saslObservabilityState,
+) {
+	now := time.Now()
+
+	for id, state := range states {
+		deadline, hasDeadline := state.ctx.Deadline()
+		if state.ctx.Err() == nil && (!hasDeadline || now.Before(deadline.Add(-s.responseWriteReserve))) {
+			continue
+		}
+
+		if state.ctx.Err() != nil && !errors.Is(state.ctx.Err(), context.DeadlineExceeded) {
+			cause := context.Cause(state.ctx)
+			finishSASLContinuationWait(state, cause)
+			s.finishApplicationSpan(state.ctx, state.obs, state.span, componentDovecotSASL, s.name, outcomeError, state.start)
+			state.cancel()
+			delete(activeMechanisms, id)
+			delete(activeAuthRequests, id)
+			delete(states, id)
+
+			continue
+		}
+
+		finishSASLContinuationWait(state, context.DeadlineExceeded)
+		s.sendDovecotFail(state.ctx, conn, encoder, logger, id, "temporary failure", "", true)
+		s.finishApplicationSpan(state.ctx, state.obs, state.span, componentDovecotSASL, s.name, outcomeTempfail, state.start)
+		state.cancel()
+		delete(activeMechanisms, id)
+		delete(activeAuthRequests, id)
+		delete(states, id)
 	}
 }
 
@@ -968,7 +1401,6 @@ func startSASLContinuationWait(state *saslObservabilityState, name string, authR
 		dovecotSASLWaitSpanName,
 		attribute.String("pfxhttp.component", componentDovecotSASL),
 		attribute.String("pfxhttp.name", safeMetricName(name)),
-		attribute.String("pfxhttp.sasl.id", authReq.ID),
 		attribute.String("pfxhttp.sasl.mechanism", authReq.Mechanism),
 	)
 	state.waitObs = obs
@@ -1005,7 +1437,7 @@ func (s *MultiServer) handleSASLResult(
 
 	state := activeObservabilityStates[authReq.ID]
 	if state == nil {
-		state = s.startDovecotSASLObservabilityState(clientAddr)
+		state = s.startDovecotSASLObservabilityState(clientAddr, conn)
 	}
 
 	finishSASLContinuationWait(state, nil)
@@ -1025,6 +1457,7 @@ func (s *MultiServer) handleSASLResult(
 
 		delete(activeObservabilityStates, authReq.ID)
 		s.finishApplicationSpan(state.ctx, state.obs, state.span, componentDovecotSASL, s.name, outcome, state.start)
+		state.cancel()
 	}()
 
 	// If mechanism needs continuation, send CONT and store state
@@ -1035,7 +1468,9 @@ func (s *MultiServer) handleSASLResult(
 		finishSpan = false
 
 		resp := encoder.EncodeCont(authReq.ID, result.ContinuationChallenge)
-		logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
+
+		logger.Debug("Outgoing Dovecot SASL response",
+			slog.String("command", string(DovecotCmdCont)))
 
 		_, writeObs, writeSpan := startInternalSpanFromContext(authCtx,
 			dovecotSASLResponseSpanName,
@@ -1043,11 +1478,11 @@ func (s *MultiServer) handleSASLResult(
 			attribute.String("pfxhttp.name", safeMetricName(s.name)),
 			attribute.String("pfxhttp.sasl.command", string(DovecotCmdCont)),
 		)
-		_, err := conn.Write([]byte(resp))
+		err := s.writeDovecotResponse(authCtx, conn, resp)
 		finishObservedSpan(writeObs, writeSpan, err)
 
 		if err != nil {
-			logger.Error("Error writing CONT", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+			logger.Error("Error writing CONT", slog.String("reason", boundedErrorKind(err)))
 		} else {
 			startSASLContinuationWait(state, s.name, authReq)
 		}
@@ -1060,7 +1495,7 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeMechanisms, authReq.ID)
 		delete(activeAuthRequests, authReq.ID)
 
-		sendDovecotFail(authCtx, conn, encoder, logger, clientAddr, authReq.ID, result.Reason, result.Username, result.Temporary)
+		s.sendDovecotFail(authCtx, conn, encoder, logger, authReq.ID, result.Reason, result.Username, result.Temporary)
 
 		return
 	}
@@ -1070,15 +1505,32 @@ func (s *MultiServer) handleSASLResult(
 		delete(activeMechanisms, authReq.ID)
 		delete(activeAuthRequests, authReq.ID)
 
+		permit, admission := s.acquireRequest(authCtx)
+		if requestOverloaded(admission) {
+			s.logRequestOverload(logger, admission)
+
+			outcome = outcomeTempfail
+
+			s.sendDovecotFail(authCtx, conn, encoder, logger, authReq.ID, "temporary failure", "", true)
+
+			return
+		}
+		defer permit.Release()
+		defer func() {
+			if recover() != nil {
+				outcome = outcomeTempfail
+
+				s.sendDovecotFail(authCtx, conn, encoder, logger, authReq.ID, "temporary failure", "", true)
+			}
+		}()
+
 		currentConfig := s.deps.GetConfig()
 		if currentConfig == nil {
 			outcome = outcomeTempfail
 			logger.Error("Authentication error",
-				slog.String(LogKeyClient, clientAddr),
-				slog.String("username", creds.Username),
-				slog.String("error", "configuration not loaded"))
+				slog.String("reason", "configuration_unavailable"))
 
-			sendDovecotFail(authCtx, conn, encoder, logger, clientAddr, authReq.ID, "internal error", creds.Username, true)
+			s.sendDovecotFail(authCtx, conn, encoder, logger, authReq.ID, "internal error", creds.Username, true)
 
 			return
 		}
@@ -1088,7 +1540,10 @@ func (s *MultiServer) handleSASLResult(
 		var authResult *SASLAuthResult
 		var err error
 
-		backendCtx, backendObs, backendSpan := startInternalSpanFromContext(authCtx,
+		backendCtx, cancelBackend := s.backendContext(authCtx)
+		defer cancelBackend()
+
+		backendCtx, backendObs, backendSpan := startInternalSpanFromContext(backendCtx,
 			dovecotSASLBackendSpanName,
 			attribute.String("pfxhttp.component", componentDovecotSASL),
 			attribute.String("pfxhttp.name", safeMetricName(s.name)),
@@ -1108,13 +1563,14 @@ func (s *MultiServer) handleSASLResult(
 			if obs != nil {
 				obs.RecordSpanError(span, err)
 			}
-			logger.Error("Authentication error",
-				slog.String(LogKeyClient, clientAddr),
-				slog.String("username", creds.Username),
-				slog.String("error", err.Error()))
+
+			logger.Error("Authentication backend failed",
+				slog.String("result", resultError))
 
 			resp := encoder.EncodeFail(authReq.ID, "internal error", creds.Username, true)
-			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
+
+			logger.Debug("Outgoing Dovecot SASL response",
+				slog.String("command", string(DovecotCmdFail)))
 
 			_, writeObs, writeSpan := startInternalSpanFromContext(authCtx,
 				dovecotSASLResponseSpanName,
@@ -1122,11 +1578,11 @@ func (s *MultiServer) handleSASLResult(
 				attribute.String("pfxhttp.name", safeMetricName(s.name)),
 				attribute.String("pfxhttp.sasl.command", string(DovecotCmdFail)),
 			)
-			_, wErr := conn.Write([]byte(resp))
+			wErr := s.writeDovecotResponse(authCtx, conn, resp)
 			finishObservedSpan(writeObs, writeSpan, wErr)
 
 			if wErr != nil {
-				logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
+				logger.Error("Error writing FAIL", slog.String("reason", boundedErrorKind(wErr)))
 			}
 
 			return
@@ -1139,12 +1595,12 @@ func (s *MultiServer) handleSASLResult(
 			}
 
 			logger.Info("Authentication successful",
-				slog.String(LogKeyClient, clientAddr),
-				slog.String("username", username),
 				slog.String("mechanism", authReq.Mechanism))
 
 			resp := encoder.EncodeOK(authReq.ID, username)
-			logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
+
+			logger.Debug("Outgoing Dovecot SASL response",
+				slog.String("command", string(DovecotCmdOK)))
 
 			_, writeObs, writeSpan := startInternalSpanFromContext(authCtx,
 				dovecotSASLResponseSpanName,
@@ -1152,26 +1608,24 @@ func (s *MultiServer) handleSASLResult(
 				attribute.String("pfxhttp.name", safeMetricName(s.name)),
 				attribute.String("pfxhttp.sasl.command", string(DovecotCmdOK)),
 			)
-			_, wErr := conn.Write([]byte(resp))
+			wErr := s.writeDovecotResponse(authCtx, conn, resp)
 			finishObservedSpan(writeObs, writeSpan, wErr)
 
 			if wErr != nil {
-				logger.Error("Error writing OK", slog.String(LogKeyClient, clientAddr), slog.String("error", wErr.Error()))
+				logger.Error("Error writing OK", slog.String("reason", boundedErrorKind(wErr)))
 			}
 		} else {
 			logger.Info("Authentication failed",
-				slog.String(LogKeyClient, clientAddr),
-				slog.String("username", creds.Username),
 				slog.String("mechanism", authReq.Mechanism),
-				slog.String("reason", authResult.Reason))
+				slog.Bool("temporary", authResult.Temporary))
 
-			sendDovecotFail(authCtx, conn, encoder, logger, clientAddr, authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
+			s.sendDovecotFail(authCtx, conn, encoder, logger, authReq.ID, authResult.Reason, creds.Username, authResult.Temporary)
 		}
 	}
 }
 
 // startApplicationSpan creates a protocol request context and server span.
-func (s *MultiServer) startApplicationSpan(component, name, clientAddr string) (context.Context, *Observability, trace.Span) {
+func (s *MultiServer) startApplicationSpan(component, name, _ string) (context.Context, *Observability, trace.Span) {
 	ctx := s.ctx
 
 	obs := s.deps.GetObservability()
@@ -1186,7 +1640,6 @@ func (s *MultiServer) startApplicationSpan(component, name, clientAddr string) (
 		trace.SpanKindServer,
 		attribute.String("pfxhttp.component", component),
 		attribute.String("pfxhttp.name", safeMetricName(name)),
-		attribute.String("network.peer.address", clientAddr),
 	)
 
 	return ctx, obs, span
@@ -1222,21 +1675,45 @@ func applicationSpanName(component, name string) string {
 	}
 }
 
+func (s *MultiServer) writeDovecotResponse(ctx context.Context, conn net.Conn, response string) error {
+	ctx, cancel := contextWithOptionalTimeout(ctx, s.effectiveProtocolLimits().DovecotSASL.WriteTimeout)
+	defer cancel()
+
+	clearDeadline, err := setWriteDeadlineFromContext(ctx, conn)
+	if err != nil {
+		return err
+	}
+	defer clearDeadline()
+
+	_, err = conn.Write([]byte(response))
+
+	return err
+}
+
+func (s *MultiServer) writeDovecotConnectionResponse(conn net.Conn, response string) error {
+	ctx, cancel := contextWithOptionalTimeout(s.ctx, s.effectiveProtocolLimits().DovecotSASL.WriteTimeout)
+	defer cancel()
+
+	return s.writeDovecotResponse(ctx, conn, response)
+}
+
 // sendDovecotFail encodes and sends a FAIL response over the Dovecot SASL protocol, logging the response and any write errors.
-func sendDovecotFail(ctx context.Context, conn net.Conn, encoder *DovecotEncoder, logger *slog.Logger, clientAddr string, id string, reason string, username string, temporary bool) {
+func (s *MultiServer) sendDovecotFail(ctx context.Context, conn net.Conn, encoder *DovecotEncoder, logger *slog.Logger, id string, reason string, username string, temporary bool) {
 	resp := encoder.EncodeFail(id, reason, username, temporary)
-	logger.Debug("Outgoing Dovecot SASL response", slog.String(LogKeyClient, clientAddr), slog.String("response", redactDovecotLine(resp)))
+
+	logger.Debug("Outgoing Dovecot SASL response",
+		slog.String("command", string(DovecotCmdFail)))
 
 	_, writeObs, writeSpan := startInternalSpanFromContext(ctx,
 		dovecotSASLResponseSpanName,
 		attribute.String("pfxhttp.component", componentDovecotSASL),
 		attribute.String("pfxhttp.sasl.command", string(DovecotCmdFail)),
 	)
-	_, err := conn.Write([]byte(resp))
+	err := s.writeDovecotResponse(ctx, conn, resp)
 	finishObservedSpan(writeObs, writeSpan, err)
 
 	if err != nil {
-		logger.Error("Error writing FAIL", slog.String(LogKeyClient, clientAddr), slog.String("error", err.Error()))
+		logger.Error("Error writing FAIL", slog.String("reason", boundedErrorKind(err)))
 	}
 }
 
@@ -1253,73 +1730,7 @@ func isConnectionResetError(err error) bool {
 
 // readNetString reads and parses a NetString from the specified network connection, returning the parsed NetString or an error.
 func (s *MultiServer) readNetString(conn net.Conn) (*NetString, error) {
-	lengthBuf := make([]byte, 0, 10)
-
-	for {
-		endLoop := false
-
-		select {
-		case <-s.ctx.Done():
-			return nil, io.EOF
-		default:
-			singleByte := make([]byte, 1)
-
-			err := conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			if err != nil {
-				return nil, err
-			}
-
-			_, err = conn.Read(singleByte)
-			if err != nil {
-				if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
-					continue
-				}
-
-				if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || isConnectionResetError(err) {
-					return nil, nil
-				}
-
-				return nil, err
-			}
-
-			if singleByte[0] == ':' {
-				endLoop = true
-
-				break
-			}
-
-			lengthBuf = append(lengthBuf, singleByte[0])
-		}
-
-		if endLoop {
-			break
-		}
-	}
-
-	length, err := strconv.Atoi(string(lengthBuf))
-	if err != nil {
-		return nil, fmt.Errorf("invalid length: %w", err)
-	}
-
-	data := make([]byte, length)
-
-	_, err = io.ReadFull(conn, data)
-	if err != nil {
-		return nil, fmt.Errorf("could not read data: %w", err)
-	}
-
-	trailingByte := make([]byte, 1)
-
-	_, err = conn.Read(trailingByte)
-	if err != nil {
-		return nil, fmt.Errorf("error reading trailing comma: %w", err)
-	}
-
-	if trailingByte[0] != ',' {
-		return nil, fmt.Errorf("missing trailing comma")
-	}
-
-	return NewNetString(data), nil
+	return newSocketMapReader(conn, defaultSocketMapFraming()).Read(s.ctx)
 }
 
 // writeNetString encodes the given NetString and writes it to the specified network connection.
@@ -1341,55 +1752,38 @@ func (s *MultiServer) writeNetString(conn net.Conn, netString NetData) error {
 	return nil
 }
 
+func (s *MultiServer) writeNetStringContext(ctx context.Context, conn net.Conn, netString NetData) error {
+	ctx, cancel := contextWithOptionalTimeout(ctx, s.effectiveProtocolLimits().SocketMap.WriteTimeout)
+	defer cancel()
+
+	clearDeadline, err := setWriteDeadlineFromContext(ctx, conn)
+	if err != nil {
+		return err
+	}
+	defer clearDeadline()
+
+	return s.writeNetString(conn, netString)
+}
+
 // writePolicyResult writes the specified policy result to the given network connection.
 // Returns an error if the write operation fails.
 func (s *MultiServer) writePolicyResult(conn net.Conn, result string) error {
-	// Set a write deadline to avoid long hangs
-	err := conn.SetWriteDeadline(time.Now().Add(300 * time.Second))
-	if err != nil {
-		return err
-	}
+	_, err := conn.Write([]byte(result))
 
-	_, err = conn.Write([]byte(result))
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
-func (s *MultiServer) readPolicy(conn net.Conn) (Policy, error) {
-	policy := NewPostfixPolicy()
-	reader := bufio.NewReader(conn)
+func (s *MultiServer) writePolicyResultContext(ctx context.Context, conn net.Conn, result string) error {
+	ctx, cancel := contextWithOptionalTimeout(ctx, s.effectiveProtocolLimits().PolicyService.WriteTimeout)
+	defer cancel()
 
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
-			return nil, fmt.Errorf("error while reading from the connection: %w", err)
-		}
-
-		line = strings.TrimSpace(line)
-
-		if line == "" {
-			break
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid format: '%s'", line)
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		policy.SetData(key, value)
+	clearDeadline, err := setWriteDeadlineFromContext(ctx, conn)
+	if err != nil {
+		return err
 	}
+	defer clearDeadline()
 
-	return policy, nil
+	return s.writePolicyResult(conn, result)
 }
 
 // requiredChrootFiles lists files that must exist inside the chroot directory
@@ -1530,14 +1924,16 @@ func DropPrivileges(creds *Credentials, logger *slog.Logger) error {
 		if err := syscall.Setgid(creds.GID); err != nil {
 			return fmt.Errorf("could not set gid to %d: %w", creds.GID, err)
 		}
-		logger.Info("Dropped group privileges", slog.String("group", creds.GroupName), slog.Int("gid", creds.GID))
+
+		logger.Info("Dropped group privileges")
 	}
 
 	if creds.HasUser {
 		if err := syscall.Setuid(creds.UID); err != nil {
 			return fmt.Errorf("could not set uid to %d: %w", creds.UID, err)
 		}
-		logger.Info("Dropped user privileges", slog.String("user", creds.UserName), slog.Int("uid", creds.UID))
+
+		logger.Info("Dropped user privileges")
 	}
 
 	return nil

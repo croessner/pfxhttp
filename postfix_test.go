@@ -8,7 +8,7 @@ type MockNetString struct {
 	data string
 }
 
-func (m *MockNetString) Length() uint16 {
+func (m *MockNetString) Length() int {
 	return 0
 }
 

@@ -59,6 +59,9 @@ test-release-metadata:
 	bash scripts/test-release-semver-metadata.sh
 	bash scripts/test-linux-package-layout.sh
 
+test-postfix-interop:
+	bash test/e2e/postfix/scripts/run.sh
+
 guardrails: fix vet lint test test-release-metadata race build-check
 
 # Print version
@@ -74,4 +77,4 @@ generate-grpc:
 		proto/common/v1/common.proto \
 		proto/auth/v1/auth.proto
 
-.PHONY: all build build-check clean version install uninstall fix vet lint test test-release-metadata race guardrails generate-grpc
+.PHONY: all build build-check clean version install uninstall fix vet lint test test-release-metadata test-postfix-interop race guardrails generate-grpc
