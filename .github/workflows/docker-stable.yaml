@@ -1,0 +1,41 @@
+name: Production Docker Build
+
+"on":
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GOVULNCHECK_VERSION: v1.3.0
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: 1.26.5
+
+      - name: Install govulncheck
+        run: |
+          GOBIN="$(go env GOPATH)/bin" \
+            go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+      - name: Run govulncheck
+        run: make govulncheck
+
+  build:
+    needs: govulncheck
+    uses: ./.github/workflows/docker-stable-build.yaml
+    with:
+      release_tag: ${{ github.ref_name }}
+      build_reason: tag-push

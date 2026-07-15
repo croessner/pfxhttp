@@ -1,12 +1,15 @@
 # Variables
 APP_NAME := pfxhttp
-VERSION := $(shell git describe --tags --always --dirty)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'dev')
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 PREFIX := /usr/local
 MAN5_DIR := $(PREFIX)/share/man/man5
 MAN8_DIR := $(PREFIX)/share/man/man8
 BIN_DIR := $(PREFIX)/sbin
 GOLANGCI_NEW_FROM_REV ?= HEAD
+GOVULNCHECK ?= govulncheck
+GOVULNCHECK_GOFLAGS ?= -mod=vendor
+GOVULNCHECK_SCAN ?= package
 
 # Default target
 all: build
@@ -58,11 +61,18 @@ race:
 test-release-metadata:
 	bash scripts/test-release-semver-metadata.sh
 	bash scripts/test-linux-package-layout.sh
+	bash scripts/check-release-hardening.sh
 
 test-postfix-interop:
 	bash test/e2e/postfix/scripts/run.sh
 
 guardrails: fix vet lint test test-release-metadata race build-check
+
+govulncheck:
+	@command -v $(GOVULNCHECK) >/dev/null 2>&1 || { echo "$(GOVULNCHECK) not found. Install it with: go install golang.org/x/vuln/cmd/govulncheck@latest"; exit 1; }
+	CGO_ENABLED=0 GOFLAGS="$(GOVULNCHECK_GOFLAGS)" $(GOVULNCHECK) -scan=$(GOVULNCHECK_SCAN) ./...
+
+release-guardrails: guardrails govulncheck
 
 # Print version
 version:
@@ -77,4 +87,4 @@ generate-grpc:
 		proto/common/v1/common.proto \
 		proto/auth/v1/auth.proto
 
-.PHONY: all build build-check clean version install uninstall fix vet lint test test-release-metadata test-postfix-interop race guardrails generate-grpc
+.PHONY: all build build-check clean version install uninstall fix vet lint test test-release-metadata test-postfix-interop race guardrails govulncheck release-guardrails generate-grpc

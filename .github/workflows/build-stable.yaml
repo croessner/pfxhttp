@@ -1,0 +1,362 @@
+name: Release Build
+
+"on":
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: pfxhttp
+  GOVULNCHECK_VERSION: v1.3.0
+  SYFT_VERSION: v1.16.0
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: 1.26.5
+
+      - name: Install govulncheck
+        run: |
+          GOBIN="$(go env GOPATH)/bin" \
+            go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+      - name: Run govulncheck
+        run: make govulncheck
+
+  build-artifact:
+    needs:
+      - govulncheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate release metadata
+        run: ./scripts/release-semver-metadata.sh "${GITHUB_REF_NAME}" >/dev/null
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: 1.26.5
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME}-${GITHUB_SHA:0:12}"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${version}" -o "${APP_NAME}" .
+
+      - name: Create artifact
+        run: |
+          assets="${APP_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "dist/${assets}/contrib/systemd" "dist/${assets}/man/man5" "dist/${assets}/man/man8"
+          cp "${APP_NAME}" README.md LICENSE pfxhttp.yml "dist/${assets}/"
+          cp contrib/systemd/pfxhttp.service contrib/systemd/pfxhttp-policy.socket contrib/systemd/pfxhttp@.socket "dist/${assets}/contrib/systemd/"
+          cp man/man5/pfxhttp.yml.5 "dist/${assets}/man/man5/"
+          cp man/man8/pfxhttp.8 "dist/${assets}/man/man8/"
+          (
+            cd dist
+            tar czf "${assets}.tar.gz" "${assets}"
+          )
+
+      - name: Generate source SBOM
+        run: |
+          assets="${APP_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          ./scripts/sbom.sh \
+            --source-dir "dist/${assets}" \
+            --output-dir "dist/${assets}" \
+            --output-prefix "${assets}" \
+            --syft-version "${SYFT_VERSION}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*/*.spdx.json
+
+      - name: Attest release artifact
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*/*.spdx.json
+
+  build-linux-packages:
+    needs:
+      - govulncheck
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+            container_platform: linux/amd64
+            deb_arch: amd64
+            rpm_arch: x86_64
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+            container_platform: linux/arm64
+            deb_arch: arm64
+            rpm_arch: aarch64
+    steps:
+      - name: Check out code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: 1.26.5
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME}-${GITHUB_SHA:0:12}"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${version}" -o "${APP_NAME}" .
+
+      - name: Resolve release metadata
+        id: release_metadata
+        run: ./scripts/release-semver-metadata.sh "${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build Linux packages
+        run: |
+          host_uid="$(id -u)"
+          host_gid="$(id -g)"
+          docker run --rm \
+            --platform "${{ matrix.container_platform }}" \
+            -e "HOST_UID=${host_uid}" \
+            -e "HOST_GID=${host_gid}" \
+            -v "${PWD}:/work" \
+            -w /work \
+            alpine:3.24 \
+            sh -c '
+              set -e
+              apk add --no-cache bash coreutils cpio dpkg rpm
+              mkdir -p dist/packages
+              ./scripts/build-linux-package.sh \
+                --type deb \
+                --arch "${{ matrix.deb_arch }}" \
+                --version "${{ steps.release_metadata.outputs.package_version }}" \
+                --binary "./${{ env.APP_NAME }}" \
+                --out-dir dist/packages
+              ./scripts/build-linux-package.sh \
+                --type rpm \
+                --arch "${{ matrix.rpm_arch }}" \
+                --version "${{ steps.release_metadata.outputs.package_version }}" \
+                --binary "./${{ env.APP_NAME }}" \
+                --out-dir dist/packages
+              ./scripts/verify-linux-package.sh dist/packages/*.deb dist/packages/*.rpm
+              chown -R "${HOST_UID}:${HOST_GID}" dist/packages
+            '
+
+      - name: Generate package SBOMs
+        run: |
+          mkdir -p dist/sbom
+          for package in dist/packages/*.deb dist/packages/*.rpm; do
+            ./scripts/sbom.sh \
+              --skip-source \
+              --file "${package}" \
+              --output-dir dist/sbom \
+              --syft-version "${SYFT_VERSION}"
+          done
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}-pkgs
+          path: |
+            dist/packages/*
+            dist/sbom/*.spdx.json
+
+      - name: Attest package artifacts
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            dist/packages/*
+            dist/sbom/*.spdx.json
+
+  create-release:
+    needs:
+      - govulncheck
+      - build-artifact
+      - build-linux-packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: release_metadata
+        run: ./scripts/release-semver-metadata.sh "${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create release with structured notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.release_metadata.outputs.prerelease }}
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists."
+            exit 0
+          fi
+
+          last_release_tag="$(gh release view --repo "${{ github.repository }}" --json tagName --jq '.tagName' 2>/dev/null || true)"
+          if [[ -n "${last_release_tag}" ]]; then
+            ahead_by="$(gh api "repos/${{ github.repository }}/compare/${last_release_tag}...${{ github.ref_name }}" --jq '.ahead_by')"
+            if [[ "${ahead_by}" -eq 0 ]]; then
+              echo "No new commits since ${last_release_tag}; aborting release creation."
+              exit 1
+            fi
+          fi
+
+          notes_file="$(mktemp)"
+          trap 'rm -f "${notes_file}"' EXIT
+          printf '## Commit Summary\n\n' > "${notes_file}"
+
+          append_section() {
+            local section_title="$1"
+            local grep_pattern="$2"
+            local log_output
+
+            if [[ -n "${last_release_tag}" ]]; then
+              log_output="$(git log "${last_release_tag}..${{ github.ref_name }}" --pretty=format:'- %s (%h)' --no-merges --extended-regexp --regexp-ignore-case --grep="^${grep_pattern}" || true)"
+            else
+              log_output="$(git log "${{ github.ref_name }}" --pretty=format:'- %s (%h)' --no-merges --extended-regexp --regexp-ignore-case --grep="^${grep_pattern}" || true)"
+            fi
+
+            if [[ -n "${log_output}" ]]; then
+              printf '### %s\n%s\n\n' "${section_title}" "${log_output}" >> "${notes_file}"
+            fi
+          }
+
+          append_section "Added" "Add:"
+          append_section "Changed" "Change:"
+          append_section "Fixed" "Fix:"
+          append_section "Removed" "Remove:"
+          append_section "Refactored" "Refactor:"
+          append_section "Tests" "Test:"
+          append_section "Documentation" "Docs:"
+          append_section "Build And CI" "(Build|Ci):"
+          append_section "Security" "Security:"
+          append_section "Dependencies" "Vendor:"
+          append_section "Chores" "Chore:"
+
+          if ! grep -q '^### ' "${notes_file}"; then
+            git log "${last_release_tag:+${last_release_tag}..}${{ github.ref_name }}" \
+              --pretty=format:'### Other Commits%n- %s (%h)' --no-merges -n 20 >> "${notes_file}"
+          fi
+
+          release_args=(
+            "${GITHUB_REF_NAME}"
+            --repo "${{ github.repository }}"
+            --verify-tag
+            --notes-file "${notes_file}"
+            --generate-notes
+          )
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            release_args+=(--prerelease)
+          else
+            release_args+=(--latest)
+          fi
+          gh release create "${release_args[@]}"
+
+  upload-release:
+    needs:
+      - govulncheck
+      - create-release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets="${APP_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          gh release upload "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            "dist/${assets}.tar.gz" \
+            "dist/${assets}/${assets}-source.spdx.json"
+
+  upload-linux-packages:
+    needs:
+      - govulncheck
+      - create-release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}-pkgs
+          path: dist
+
+      - name: Upload package assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -d '' files < <(find dist -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.spdx.json' \) -print0)
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "No package assets found." >&2
+            exit 1
+          fi
+          gh release upload "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            "${files[@]}"

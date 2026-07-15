@@ -1,28 +1,40 @@
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+# syntax=docker/dockerfile:1.7
+
+ARG GO_IMAGE=golang:1.26.5-alpine3.24
+ARG RUNTIME_IMAGE=alpine:3.24
+
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
 
 WORKDIR /build
 
 COPY . ./
 
-ARG TARGETOS
+ARG TARGETOS=linux
 ARG TARGETARCH
+ARG VERSION=dev
 
 # Set necessary environment variables and compile the app.
 ENV CGO_ENABLED=0
 
 RUN apk --no-cache --upgrade add build-base git
 RUN if [ -n "${TARGETOS}" ] && [ -n "${TARGETARCH}" ]; then \
-        GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" make; \
+        GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" make VERSION="${VERSION}"; \
     else \
-        make; \
+        make VERSION="${VERSION}"; \
     fi
 
-FROM alpine:3
+FROM ${RUNTIME_IMAGE}
+
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG SOURCE=https://github.com/croessner/pfxhttp
 
 LABEL org.opencontainers.image.authors="christian@roessner.email"
-LABEL org.opencontainers.image.source="https://github.com/croessner/pfxhttp"
+LABEL org.opencontainers.image.source="${SOURCE}"
 LABEL org.opencontainers.image.description="Postfix to HTTP wrapper"
 LABEL org.opencontainers.image.licenses=MIT
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${REVISION}"
 LABEL com.roessner-network-solutions.vendor="Rößner-Network-Solutions"
 
 WORKDIR /usr/app

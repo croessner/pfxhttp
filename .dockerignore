@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+*.iml
+bin
+dist
+out
+pfxhttp
+temp

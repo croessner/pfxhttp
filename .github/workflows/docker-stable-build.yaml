@@ -1,0 +1,142 @@
+name: Stable Docker Build Reusable
+
+"on":
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Release tag to build.
+        required: true
+        type: string
+      rebuild_suffix:
+        description: Optional suffix appended to the exact release tag.
+        required: false
+        default: ''
+        type: string
+      build_reason:
+        description: Trigger context recorded in OCI labels.
+        required: false
+        default: tag-push
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  RUNTIME_IMAGE: alpine:3.24
+  GO_IMAGE: golang:1.26.5-alpine3.24
+  OCI_IMAGE_DESCRIPTION: Postfix to HTTP wrapper
+
+concurrency:
+  group: stable-docker-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      annotations: ${{ steps.release_metadata.outputs.annotations }}
+      build_args: ${{ steps.release_metadata.outputs.build_args }}
+      labels: ${{ steps.release_metadata.outputs.labels }}
+      tags: ${{ steps.release_metadata.outputs.tags }}
+    steps:
+      - name: Check out workflow tooling
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          path: workflow-src
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v3.11.1
+
+      - name: Resolve base image digests
+        id: base_digests
+        run: |
+          while IFS= read -r line; do
+            echo "${line}" >> "${GITHUB_OUTPUT}"
+          done < <(./workflow-src/scripts/docker-base-digests.sh)
+
+      - name: Extract release metadata
+        id: release_metadata
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REBUILD_SUFFIX: ${{ inputs.rebuild_suffix }}
+        run: |
+          release_commit="$(git -C workflow-src rev-list -n 1 "${RELEASE_TAG}")"
+          registry_image="ghcr.io/${{ github.repository_owner }}/pfxhttp"
+          prerelease=""
+          tag_major=""
+          tag_minor=""
+          rebuild_tag=""
+          runtime_digest="${{ steps.base_digests.outputs.runtime_digest }}"
+          runtime_image="${{ steps.base_digests.outputs.runtime_image }}"
+          golang_digest="${{ steps.base_digests.outputs.golang_digest }}"
+          golang_image="${{ steps.base_digests.outputs.golang_image }}"
+
+          while IFS='=' read -r key value; do
+            case "${key}" in
+              prerelease) prerelease="${value}" ;;
+              tag_major) tag_major="${value}" ;;
+              tag_minor) tag_minor="${value}" ;;
+            esac
+          done < <(./workflow-src/scripts/release-semver-metadata.sh "${RELEASE_TAG}")
+
+          if [[ -n "${REBUILD_SUFFIX}" ]]; then
+            rebuild_tag="${RELEASE_TAG}-${REBUILD_SUFFIX}"
+          fi
+
+          {
+            echo 'tags<<EOF'
+            echo "${registry_image}:${RELEASE_TAG}"
+            if [[ "${prerelease}" != "true" ]]; then
+              echo "${registry_image}:latest"
+              echo "${registry_image}:${tag_major}"
+              echo "${registry_image}:${tag_minor}"
+            fi
+            if [[ -n "${rebuild_tag}" ]]; then
+              echo "${registry_image}:${rebuild_tag}"
+            fi
+            echo 'EOF'
+
+            echo 'annotations<<EOF'
+            echo "index,manifest:org.opencontainers.image.description=${OCI_IMAGE_DESCRIPTION}"
+            echo 'EOF'
+
+            echo 'build_args<<EOF'
+            echo "VERSION=${RELEASE_TAG}"
+            echo "REVISION=${release_commit}"
+            echo "SOURCE=https://github.com/${{ github.repository }}"
+            echo "GO_IMAGE=${golang_image}@${golang_digest}"
+            echo "RUNTIME_IMAGE=${runtime_image}@${runtime_digest}"
+            echo 'EOF'
+
+            echo 'labels<<EOF'
+            echo "org.opencontainers.image.description=${OCI_IMAGE_DESCRIPTION}"
+            echo "org.opencontainers.image.revision=${release_commit}"
+            echo "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
+            echo "org.opencontainers.image.version=${RELEASE_TAG}"
+            echo "io.pfxhttp.base.golang.digest=${golang_digest}"
+            echo "io.pfxhttp.base.golang.image=${golang_image}"
+            echo "io.pfxhttp.base.runtime.digest=${runtime_digest}"
+            echo "io.pfxhttp.base.runtime.image=${runtime_image}"
+            echo "io.pfxhttp.build.reason=${{ inputs.build_reason }}"
+            echo "io.pfxhttp.release.tag=${RELEASE_TAG}"
+            if [[ -n "${rebuild_tag}" ]]; then
+              echo "io.pfxhttp.rebuild.tag=${rebuild_tag}"
+            fi
+            echo 'EOF'
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/docker-build-push.yaml
+    with:
+      source_ref: ${{ inputs.release_tag }}
+      fetch_depth: 0
+      checkout_path: release-src
+      dockerfile_path: Dockerfile
+      sbom: true
+      tags: ${{ needs.prepare.outputs.tags }}
+      annotations: ${{ needs.prepare.outputs.annotations }}
+      build_args: ${{ needs.prepare.outputs.build_args }}
+      labels: ${{ needs.prepare.outputs.labels }}
