@@ -217,7 +217,7 @@ func TestListenerShutdownCancelsActivePolicyBackend(t *testing.T) {
 	}
 }
 
-func TestClientCloseCancelsActivePolicyBackend(t *testing.T) {
+func TestClientResetCancelsActivePolicyBackend(t *testing.T) {
 	backendStarted := make(chan struct{}, 1)
 	backendCanceled := make(chan struct{}, 1)
 	obs := newPrometheusTestObservability(t)
@@ -254,14 +254,23 @@ func TestClientCloseCancelsActivePolicyBackend(t *testing.T) {
 		t.Fatal("policy backend did not start")
 	}
 
-	if err := conn.Close(); err != nil {
-		t.Fatalf("close policy client: %v", err)
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("policy client connection type = %T, want *net.TCPConn", conn)
+	}
+
+	if err := tcpConn.SetLinger(0); err != nil {
+		t.Fatalf("configure policy client reset: %v", err)
+	}
+
+	if err := tcpConn.Close(); err != nil {
+		t.Fatalf("reset policy client: %v", err)
 	}
 
 	select {
 	case <-backendCanceled:
 	case <-time.After(time.Second):
-		t.Fatal("client close did not cancel active policy backend")
+		t.Fatal("client reset did not cancel active policy backend")
 	}
 
 	waitForMetricValue(t, obs.metrics.requestState.WithLabelValues(listenKindPolicyService, lifecyclePolicyName, "inflight"), 0)

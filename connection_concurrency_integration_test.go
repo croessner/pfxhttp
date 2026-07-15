@@ -90,6 +90,57 @@ func TestSocketMapListenerHandlesBackToBackRequestsOnOneConnection(t *testing.T)
 	waitForActiveRead(t, accepted)
 }
 
+func TestSocketMapHalfCloseStillReceivesResponse(t *testing.T) {
+	deps, _ := newConcurrencyTestDeps(t)
+	baseTransport := deps.HTTPClient.Transport
+	deps.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-request.Context().Done():
+			return nil, request.Context().Err()
+		}
+
+		return baseTransport.RoundTrip(request)
+	})}
+	listener := startObservedServer(t, deps, 1, Listen{
+		Kind: listenKindSocketMap,
+		Name: concurrencyTestMap,
+		Type: listenTypeTCP,
+	})
+
+	conn, _ := dialObservedConnection(t, listener)
+
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		_ = conn.Close()
+		t.Fatalf("SocketMap client connection type = %T, want *net.TCPConn", conn)
+	}
+
+	t.Cleanup(func() { _ = tcpConn.Close() })
+
+	payload := concurrencyTestMap + " half-close@example.test"
+	if _, err := fmt.Fprintf(tcpConn, "%d:%s,", len(payload), payload); err != nil {
+		t.Fatalf("write SocketMap request: %v", err)
+	}
+
+	if err := tcpConn.CloseWrite(); err != nil {
+		t.Fatalf("half-close SocketMap request stream: %v", err)
+	}
+
+	if err := tcpConn.SetReadDeadline(time.Now().Add(concurrencyCleanupTimeout)); err != nil {
+		t.Fatalf("set SocketMap response deadline: %v", err)
+	}
+
+	response, err := readSocketMapReply(tcpConn)
+	if err != nil {
+		t.Fatalf("read SocketMap response after half-close: %v", err)
+	}
+
+	if response != concurrencyMappedReply {
+		t.Fatalf("SocketMap response after half-close = %q, want %q", response, concurrencyMappedReply)
+	}
+}
+
 func TestSocketMapListenerRejectsConnectionsAboveAdmissionLimit(t *testing.T) {
 	deps, _ := newConcurrencyTestDeps(t)
 	listener := startObservedServer(t, deps, 1, Listen{

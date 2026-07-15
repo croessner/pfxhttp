@@ -16,8 +16,10 @@ type syscallConnProvider interface {
 	SyscallConn() (syscall.RawConn, error)
 }
 
-// contextWithPeerClose cancels when a stream peer closes without consuming
-// bytes that may already belong to the next pipelined protocol request.
+// contextWithPeerClose cancels when a stream peer resets the connection
+// without consuming bytes that may already belong to the next pipelined
+// protocol request. A clean receive-side EOF is not sufficient: clients may
+// half-close their request stream and still be waiting for the response.
 func contextWithPeerClose(parent context.Context, conn net.Conn) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(parent)
 
@@ -46,11 +48,8 @@ func watchPeerClose(ctx context.Context, cancel context.CancelCauseFunc, raw sys
 		controlErr := raw.Control(func(fd uintptr) {
 			var probe [1]byte
 
-			n, _, recvErr := syscall.Recvfrom(int(fd), probe[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT)
-			switch {
-			case recvErr == nil && n == 0:
-				closed = true
-			case errors.Is(recvErr, syscall.ECONNRESET), errors.Is(recvErr, syscall.ENOTCONN):
+			_, _, recvErr := syscall.Recvfrom(int(fd), probe[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT)
+			if errors.Is(recvErr, syscall.ECONNRESET) || errors.Is(recvErr, syscall.ENOTCONN) {
 				closed = true
 			}
 		})
