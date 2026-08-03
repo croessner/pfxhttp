@@ -461,6 +461,7 @@ func TestNewSASLMechanism(t *testing.T) {
 		{name: "PLAIN", mechName: "PLAIN", wantType: "PLAIN"},
 		{name: "plain lowercase", mechName: "plain", wantType: "PLAIN"},
 		{name: "LOGIN", mechName: "LOGIN", wantType: "LOGIN"},
+		{name: saslMechanismExternal, mechName: saslMechanismExternal, wantType: saslMechanismExternal},
 		{name: "XOAUTH2", mechName: "XOAUTH2", wantType: "XOAUTH2"},
 		{name: "OAUTHBEARER", mechName: "OAUTHBEARER", wantType: "OAUTHBEARER"},
 		{name: "Unknown", mechName: "UNKNOWN", wantNil: true},
@@ -499,6 +500,7 @@ func TestIsOAuthMechanism(t *testing.T) {
 		{"oauthbearer", true},
 		{"PLAIN", false},
 		{"LOGIN", false},
+		{saslMechanismExternal, false},
 		{"", false},
 	}
 
@@ -521,7 +523,7 @@ func TestNauthilusSASLAuthenticatorPassword(t *testing.T) {
 
 		// Check if fields are passed correctly (Nauthilus JSON auth)
 		if payload["protocol"] != "smtp" || payload["client_ip"] != "127.0.0.1" || payload["local_ip"] != "10.0.0.1" ||
-			payload["client_port"] != "1234" || payload["local_port"] != "25" || payload["ssl"] != "on" ||
+			payload["client_port"] != "1234" || payload["local_port"] != "25" || payload["ssl"] != saslTLSOn ||
 			payload["ssl_protocol"] != "TLSv1.3" || payload["ssl_cipher"] != "ECDHE-RSA-AES256-GCM-SHA384" ||
 			payload["client_id"] != "client1" || payload["method"] != "PLAIN" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -606,6 +608,156 @@ func TestNauthilusSASLAuthenticatorPassword(t *testing.T) {
 	}
 	if result.Success {
 		t.Error("Expected failure")
+	}
+}
+
+func TestNauthilusSASLAuthenticatorLookupIdentityUsesNoAuthMode(t *testing.T) { //nolint:gocyclo // One HTTP contract assertion.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("mode"); got != nauthilusNoAuthMode {
+			t.Errorf("mode = %q, want no-auth", got)
+		}
+
+		if got := r.URL.Query().Get("existing"); got != testValueField {
+			t.Errorf("existing query value = %q, want value", got)
+		}
+
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+
+			return
+		}
+
+		if _, exists := payload["password"]; exists {
+			t.Error("LookupIdentity request contained password field")
+		}
+
+		if payload["username"] != testCertificateIdentity ||
+			payload["method"] != saslMechanismExternal ||
+			payload["ssl_client_verify"] != tlsClientVerifySuccess ||
+			payload["ssl_fingerprint"] != testSHA256Fingerprint {
+			t.Errorf("lookup payload = %#v", payload)
+		}
+
+		w.Header().Set("Auth-User", testCanonicalIdentity)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &Config{DovecotSASL: map[string]Request{
+		testExternalEntry: {Target: server.URL + "?existing=" + testValueField, StatusCode: http.StatusOK},
+	}}
+	authenticator := NewNauthilusSASLAuthenticator(cfg, testExternalEntry, server.Client(), nil)
+
+	result, err := authenticator.LookupIdentity(t.Context(), testCertificateIdentity, &DovecotAuthRequest{
+		Service:              "smtp",
+		Mechanism:            saslMechanismExternal,
+		Secured:              true,
+		SSLClientVerify:      tlsClientVerifySuccess,
+		SSLClientFingerprint: testSHA256Fingerprint,
+		SSLClientSANEmail:    testCertificateIdentity,
+	})
+	if err != nil {
+		t.Fatalf("LookupIdentity returned error: %v", err)
+	}
+
+	if result == nil || !result.Success || result.Username != testCanonicalIdentity {
+		t.Fatalf("LookupIdentity result = %+v", result)
+	}
+}
+
+func TestHTTPIdentityLookupStatusClassification(t *testing.T) {
+	const identityDeniedStatus = "identity denied"
+
+	authenticator := &NauthilusSASLAuthenticator{config: &Config{}}
+	settings := Request{StatusCode: http.StatusOK}
+
+	tests := []struct {
+		name      string
+		status    int
+		authStatus string
+		lookup    bool
+		temporary bool
+	}{
+		{name: "lookup caller unauthorized", status: http.StatusUnauthorized, lookup: true, temporary: true},
+		{name: "lookup caller forbidden", status: http.StatusForbidden, lookup: true, temporary: true},
+		{name: "lookup domain forbidden", status: http.StatusForbidden, authStatus: identityDeniedStatus, lookup: true},
+		{name: "lookup domain unauthorized", status: http.StatusUnauthorized, authStatus: identityDeniedStatus, lookup: true},
+		{name: "lookup request timeout", status: http.StatusRequestTimeout, lookup: true, temporary: true},
+		{name: "lookup too early", status: http.StatusTooEarly, lookup: true, temporary: true},
+		{name: "lookup rate limited", status: http.StatusTooManyRequests, lookup: true, temporary: true},
+		{name: "lookup backend unavailable", status: http.StatusServiceUnavailable, lookup: true, temporary: true},
+		{name: "lookup malformed request", status: http.StatusBadRequest, lookup: true},
+		{name: "password unauthorized remains credential failure", status: http.StatusUnauthorized},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := &http.Response{StatusCode: test.status, Header: make(http.Header)}
+			if test.authStatus != "" {
+				response.Header.Set("Auth-Status", test.authStatus)
+			}
+
+			result, err := authenticator.handleSASLResponse(
+				response,
+				settings,
+				test.lookup,
+			)
+			if err != nil {
+				t.Fatalf("handleSASLResponse returned error: %v", err)
+			}
+
+			if result.Success || result.Temporary != test.temporary {
+				t.Fatalf("result = %+v, want temporary=%v", result, test.temporary)
+			}
+		})
+	}
+}
+
+func TestHTTPIdentityLookupRejectsUnsafeCanonicalAccount(t *testing.T) {
+	authenticator := &NauthilusSASLAuthenticator{config: &Config{}}
+	settings := Request{StatusCode: http.StatusOK}
+
+	for _, username := range []string{
+		" " + testCanonicalIdentity,
+		testCanonicalIdentity + " ",
+		testCanonicalIdentity + "\tuser=attacker",
+		testCanonicalIdentity + "\rFAIL",
+		testCanonicalIdentity + "\nFAIL",
+		testCanonicalIdentity + "\x00suffix",
+	} {
+		response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+		response.Header["Auth-User"] = []string{username}
+
+		result, err := authenticator.handleSASLResponse(
+			response,
+			settings,
+			true,
+		)
+		if err != nil {
+			t.Fatalf("handleSASLResponse(%q) returned error: %v", username, err)
+		}
+
+		if result.Success || !result.Temporary || result.Reason != invalidCanonicalAccountReason {
+			t.Fatalf("handleSASLResponse(%q) = %+v", username, result)
+		}
+	}
+
+	notFound := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	notFound.Header.Set("Auth-Status", identityNotFoundReason)
+
+	result, err := authenticator.handleSASLResponse(
+		notFound,
+		settings,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("not-found response returned error: %v", err)
+	}
+
+	if result.Success || result.Temporary || result.Reason != identityNotFoundReason {
+		t.Fatalf("not-found result = %+v", result)
 	}
 }
 

@@ -869,6 +869,57 @@ Behavior:
   advertised to Postfix; unknown values are rejected, duplicates are rejected,
   and `XOAUTH2` / `OAUTHBEARER` require `sasl_oidc_auth.enabled: true`.
 
+##### SASL EXTERNAL
+
+`EXTERNAL` enables certificate-backed authentication through the trusted
+Postfix TLS terminator. It is never enabled by default; add it explicitly to
+`mechanisms`. For each `AUTH EXTERNAL`, Postfix must provide these singular
+Dovecot auth-request fields:
+
+- `ssl_client_verify=SUCCESS`
+- `ssl_client_san_email=<one rfc822Name SAN identity>`
+- `ssl_client_fingerprint=<SHA-256, SHA-384, or SHA-512 fingerprint>`
+
+Pfxhttp rejects missing, duplicate, malformed, ambiguous, or unverified fields
+before making a passwordless backend request. The SAN identity is resolved
+with Nauthilus `AuthService.LookupIdentity` for `transport: grpc`, or by posting
+the existing JSON auth request without a password and with `mode=no-auth` for
+`transport: json`. The canonical backend account is returned to Postfix in the
+Dovecot `OK user=...` response.
+
+Pfxhttp emits that canonical account verbatim only when it is non-empty, valid
+UTF-8, free of leading or trailing whitespace and protocol control characters,
+and the complete `OK` response fits the effective line limit of the accepting
+Dovecot listener. Invalid
+backend values fail temporarily instead of being normalized or written to the
+auth socket. For HTTP identity lookups, `401` and `403` are temporary caller
+failures only when Nauthilus supplies no `Auth-Status`; with `Auth-Status` they
+are permanent domain/identity failures. `408`, `425`, `429`, and `5xx` remain
+temporary, while a successful Nauthilus response without `Auth-User` is an
+identity-not-found failure.
+
+RFC 4422 authorization identities are empty or must exactly equal the
+certificate identity by default. Delegation is opt-in and succeeds only when a
+second identity lookup resolves to the same canonical account:
+
+```yaml
+dovecot_sasl:
+  smtp_auth:
+    mechanisms:
+      - PLAIN
+      - EXTERNAL
+    external_auth:
+      allow_authorization_id: false
+```
+
+The Dovecot auth socket carries certificate-derived authentication facts and
+must remain on a trusted private path. Pfxhttp does not validate an X.509 chain
+itself; `SUCCESS` must be emitted only after the TLS terminator has completed
+certificate-chain validation and extracted exactly one leaf `rfc822Name`.
+OIDC-protected gRPC callers also need the Nauthilus
+`nauthilus:lookup_identity` scope in addition to any scopes used by password
+authentication.
+
 ##### gRPC Transport (alternative to JSON)
 
 For password-based SASL mechanisms (PLAIN/LOGIN), `dovecot_sasl` entries can
@@ -878,6 +929,7 @@ the HTTP endpoint. The gRPC service shares the same authentication contract
 backend authentication and TLS settings keep their semantics across both
 transports.
 
+Certificate-based `EXTERNAL` uses `LookupIdentity` on the configured transport.
 Token-based mechanisms (XOAUTH2 / OAUTHBEARER) always validate via the OIDC
 introspection / JWKS endpoints over HTTP, regardless of `transport`.
 

@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
+
+const invalidCanonicalAccountReason = "invalid canonical account response"
 
 // Dovecot SASL Protocol Implementation
 //
@@ -175,6 +179,15 @@ type DovecotAuthRequest struct {
 
 	// SSLClientVerify is the TLS client certificate verification result.
 	SSLClientVerify string
+
+	// SSLClientSANEmail is the single rfc822Name identity extracted from the
+	// verified leaf certificate by the TLS terminator.
+	SSLClientSANEmail string
+
+	// SSLClientFingerprint identifies the verified leaf certificate. It is
+	// distinct from the legacy ssl_fingerprint transport field so EXTERNAL can
+	// require the explicit client-certificate boundary.
+	SSLClientFingerprint string
 
 	// SSLClientDN is the TLS client certificate DN.
 	SSLClientDN string
@@ -346,6 +359,7 @@ func (d *DovecotDecoder) DecodeAuthRequest(args string) (*DovecotAuthRequest, er
 		ID:        parts[0],
 		Mechanism: strings.ToUpper(parts[1]),
 	}
+	securityFields := make(map[string]struct{}, 3)
 
 	for _, param := range parts[2:] {
 		key, value, hasValue := strings.Cut(param, "=")
@@ -406,7 +420,26 @@ func (d *DovecotDecoder) DecodeAuthRequest(args string) (*DovecotAuthRequest, er
 		case "ssl_session_id":
 			req.SSLSessionID = value
 		case "ssl_client_verify":
+			if _, duplicate := securityFields[key]; duplicate {
+				return nil, fmt.Errorf("duplicate %s parameter", key)
+			}
+
+			securityFields[key] = struct{}{}
 			req.SSLClientVerify = value
+		case "ssl_client_san_email":
+			if _, duplicate := securityFields[key]; duplicate {
+				return nil, fmt.Errorf("duplicate %s parameter", key)
+			}
+
+			securityFields[key] = struct{}{}
+			req.SSLClientSANEmail = value
+		case "ssl_client_fingerprint":
+			if _, duplicate := securityFields[key]; duplicate {
+				return nil, fmt.Errorf("duplicate %s parameter", key)
+			}
+
+			securityFields[key] = struct{}{}
+			req.SSLClientFingerprint = value
 		case "ssl_client_dn":
 			req.SSLClientDN = value
 		case "ssl_client_cn":
@@ -558,6 +591,81 @@ func (e *DovecotEncoder) EncodeOK(id string, username string) string {
 	}
 
 	return fmt.Sprintf("%s\t%s\n", DovecotCmdOK, id)
+}
+
+// validateCanonicalSASLResult rejects backend account names that cannot be
+// represented verbatim as one Dovecot auth-protocol value. It never trims or
+// otherwise normalizes the backend identity because authorization comparisons
+// and the emitted user field must use exactly the same value.
+func validateCanonicalSASLResult(
+	result *SASLAuthResult,
+	requireCanonical bool,
+) *SASLAuthResult {
+	if result == nil {
+		return &SASLAuthResult{
+			Success:   false,
+			Reason:    invalidCanonicalAccountReason,
+			Temporary: true,
+		}
+	}
+
+	if !result.Success {
+		return result
+	}
+
+	if result.Username == "" && !requireCanonical {
+		return result
+	}
+
+	if !validDovecotCanonicalAccount(result.Username) {
+		return &SASLAuthResult{
+			Success:   false,
+			Reason:    invalidCanonicalAccountReason,
+			Temporary: true,
+		}
+	}
+
+	return result
+}
+
+func validateCanonicalSASLResultForDovecotLine(
+	result *SASLAuthResult,
+	id string,
+	maxLineBytes int,
+	requireCanonical bool,
+) *SASLAuthResult {
+	result = validateCanonicalSASLResult(result, requireCanonical)
+	if !result.Success || dovecotOKResponseFits(id, result.Username, maxLineBytes) {
+		return result
+	}
+
+	return &SASLAuthResult{
+		Success:   false,
+		Reason:    invalidCanonicalAccountReason,
+		Temporary: true,
+	}
+}
+
+func validDovecotCanonicalAccount(username string) bool {
+	if username == "" || !utf8.ValidString(username) || strings.TrimSpace(username) != username {
+		return false
+	}
+
+	for _, value := range username {
+		if unicode.IsControl(value) || value == '\u2028' || value == '\u2029' {
+			return false
+		}
+	}
+
+	return true
+}
+
+func dovecotOKResponseFits(id string, username string, maxLineBytes int) bool {
+	if maxLineBytes <= 0 {
+		maxLineBytes = defaultDovecotLineBytes
+	}
+
+	return len(DovecotCmdOK)+1+len(id)+len("\tuser=")+len(username)+1 <= maxLineBytes
 }
 
 // EncodeFail encodes a failed authentication response.

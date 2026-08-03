@@ -382,6 +382,8 @@ func TestSASLOIDCAuthDefaultsPreferPrivateKeyJWT(t *testing.T) {
 }
 
 func TestResolveDefaultsMergesAllFields(t *testing.T) {
+	allowAuthorizationID := true
+	disableAuthorizationID := false
 	raw := map[string]Request{
 		"defaults": {
 			Target:                  "https://example.com/api",
@@ -396,6 +398,9 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 			HTTPResponseCompression: true,
 			Mechanisms:              []string{saslMechanismPlain},
 			DefaultLocalPort:        "587",
+			SASLExternalAuth: SASLExternalAuth{
+				AllowAuthorizationID: &allowAuthorizationID,
+			},
 		},
 		"entry_a": {
 			CustomHeaders: []string{"X-Pfx-Name: entry_a"},
@@ -404,6 +409,9 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 			Target:        "https://other.com/api",
 			CustomHeaders: []string{"X-Pfx-Name: entry_b"},
 			StatusCode:    201,
+			SASLExternalAuth: SASLExternalAuth{
+				AllowAuthorizationID: &disableAuthorizationID,
+			},
 		},
 	}
 
@@ -451,6 +459,10 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 		t.Errorf("entry_a.Mechanisms = %v, want [PLAIN]", a.Mechanisms)
 	}
 
+	if !a.SASLExternalAuth.allowsAuthorizationID() {
+		t.Error("entry_a external_auth.allow_authorization_id should be inherited")
+	}
+
 	// entry_a custom_headers: defaults + entry-specific (additive)
 	expectedHeaders := []string{"X-Common: yes", "X-Pfx-Name: entry_a"}
 	if !slices.Equal(a.CustomHeaders, expectedHeaders) {
@@ -467,6 +479,10 @@ func TestResolveDefaultsMergesAllFields(t *testing.T) {
 	}
 	if b.ValueField != "result" {
 		t.Errorf("entry_b.ValueField not inherited")
+	}
+
+	if b.SASLExternalAuth.allowsAuthorizationID() {
+		t.Error("entry_b explicit external_auth.allow_authorization_id=false was overwritten")
 	}
 
 	if !slices.Equal(b.Mechanisms, []string{saslMechanismPlain}) {
@@ -607,6 +623,24 @@ func TestGRPCTLSBooleanPointersDecodeExplicitFalse(t *testing.T) {
 	}
 	if boolValue(got.TLS.SkipVerify) {
 		t.Fatal("tls.skip_verify=false decoded as true")
+	}
+}
+
+func TestExternalAuthBooleanPointerDecodesExplicitFalse(t *testing.T) {
+	v := viper.New()
+	v.Set("external_auth.allow_authorization_id", false)
+
+	var got Request
+	if err := v.Unmarshal(&got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if got.SASLExternalAuth.AllowAuthorizationID == nil {
+		t.Fatal("external_auth.allow_authorization_id=false should decode as an explicit value")
+	}
+
+	if got.SASLExternalAuth.allowsAuthorizationID() {
+		t.Fatal("external_auth.allow_authorization_id=false decoded as true")
 	}
 }
 

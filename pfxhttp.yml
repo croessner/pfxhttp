@@ -148,6 +148,8 @@ dovecot_sasl:
     # /api/v1/auth/json; a payload entry has no effect here.
     # Optional exact list of advertised SASL mechanisms. If unset, pfxhttp advertises
     # PLAIN and LOGIN, plus XOAUTH2/OAUTHBEARER when sasl_oidc_auth.enabled is true.
+    # EXTERNAL is always opt-in and requires verified client-certificate fields
+    # from the trusted Postfix TLS terminator.
     # sasl_oidc_auth:
     #   enabled: true
     #   configuration_uri: https://127.0.0.1:9443/.well-known/openid-configuration
@@ -159,6 +161,10 @@ dovecot_sasl:
     mechanisms:
       - PLAIN
       # - LOGIN
+      # - EXTERNAL
+    # external_auth:
+    #   # Keep false unless delegated authzids must resolve to the same account.
+    #   allow_authorization_id: false
     status_code: 200
     # Username is returned via HTTP response header "Auth-User" by the backend.
     # Errors are signaled via HTTP status and the "Auth-Status" header.

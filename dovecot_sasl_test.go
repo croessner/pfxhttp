@@ -330,7 +330,7 @@ func TestDovecotDecoderDecodeAuthRequestGRPCFields(t *testing.T) {
 		t.Fatalf("identity fields mismatch: %+v", got)
 	}
 
-	if got.SSL != "on" || got.SSLSessionID != "tls-session" || got.SSLClientVerify != "SUCCESS" {
+	if got.SSL != saslTLSOn || got.SSLSessionID != testTLSSessionID || got.SSLClientVerify != tlsClientVerifySuccess {
 		t.Fatalf("ssl state mismatch: %+v", got)
 	}
 
@@ -358,6 +358,41 @@ func TestDovecotDecoderDecodeAuthRequestGRPCFields(t *testing.T) {
 
 	if got.ClientID != "client-x" || got.OIDCCID != "oidc-client" || got.AuthLoginAttempt != 3 {
 		t.Fatalf("client/oidc fields mismatch: %+v", got)
+	}
+}
+
+func TestDovecotDecoderExternalCertificateFields(t *testing.T) {
+	decoder := &DovecotDecoder{}
+
+	req, err := decoder.DecodeAuthRequest(
+		"42\tEXTERNAL\tssl_client_verify=" + tlsClientVerifySuccess +
+			"\tssl_client_san_email=" + testCertificateIdentity +
+			"\tssl_client_fingerprint=" + testSHA256Fingerprint,
+	)
+	if err != nil {
+		t.Fatalf("DecodeAuthRequest returned error: %v", err)
+	}
+
+	if req.SSLClientVerify != tlsClientVerifySuccess ||
+		req.SSLClientSANEmail != testCertificateIdentity ||
+		req.SSLClientFingerprint != testSHA256Fingerprint {
+		t.Fatalf("decoded EXTERNAL certificate fields = %+v", req)
+	}
+}
+
+func TestDovecotDecoderRejectsDuplicateExternalSecurityFields(t *testing.T) {
+	decoder := &DovecotDecoder{}
+
+	for _, field := range []string{
+		"ssl_client_verify=" + tlsClientVerifySuccess,
+		"ssl_client_san_email=" + testCertificateIdentity,
+		"ssl_client_fingerprint=" + testSHA256Fingerprint,
+	} {
+		t.Run(strings.SplitN(field, "=", 2)[0], func(t *testing.T) {
+			if _, err := decoder.DecodeAuthRequest("42\tEXTERNAL\t" + field + "\t" + field); err == nil {
+				t.Fatalf("duplicate %q was accepted", field)
+			}
+		})
 	}
 }
 
@@ -519,6 +554,14 @@ func TestDovecotSASLMechanismsUsesConfiguredAllowlist(t *testing.T) {
 	}
 }
 
+func TestDovecotSASLMechanismDefinitionExternal(t *testing.T) {
+	definition := dovecotSASLMechanismDefinition(saslMechanismExternal)
+	if definition.Name != saslMechanismExternal || definition.MutualAuth ||
+		definition.PlainText || definition.Dictionary || definition.Active {
+		t.Fatalf("EXTERNAL mechanism definition = %+v", definition)
+	}
+}
+
 func TestDovecotSASLMechanismsDefaultBehavior(t *testing.T) {
 	withoutOAuth := dovecotSASLMechanisms(Request{})
 	if len(withoutOAuth) != 2 {
@@ -587,6 +630,51 @@ func TestDovecotEncoderEncodeOK(t *testing.T) {
 				t.Errorf("EncodeOK() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateCanonicalSASLResultRejectsUnsafeOrOversizedAccount(t *testing.T) {
+	const validAccount = "user@example.test"
+
+	tests := []struct {
+		name     string
+		username string
+		maxLine  int
+	}{
+		{name: "empty", username: ""},
+		{name: "leading padding", username: " " + validAccount},
+		{name: "trailing padding", username: validAccount + " "},
+		{name: "tab", username: validAccount + "\tuser=attacker"},
+		{name: "carriage return", username: validAccount + "\rFAIL"},
+		{name: "line feed", username: validAccount + "\nFAIL"},
+		{name: "nul", username: validAccount + "\x00suffix"},
+		{name: "invalid utf8", username: string([]byte{'u', 0xff})},
+		{name: "response above configured line limit", username: validAccount, maxLine: 10},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := validateCanonicalSASLResultForDovecotLine(
+				&SASLAuthResult{Success: true, Username: test.username},
+				"42",
+				test.maxLine,
+				true,
+			)
+
+			if result.Success || !result.Temporary || result.Reason != invalidCanonicalAccountReason {
+				t.Fatalf("result = %+v, want temporary fail-closed rejection", result)
+			}
+		})
+	}
+
+	valid := validateCanonicalSASLResultForDovecotLine(
+		&SASLAuthResult{Success: true, Username: validAccount},
+		"42",
+		defaultDovecotLineBytes,
+		true,
+	)
+	if !valid.Success || valid.Username != validAccount {
+		t.Fatalf("valid result = %+v", valid)
 	}
 }
 

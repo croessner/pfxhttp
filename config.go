@@ -180,6 +180,17 @@ type SASLOIDCAuth struct {
 	AccountClaim string `mapstructure:"account_claim" validate:"omitempty,printascii"`
 }
 
+// SASLExternalAuth controls authorization identities for certificate-backed
+// SASL EXTERNAL. Authentication by the verified certificate identity itself
+// does not require configuration. Delegation is deliberately opt-in.
+type SASLExternalAuth struct {
+	AllowAuthorizationID *bool `mapstructure:"allow_authorization_id"`
+}
+
+func (c SASLExternalAuth) allowsAuthorizationID() bool {
+	return c.AllowAuthorizationID != nil && *c.AllowAuthorizationID
+}
+
 // reservedConfigKey is the key name reserved for section-level defaults.
 const reservedConfigKey = "defaults"
 
@@ -235,22 +246,23 @@ type GRPCTLS struct {
 }
 
 type Request struct {
-	Target                  string          `mapstructure:"target" validate:"omitempty,http_url"`
-	HTTPAuthBasic           string          `mapstructure:"http_auth_basic" validate:"omitempty"`
-	CustomHeaders           []string        `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
-	Payload                 string          `mapstructure:"payload" validate:"omitempty,ascii"`
-	StatusCode              int             `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
-	ValueField              string          `mapstructure:"value_field" validate:"omitempty,printascii"`
-	ErrorField              string          `mapstructure:"error_field" validate:"omitempty,printascii"`
-	NoErrorValue            string          `mapstructure:"no_error_value" validate:"omitempty,printascii"`
-	BackendOIDCAuth         BackendOIDCAuth `mapstructure:"backend_oidc_auth" validate:"omitempty"`
-	SASLOIDCAuth            SASLOIDCAuth    `mapstructure:"sasl_oidc_auth" validate:"omitempty"`
-	Mechanisms              []string        `mapstructure:"mechanisms" validate:"omitempty,dive,printascii"`
-	DefaultLocalPort        string          `mapstructure:"default_local_port" validate:"omitempty,numeric"`
-	Transport               string          `mapstructure:"transport" validate:"omitempty,oneof=json grpc"`
-	GRPC                    GRPCRequest     `mapstructure:"grpc" validate:"omitempty"`
-	HTTPRequestCompression  bool            `mapstructure:"http_request_compression"`
-	HTTPResponseCompression bool            `mapstructure:"http_response_compression"`
+	Target                  string           `mapstructure:"target" validate:"omitempty,http_url"`
+	HTTPAuthBasic           string           `mapstructure:"http_auth_basic" validate:"omitempty"`
+	CustomHeaders           []string         `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
+	Payload                 string           `mapstructure:"payload" validate:"omitempty,ascii"`
+	StatusCode              int              `mapstructure:"status_code" validate:"omitempty,min=100,max=599"`
+	ValueField              string           `mapstructure:"value_field" validate:"omitempty,printascii"`
+	ErrorField              string           `mapstructure:"error_field" validate:"omitempty,printascii"`
+	NoErrorValue            string           `mapstructure:"no_error_value" validate:"omitempty,printascii"`
+	BackendOIDCAuth         BackendOIDCAuth  `mapstructure:"backend_oidc_auth" validate:"omitempty"`
+	SASLOIDCAuth            SASLOIDCAuth     `mapstructure:"sasl_oidc_auth" validate:"omitempty"`
+	SASLExternalAuth        SASLExternalAuth `mapstructure:"external_auth" validate:"omitempty"`
+	Mechanisms              []string         `mapstructure:"mechanisms" validate:"omitempty,dive,printascii"`
+	DefaultLocalPort        string           `mapstructure:"default_local_port" validate:"omitempty,numeric"`
+	Transport               string           `mapstructure:"transport" validate:"omitempty,oneof=json grpc"`
+	GRPC                    GRPCRequest      `mapstructure:"grpc" validate:"omitempty"`
+	HTTPRequestCompression  bool             `mapstructure:"http_request_compression"`
+	HTTPResponseCompression bool             `mapstructure:"http_response_compression"`
 }
 
 // mergeRequest merges defaults into a specific entry.
@@ -307,6 +319,10 @@ func mergeRequest(defaults, entry Request) Request {
 
 	if !entry.SASLOIDCAuth.Enabled && defaults.SASLOIDCAuth.Enabled {
 		entry.SASLOIDCAuth = defaults.SASLOIDCAuth
+	}
+
+	if entry.SASLExternalAuth.AllowAuthorizationID == nil && defaults.SASLExternalAuth.AllowAuthorizationID != nil {
+		entry.SASLExternalAuth.AllowAuthorizationID = new(*defaults.SASLExternalAuth.AllowAuthorizationID)
 	}
 
 	if entry.Mechanisms == nil && defaults.Mechanisms != nil {
@@ -520,7 +536,7 @@ func normalizeConfiguredSASLMechanisms(raw []string) ([]string, error) {
 	for _, value := range raw {
 		mechanism, ok := normalizeSASLMechanismName(value)
 		if !ok {
-			return nil, fmt.Errorf("unsupported mechanism %q (supported: PLAIN, LOGIN, XOAUTH2, OAUTHBEARER)", value)
+			return nil, fmt.Errorf("unsupported mechanism %q (supported: PLAIN, LOGIN, EXTERNAL, XOAUTH2, OAUTHBEARER)", value)
 		}
 
 		if _, exists := seen[mechanism]; exists {

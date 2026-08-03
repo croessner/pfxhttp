@@ -292,6 +292,18 @@ func TestConfigValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "DovecotSASL accepts EXTERNAL without OAuth configuration",
+			cfg: Config{
+				Server: Server{Listen: []Listen{{
+					Kind: "dovecot_sasl", Type: "tcp", Address: "127.0.0.1", Port: 34000,
+				}}},
+				DovecotSASL: map[string]Request{
+					"smtp_auth": {Target: testDovecotTargetURL, Mechanisms: []string{saslMechanismExternal}},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "DovecotSASL rejects empty mechanisms",
 			cfg: Config{
 				Server: Server{

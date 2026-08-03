@@ -1549,13 +1549,36 @@ func (s *MultiServer) handleSASLResult(
 			attribute.String("pfxhttp.name", safeMetricName(s.name)),
 			attribute.String("pfxhttp.sasl.mechanism", authReq.Mechanism),
 		)
-		if IsOAuthMechanism(authReq.Mechanism) {
+		if authReq.Mechanism == saslMechanismExternal {
+			settings := currentConfig.DovecotSASL[s.name]
+			authResult, err = authenticateExternal(
+				backendCtx,
+				authenticator,
+				creds.AuthzID,
+				authReq,
+				settings.SASLExternalAuth.allowsAuthorizationID(),
+			)
+		} else if IsOAuthMechanism(authReq.Mechanism) {
 			authResult, err = authenticator.AuthenticateToken(backendCtx, creds.Username, creds.Token, authReq)
 		} else {
 			authResult, err = authenticator.AuthenticatePassword(backendCtx, creds.Username, creds.Password, authReq)
 		}
 
 		finishObservedSpan(backendObs, backendSpan, err)
+
+		if err == nil && authResult != nil && authResult.Success {
+			username := creds.Username
+			if authResult.Username != "" {
+				username = authResult.Username
+			}
+
+			authResult = validateCanonicalSASLResultForDovecotLine(
+				&SASLAuthResult{Success: true, Username: username},
+				authReq.ID,
+				s.effectiveProtocolLimits().DovecotSASL.MaxLineBytes,
+				true,
+			)
+		}
 
 		outcome = outcomeFromSASLResult(authResult, err)
 

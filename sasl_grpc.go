@@ -104,6 +104,7 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 	)
 	conn, err := a.pool.Get(a.name, settings.GRPC)
 	finishObservedSpan(connSpanObs, connSpan, err)
+
 	if err != nil {
 		if logger != nil {
 			logger.Error("Failed to obtain gRPC connection",
@@ -197,7 +198,129 @@ func (a *NauthilusGRPCSASLAuthenticator) AuthenticatePassword(
 		obs.ObserveBackendGRPCRequest(authCtx, componentDovecotSASL, a.name, "Authenticate", grpcStatus, grpcResult, time.Since(grpcStart))
 	}
 
-	return mapAuthResponse(resp), nil
+	return validateCanonicalSASLResult(mapAuthResponse(resp), false), nil
+}
+
+// LookupIdentity resolves a trusted identity through AuthService.LookupIdentity.
+//
+//nolint:funlen // One fully instrumented gRPC client call.
+func (a *NauthilusGRPCSASLAuthenticator) LookupIdentity(
+	ctx context.Context,
+	username string,
+	req *DovecotAuthRequest,
+) (*SASLAuthResult, error) {
+	settings, ok := a.config.DovecotSASL[a.name]
+	if !ok {
+		return nil, fmt.Errorf("dovecot_sasl settings not found for '%s'", a.name)
+	}
+
+	if settings.Transport != transportGRPC {
+		return nil, fmt.Errorf("dovecot_sasl '%s' is not configured for gRPC transport", a.name)
+	}
+
+	logger, _ := ctx.Value(loggerKey).(*slog.Logger)
+	_, connSpanObs, connSpan := startInternalSpanFromContext(ctx,
+		"gRPC connection",
+		attribute.String("server.address", settings.GRPC.Address),
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.name", a.name),
+	)
+	conn, err := a.pool.Get(a.name, settings.GRPC)
+	finishObservedSpan(connSpanObs, connSpan, err)
+
+	if err != nil {
+		if logger != nil {
+			logger.Error("Failed to obtain gRPC connection",
+				slog.String("entry", a.name),
+				slog.String("address", settings.GRPC.Address),
+				slog.String("reason", boundedErrorKind(err)))
+		}
+
+		return &SASLAuthResult{Success: false, Reason: "grpc backend unavailable", Temporary: true}, nil
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, effectiveGRPCTimeout(settings.GRPC))
+	defer cancel()
+
+	metadataParentSpan := trace.SpanFromContext(lookupCtx)
+	metadataCtx, metadataSpanObs, metadataSpan := startInternalSpanFromContext(lookupCtx,
+		"gRPC metadata",
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.name", a.name),
+		attribute.String("pfxhttp.auth.mode", grpcCallerAuthMode(settings)),
+		attribute.Int("pfxhttp.grpc.metadata.entries", grpcMetadataEntryCount(settings.GRPC.Metadata)),
+	)
+	metadataCtx, err = a.attachOutgoingMetadata(metadataCtx, settings, logger)
+	finishObservedSpan(metadataSpanObs, metadataSpan, err)
+
+	if err != nil {
+		return &SASLAuthResult{Success: false, Reason: "grpc metadata unavailable", Temporary: true}, nil
+	}
+
+	if metadataSpan != nil {
+		lookupCtx = trace.ContextWithSpan(metadataCtx, metadataParentSpan)
+	} else {
+		lookupCtx = metadataCtx
+	}
+
+	_, requestSpanObs, requestSpan := startInternalSpanFromContext(lookupCtx,
+		"gRPC request build",
+		attribute.String("pfxhttp.component", componentDovecotSASL),
+		attribute.String("pfxhttp.name", a.name),
+	)
+	grpcReq := buildGRPCLookupIdentityRequest(username, req, settings.DefaultLocalPort)
+
+	finishObservedSpan(requestSpanObs, requestSpan, nil)
+
+	if logger != nil {
+		logger.Debug("Outgoing Nauthilus gRPC LookupIdentity request",
+			slog.String("address", settings.GRPC.Address),
+			slog.String("protocol", grpcReq.GetProtocol()),
+			slog.String("method", grpcReq.GetMethod()))
+	}
+
+	client := authv1.NewAuthServiceClient(conn)
+	obs := ObservabilityFromContext(ctx)
+	grpcStart := time.Now()
+	grpcStatus := string(DovecotCmdOK)
+	grpcResult := resultOK
+
+	var span trace.Span
+	if obs != nil {
+		lookupCtx, span = obs.StartSpanWithKind(lookupCtx,
+			grpcClientSpanName("LookupIdentity"),
+			trace.SpanKindClient,
+			attribute.String("rpc.system", "grpc"),
+			attribute.String("rpc.service", "nauthilus.auth.v1.AuthService"),
+			attribute.String("rpc.method", "LookupIdentity"),
+			attribute.String("server.address", settings.GRPC.Address),
+			attribute.String("pfxhttp.component", componentDovecotSASL),
+			attribute.String("pfxhttp.name", a.name),
+		)
+		defer span.End()
+
+		lookupCtx = InjectGRPCTraceContext(lookupCtx)
+	}
+
+	resp, err := client.LookupIdentity(lookupCtx, grpcReq)
+	if err != nil {
+		grpcStatus = status.Code(err).String()
+		grpcResult = resultError
+
+		if obs != nil {
+			obs.RecordSpanError(span, err)
+			obs.ObserveBackendGRPCRequest(lookupCtx, componentDovecotSASL, a.name, "LookupIdentity", grpcStatus, grpcResult, time.Since(grpcStart))
+		}
+
+		return classifyGRPCError(err, logger), nil
+	}
+
+	if obs != nil {
+		span.SetAttributes(attribute.String(labelStatus, grpcStatus), attribute.String(labelResult, grpcResult))
+		obs.ObserveBackendGRPCRequest(lookupCtx, componentDovecotSASL, a.name, "LookupIdentity", grpcStatus, grpcResult, time.Since(grpcStart))
+	}
+
+	return validateCanonicalSASLResult(mapAuthResponse(resp), true), nil
 }
 
 // AuthenticateToken delegates to the HTTP introspection / JWKS fallback so
@@ -333,13 +456,59 @@ func buildGRPCAuthRequest(
 		SslProtocol:        req.SSLProtocol,
 		SslCipher:          req.SSLCipher,
 		SslSerial:          req.SSLSerial,
-		SslFingerprint:     req.SSLFingerprint,
+		SslFingerprint:     cmp.Or(req.SSLClientFingerprint, req.SSLFingerprint),
 		OidcCid:            req.OIDCCID,
 		AuthLoginAttempt:   req.AuthLoginAttempt,
 	}
 
 	if req.Secured && out.Ssl == "" {
-		out.Ssl = "on"
+		out.Ssl = saslTLSOn
+	}
+
+	return out
+}
+
+func buildGRPCLookupIdentityRequest(
+	username string,
+	req *DovecotAuthRequest,
+	defaultLocalPort string,
+) *authv1.LookupIdentityRequest {
+	if req == nil {
+		req = &DovecotAuthRequest{}
+	}
+
+	out := &authv1.LookupIdentityRequest{
+		Username:           username,
+		ClientIp:           req.RemoteIP,
+		ClientPort:         req.RemotePort,
+		ClientHostname:     cmp.Or(req.ClientHostname, req.LocalName),
+		ClientId:           req.ClientID,
+		ExternalSessionId:  req.ExternalSessionID,
+		UserAgent:          req.UserAgent,
+		LocalIp:            req.LocalIP,
+		LocalPort:          cmp.Or(req.LocalPort, defaultLocalPort),
+		Protocol:           req.Service,
+		Method:             req.Mechanism,
+		Ssl:                req.SSL,
+		SslSessionId:       req.SSLSessionID,
+		SslClientVerify:    req.SSLClientVerify,
+		SslClientDn:        req.SSLClientDN,
+		SslClientCn:        req.SSLClientCN,
+		SslIssuer:          req.SSLIssuer,
+		SslClientNotbefore: req.SSLClientNotBefore,
+		SslClientNotafter:  req.SSLClientNotAfter,
+		SslSubjectDn:       req.SSLSubjectDN,
+		SslIssuerDn:        req.SSLIssuerDN,
+		SslClientSubjectDn: req.SSLClientSubjectDN,
+		SslClientIssuerDn:  req.SSLClientIssuerDN,
+		SslProtocol:        req.SSLProtocol,
+		SslCipher:          req.SSLCipher,
+		SslSerial:          req.SSLSerial,
+		SslFingerprint:     cmp.Or(req.SSLClientFingerprint, req.SSLFingerprint),
+		OidcCid:            req.OIDCCID,
+	}
+	if req.Secured && out.Ssl == "" {
+		out.Ssl = saslTLSOn
 	}
 
 	return out

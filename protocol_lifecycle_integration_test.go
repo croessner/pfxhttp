@@ -134,6 +134,47 @@ func TestDovecotListenerSupportsRepeatedLoginAuthContinuations(t *testing.T) {
 	}
 }
 
+func TestDovecotListenerAuthenticatesExternalThroughHTTPIdentityLookup(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("mode") != nauthilusNoAuthMode {
+			t.Errorf("identity lookup mode = %q", request.URL.Query().Get("mode"))
+		}
+
+		writer.Header().Set("Auth-User", testCanonicalIdentity)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	deps := &Deps{
+		Config: &Config{DovecotSASL: map[string]Request{
+			concurrencyTestSASL: {
+				Target: backend.URL, StatusCode: http.StatusOK,
+				Mechanisms: []string{saslMechanismExternal},
+			},
+		}},
+		Logger: slog.New(slog.DiscardHandler), HTTPClient: backend.Client(),
+	}
+	listener := startObservedServer(t, deps, 1, Listen{
+		Kind: listenKindDovecotSASL, Name: concurrencyTestSASL, Type: listenTypeTCP,
+	})
+
+	conn, _ := dialObservedConnection(t, listener)
+	t.Cleanup(func() { _ = conn.Close() })
+	reader := completeDovecotHandshakeWithReader(t, conn)
+	setLifecycleDeadline(t, conn)
+
+	if _, err := fmt.Fprintf(conn,
+		"AUTH\texternal-1\tEXTERNAL\tservice=smtp\tsecured\tresp="+
+			"\tssl_client_verify="+tlsClientVerifySuccess+"\tssl_client_san_email="+testCertificateIdentity+
+			"\tssl_client_fingerprint=%s\n",
+		testSHA256Fingerprint,
+	); err != nil {
+		t.Fatalf("write EXTERNAL AUTH: %v", err)
+	}
+
+	assertDovecotLine(t, reader, "OK\texternal-1\tuser="+testCanonicalIdentity+"\n")
+}
+
 func TestDovecotContinuationWaitStaysInsideAuthenticationBudget(t *testing.T) {
 	deps := newLifecycleSASLDeps(t)
 	listener := startObservedServer(t, deps, 1, Listen{

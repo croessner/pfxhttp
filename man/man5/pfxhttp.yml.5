@@ -665,7 +665,7 @@ client_id
 Optional exact list of SASL mechanisms advertised to Postfix for this \fBdovecot_sasl\fP entry.
 If omitted, Pfxhttp advertises \fBPLAIN\fP and \fBLOGIN\fP, plus \fBXOAUTH2\fP and
 \fBOAUTHBEARER\fP when \fBsasl_oidc_auth.enabled\fP is true. Supported values are
-\fBPLAIN\fP, \fBLOGIN\fP, \fBXOAUTH2\fP, and \fBOAUTHBEARER\fP. Values are normalized
+\fBPLAIN\fP, \fBLOGIN\fP, \fBEXTERNAL\fP, \fBXOAUTH2\fP, and \fBOAUTHBEARER\fP. Values are normalized
 case-insensitively. Unknown values, duplicates, and an empty list are rejected.
 \fBXOAUTH2\fP and \fBOAUTHBEARER\fP require \fBsasl_oidc_auth.enabled: true\fP.
 The setting is transport-independent and applies to JSON and gRPC backends.
@@ -679,6 +679,46 @@ dovecot_sasl:
       - OAUTHBEARER
 .fi
 .RE
+
+.TP
+.B EXTERNAL client-certificate authentication
+\fBEXTERNAL\fP is opt-in and must be listed explicitly under \fBmechanisms\fP.
+The trusted Postfix TLS terminator must provide exactly one each of
+\fBssl_client_verify=SUCCESS\fP, \fBssl_client_san_email\fP containing one valid
+\fBrfc822Name\fP identity, and \fBssl_client_fingerprint\fP containing a SHA-256,
+SHA-384, or SHA-512 fingerprint. Missing, duplicate, malformed, ambiguous, or
+unverified input is rejected before any passwordless lookup. Pfxhttp calls the
+gRPC \fBAuthService.LookupIdentity\fP method for gRPC entries, or posts JSON without
+a password and with \fBmode=no-auth\fP for JSON entries. The canonical account is
+returned in the Dovecot \fBOK user=...\fP response.
+The canonical account is emitted verbatim only when it is non-empty, valid
+UTF-8, has no leading or trailing whitespace or protocol control characters,
+and the complete response fits the effective line limit of the accepting
+Dovecot listener. Invalid backend values fail temporarily and are never
+normalized. For HTTP identity lookups, status codes 401 and 403 are temporary
+caller-authentication failures only when Nauthilus supplies no
+\fBAuth-Status\fP; with that header they are permanent domain or identity
+failures. Status codes 408, 425, 429, and 5xx remain temporary. A successful
+Nauthilus response without \fBAuth-User\fP is treated as identity-not-found.
+.RS
+.nf
+dovecot_sasl:
+  smtp_auth:
+    mechanisms:
+      - PLAIN
+      - EXTERNAL
+    external_auth:
+      allow_authorization_id: false
+.fi
+.RE
+
+An empty RFC 4422 authorization identity or one exactly equal to the certificate
+identity is accepted. A different authorization identity is denied by default.
+When \fBexternal_auth.allow_authorization_id\fP is explicitly true, a second
+identity lookup must resolve to the same canonical account. The Dovecot auth
+socket is a trusted certificate-metadata boundary and must stay on a private path.
+OIDC-protected gRPC callers also require the Nauthilus
+\fBnauthilus:lookup_identity\fP scope.
 
 .TP
 .B sasl_oidc_auth
@@ -704,7 +744,8 @@ dovecot_sasl:
 
 .TP
 .B gRPC transport
-Password-based SASL mechanisms can use the Nauthilus gRPC AuthService instead of the JSON endpoint:
+Password-based SASL mechanisms can use the Nauthilus gRPC AuthService instead of the JSON endpoint;
+\fBEXTERNAL\fP uses \fBLookupIdentity\fP on the selected transport:
 .RS
 .nf
 dovecot_sasl:

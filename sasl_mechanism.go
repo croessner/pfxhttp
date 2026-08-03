@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 func logSASLHTTPRequest(logger *slog.Logger, message string, request *http.Request) {
@@ -95,8 +96,42 @@ type SASLCredentials struct {
 const (
 	saslMechanismPlain       = "PLAIN"
 	saslMechanismLogin       = "LOGIN"
+	saslMechanismExternal    = "EXTERNAL"
 	saslMechanismXOAuth2     = "XOAUTH2"
 	saslMechanismOAuthBearer = "OAUTHBEARER"
+)
+
+const maxExternalAuthorizationIDBytes = 1024
+const invalidExternalAuthorizationIDReason = "invalid EXTERNAL authorization identity"
+
+const (
+	authFieldUsername           = "username"
+	authFieldClientIP           = "client_ip"
+	authFieldClientPort         = "client_port"
+	authFieldClientHostname     = "client_hostname"
+	authFieldClientID           = "client_id"
+	authFieldExternalSessionID  = "external_session_id"
+	authFieldLocalIP            = "local_ip"
+	authFieldLocalPort          = "local_port"
+	authFieldOIDCCID            = "oidc_cid"
+	authFieldProtocol           = "protocol"
+	authFieldSSLClientVerify    = "ssl_client_verify"
+	authFieldSSLClientDN        = "ssl_client_dn"
+	authFieldSSLClientCN        = "ssl_client_cn"
+	authFieldSSLClientNotBefore = "ssl_client_notbefore"
+	authFieldSSLClientNotAfter  = "ssl_client_notafter"
+	authFieldSSLClientSubjectDN = "ssl_client_subject_dn"
+	authFieldSSLClientIssuerDN  = "ssl_client_issuer_dn"
+	authFieldSSLCipher          = "ssl_cipher"
+	authFieldSSLFingerprint     = "ssl_fingerprint"
+	authFieldSSLIssuer          = "ssl_issuer"
+	authFieldSSLIssuerDN        = "ssl_issuer_dn"
+	authFieldSSLProtocol        = "ssl_protocol"
+	authFieldSSLSerial          = "ssl_serial"
+	authFieldSSLSessionID       = "ssl_session_id"
+	authFieldSSLSubjectDN       = "ssl_subject_dn"
+	authFieldUserAgent          = "user_agent"
+	saslTLSOn                   = "on"
 )
 
 // SASLMechanism defines the interface for SASL authentication mechanisms.
@@ -242,6 +277,43 @@ func (m *LoginMechanism) Continue(data []byte) (*SASLAuthResult, *SASLCredential
 }
 
 var _ SASLMechanism = (*LoginMechanism)(nil)
+
+// ExternalMechanism implements SASL EXTERNAL (RFC 4422). The response is an
+// optional authorization identity; authentication identity comes exclusively
+// from the verified TLS client certificate metadata on the AUTH request.
+type ExternalMechanism struct{}
+
+func (m *ExternalMechanism) Name() string { return saslMechanismExternal }
+
+func (m *ExternalMechanism) Start(initialResponse []byte) (*SASLAuthResult, *SASLCredentials) {
+	if initialResponse == nil {
+		return &SASLAuthResult{NeedContinuation: true, ContinuationChallenge: []byte{}}, nil
+	}
+
+	return m.parseAuthorizationID(initialResponse)
+}
+
+func (m *ExternalMechanism) Continue(data []byte) (*SASLAuthResult, *SASLCredentials) {
+	return m.parseAuthorizationID(data)
+}
+
+func (m *ExternalMechanism) parseAuthorizationID(data []byte) (*SASLAuthResult, *SASLCredentials) {
+	if len(data) > maxExternalAuthorizationIDBytes || !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
+		return &SASLAuthResult{Success: false, Reason: invalidExternalAuthorizationIDReason}, nil
+	}
+
+	for _, r := range string(data) {
+		if r < 0x20 || r == 0x7f {
+			return &SASLAuthResult{Success: false, Reason: invalidExternalAuthorizationIDReason}, nil
+		}
+	}
+
+	authzID := string(data)
+
+	return nil, &SASLCredentials{AuthzID: authzID}
+}
+
+var _ SASLMechanism = (*ExternalMechanism)(nil)
 
 // XOAuth2Mechanism implements the XOAUTH2 SASL mechanism.
 //
@@ -398,6 +470,8 @@ func NewSASLMechanism(name string) SASLMechanism {
 		return &PlainMechanism{}
 	case saslMechanismLogin:
 		return &LoginMechanism{}
+	case saslMechanismExternal:
+		return &ExternalMechanism{}
 	case saslMechanismXOAuth2:
 		return &XOAuth2Mechanism{}
 	case saslMechanismOAuthBearer:
@@ -420,7 +494,7 @@ func IsOAuthMechanism(mechanism string) bool {
 func normalizeSASLMechanismName(name string) (string, bool) {
 	normalized := strings.ToUpper(strings.TrimSpace(name))
 	switch normalized {
-	case saslMechanismPlain, saslMechanismLogin, saslMechanismXOAuth2, saslMechanismOAuthBearer:
+	case saslMechanismPlain, saslMechanismLogin, saslMechanismExternal, saslMechanismXOAuth2, saslMechanismOAuthBearer:
 		return normalized, true
 	default:
 		return "", false
@@ -434,6 +508,10 @@ type SASLAuthenticator interface {
 
 	// AuthenticateToken validates an OAuth token via introspection.
 	AuthenticateToken(ctx context.Context, username, token string, req *DovecotAuthRequest) (*SASLAuthResult, error)
+
+	// LookupIdentity resolves a trusted, passwordless identity to its canonical
+	// backend account. Callers must establish that trust before invoking it.
+	LookupIdentity(ctx context.Context, username string, req *DovecotAuthRequest) (*SASLAuthResult, error)
 }
 
 // NauthilusSASLAuthenticator authenticates SASL credentials against a Nauthilus HTTP backend
@@ -447,6 +525,23 @@ type NauthilusSASLAuthenticator struct {
 
 // AuthenticatePassword sends the credentials to the Nauthilus HTTP backend.
 func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, username, password string, req *DovecotAuthRequest) (*SASLAuthResult, error) {
+	return a.authenticateHTTPJSON(ctx, username, &password, req, false)
+}
+
+// LookupIdentity uses Nauthilus' existing JSON auth endpoint in no-auth mode.
+// The request intentionally omits the password field.
+func (a *NauthilusSASLAuthenticator) LookupIdentity(ctx context.Context, username string, req *DovecotAuthRequest) (*SASLAuthResult, error) {
+	return a.authenticateHTTPJSON(ctx, username, nil, req, true)
+}
+
+//nolint:funlen,gocyclo // One HTTP client transaction with optional compression and auth.
+func (a *NauthilusSASLAuthenticator) authenticateHTTPJSON(
+	ctx context.Context,
+	username string,
+	password *string,
+	req *DovecotAuthRequest,
+	lookupIdentity bool,
+) (*SASLAuthResult, error) {
 	settings, ok := a.config.DovecotSASL[a.name]
 	if !ok {
 		return nil, fmt.Errorf("dovecot_sasl settings not found for '%s'", a.name)
@@ -456,43 +551,7 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 		return nil, errors.New("target URL is not specified")
 	}
 
-	// Build the Nauthilus JSON auth request as defined by /api/v1/auth/json.
-	// Only send fields understood by Nauthilus.
-	payload := map[string]string{
-		"username": username,
-		"password": password,
-		"protocol": req.Service,   // e.g. smtp
-		"method":   req.Mechanism, // e.g. PLAIN/LOGIN
-	}
-
-	if req.RemoteIP != "" {
-		payload["client_ip"] = req.RemoteIP
-	}
-	if req.LocalIP != "" {
-		payload["local_ip"] = req.LocalIP
-	}
-	if req.RemotePort != "" {
-		payload["client_port"] = req.RemotePort
-	}
-
-	localPort := cmp.Or(req.LocalPort, settings.DefaultLocalPort)
-	if localPort != "" {
-		payload["local_port"] = localPort
-	}
-
-	if req.Secured {
-		// Map Dovecot's secured-flag to Nauthilus JSON "ssl" indicator
-		payload["ssl"] = "on"
-	}
-	if req.SSLProtocol != "" {
-		payload["ssl_protocol"] = req.SSLProtocol
-	}
-	if req.SSLCipher != "" {
-		payload["ssl_cipher"] = req.SSLCipher
-	}
-	if req.ClientID != "" {
-		payload["client_id"] = req.ClientID
-	}
+	payload := buildSASLHTTPPayload(username, password, req, settings.DefaultLocalPort)
 
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
@@ -513,7 +572,13 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 	}
 
 	ctx = ContextWithBackendOperation(ctx, componentDovecotSASL, a.name)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, settings.Target, bodyReader)
+
+	target, err := saslHTTPTarget(settings.Target, lookupIdentity)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -562,11 +627,77 @@ func (a *NauthilusSASLAuthenticator) AuthenticatePassword(ctx context.Context, u
 		_ = Body.Close()
 	}(resp.Body)
 
-	return a.handlePasswordResponse(resp, settings)
+	return a.handleSASLResponse(resp, settings, lookupIdentity)
 }
 
-// handlePasswordResponse processes the HTTP response from the Nauthilus backend.
-func (a *NauthilusSASLAuthenticator) handlePasswordResponse(resp *http.Response, settings Request) (*SASLAuthResult, error) {
+func buildSASLHTTPPayload(
+	username string,
+	password *string,
+	req *DovecotAuthRequest,
+	defaultLocalPort string,
+) map[string]string {
+	if req == nil {
+		req = &DovecotAuthRequest{}
+	}
+
+	payload := map[string]string{authFieldUsername: username}
+
+	optional := map[string]string{
+		authFieldProtocol: req.Service, labelMethod: req.Mechanism,
+		authFieldClientIP: req.RemoteIP, authFieldLocalIP: req.LocalIP,
+		authFieldClientPort: req.RemotePort, authFieldLocalPort: cmp.Or(req.LocalPort, defaultLocalPort),
+		authFieldSSLProtocol: req.SSLProtocol, authFieldSSLCipher: req.SSLCipher,
+		authFieldSSLSessionID: req.SSLSessionID, authFieldSSLClientVerify: req.SSLClientVerify,
+		authFieldSSLClientDN: req.SSLClientDN, authFieldSSLClientCN: req.SSLClientCN,
+		authFieldSSLIssuer: req.SSLIssuer, authFieldSSLClientNotBefore: req.SSLClientNotBefore,
+		authFieldSSLClientNotAfter: req.SSLClientNotAfter, authFieldSSLSubjectDN: req.SSLSubjectDN,
+		authFieldSSLIssuerDN: req.SSLIssuerDN, authFieldSSLClientSubjectDN: req.SSLClientSubjectDN,
+		authFieldSSLClientIssuerDN: req.SSLClientIssuerDN, authFieldSSLSerial: req.SSLSerial,
+		authFieldSSLFingerprint:    cmp.Or(req.SSLClientFingerprint, req.SSLFingerprint),
+		authFieldExternalSessionID: req.ExternalSessionID, authFieldUserAgent: req.UserAgent,
+		authFieldClientHostname: req.ClientHostname, authFieldOIDCCID: req.OIDCCID, authFieldClientID: req.ClientID,
+	}
+
+	for key, value := range optional {
+		if value != "" {
+			payload[key] = value
+		}
+	}
+
+	if password != nil {
+		payload["password"] = *password
+	}
+
+	if req.Secured {
+		payload["ssl"] = saslTLSOn
+	}
+
+	return payload
+}
+
+func saslHTTPTarget(target string, lookupIdentity bool) (string, error) {
+	if !lookupIdentity {
+		return target, nil
+	}
+
+	parsedTarget, err := url.Parse(target)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse target URL: %w", err)
+	}
+
+	query := parsedTarget.Query()
+	query.Set("mode", nauthilusNoAuthMode)
+	parsedTarget.RawQuery = query.Encode()
+
+	return parsedTarget.String(), nil
+}
+
+// handleSASLResponse processes an HTTP response from the Nauthilus backend.
+func (a *NauthilusSASLAuthenticator) handleSASLResponse(
+	resp *http.Response,
+	settings Request,
+	lookupIdentity bool,
+) (*SASLAuthResult, error) {
 	// 1) Primary signal: HTTP status code. Non-200 => fail; 5xx => temporary.
 	if resp.StatusCode != settings.StatusCode {
 		reason := resp.Header.Get("Auth-Status")
@@ -576,13 +707,39 @@ func (a *NauthilusSASLAuthenticator) handlePasswordResponse(resp *http.Response,
 		return &SASLAuthResult{
 			Success:   false,
 			Reason:    reason,
-			Temporary: resp.StatusCode >= 500,
+			Temporary: resp.StatusCode >= 500 || lookupIdentityHTTPResponseIsTemporary(resp, lookupIdentity),
 		}, nil
 	}
 
 	// 2) On success, derive the username exclusively from the HTTP response header "Auth-User".
 	username := resp.Header.Get("Auth-User")
-	return &SASLAuthResult{Success: true, Username: username}, nil
+	if lookupIdentity && username == "" {
+		reason := resp.Header.Get("Auth-Status")
+		if reason == "" {
+			reason = identityNotFoundReason
+		}
+
+		return &SASLAuthResult{Success: false, Reason: reason}, nil
+	}
+
+	result := &SASLAuthResult{Success: true, Username: username}
+
+	return validateCanonicalSASLResult(result, lookupIdentity), nil
+}
+
+func lookupIdentityHTTPResponseIsTemporary(response *http.Response, lookupIdentity bool) bool {
+	if !lookupIdentity {
+		return false
+	}
+
+	switch response.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return response.Header.Get("Auth-Status") == ""
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
 }
 
 // AuthenticateToken validates an OAuth2 token via the OIDC introspection endpoint.

@@ -53,8 +53,8 @@ func TestBuildGRPCAuthRequestMapsAllFields(t *testing.T) {
 		ExternalSessionID:  "session-1",
 		UserAgent:          "Postfix/3.11",
 		Secured:            true,
-		SSLSessionID:       "tls-session",
-		SSLClientVerify:    "SUCCESS",
+		SSLSessionID:       testTLSSessionID,
+		SSLClientVerify:    tlsClientVerifySuccess,
 		SSLClientDN:        "CN=client,O=Example",
 		SSLClientCN:        "client",
 		SSLIssuer:          "Example CA",
@@ -99,11 +99,11 @@ func TestBuildGRPCAuthRequestMapsAllFields(t *testing.T) {
 		t.Fatalf("session/user-agent mismatch: %+v", got)
 	}
 
-	if got.GetSsl() != "on" {
+	if got.GetSsl() != saslTLSOn {
 		t.Fatalf("ssl flag: got %q want \"on\"", got.GetSsl())
 	}
 
-	if got.GetSslSessionId() != "tls-session" || got.GetSslClientVerify() != "SUCCESS" {
+	if got.GetSslSessionId() != testTLSSessionID || got.GetSslClientVerify() != tlsClientVerifySuccess {
 		t.Fatalf("ssl session/verify mismatch: %+v", got)
 	}
 
@@ -294,6 +294,32 @@ type fakeAuthServer struct {
 	rpcErr         error
 	waitForContext bool
 	callCount      atomic.Int64
+	lookupRequest  atomic.Pointer[authv1.LookupIdentityRequest]
+}
+
+func (f *fakeAuthServer) LookupIdentity(ctx context.Context, req *authv1.LookupIdentityRequest) (*authv1.AuthResponse, error) {
+	f.callCount.Add(1)
+	f.lookupRequest.Store(req)
+
+	md, _ := metadata.FromIncomingContext(ctx)
+	f.mdSeen.Store(md.Copy())
+
+	values := md.Get("authorization")
+	if len(values) > 0 {
+		f.authSeen.Store(values[0])
+	} else {
+		f.authSeen.Store("")
+	}
+
+	if f.wantAuth != "" && (len(values) == 0 || values[0] != f.wantAuth) {
+		return nil, status.Error(codes.Unauthenticated, "bad caller credentials")
+	}
+
+	if f.rpcErr != nil {
+		return nil, f.rpcErr
+	}
+
+	return f.response, nil
 }
 
 func (f *fakeAuthServer) Authenticate(ctx context.Context, req *authv1.AuthRequest) (*authv1.AuthResponse, error) {
@@ -447,6 +473,103 @@ func TestNauthilusGRPCSASLAuthenticatorPasswordSuccess(t *testing.T) {
 	md, _ := fake.mdSeen.Load().(metadata.MD)
 	if got := md.Get("accept-language"); len(got) != 1 || got[0] != "de" {
 		t.Fatalf("accept-language metadata not propagated: got %v", got)
+	}
+}
+
+func TestNauthilusGRPCSASLAuthenticatorLookupIdentity(t *testing.T) {
+	fake := &fakeAuthServer{response: &authv1.AuthResponse{
+		Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+		AccountField: testAccountFieldMail,
+		Attributes: map[string]*commonv1.AttributeValues{
+			testAccountFieldMail: {Values: []string{testCanonicalIdentity}},
+		},
+	}}
+
+	address, stop := startFakeAuthServer(t, fake)
+	defer stop()
+
+	pool := NewGRPCConnPool()
+	defer pool.CloseAll()
+
+	authenticator := NewNauthilusGRPCSASLAuthenticator(&Config{DovecotSASL: map[string]Request{
+		grpcTestSASLEntry: {
+			Transport: transportGRPC,
+			GRPC:      GRPCRequest{Address: address, Timeout: 2 * time.Second},
+		},
+	}}, grpcTestSASLEntry, pool, nil, nil)
+
+	result, err := authenticator.LookupIdentity(t.Context(), testCertificateIdentity, &DovecotAuthRequest{
+		Service:              "smtp",
+		Mechanism:            saslMechanismExternal,
+		RemoteIP:             testRemoteIPv4,
+		Secured:              true,
+		SSLClientVerify:      tlsClientVerifySuccess,
+		SSLClientSANEmail:    testCertificateIdentity,
+		SSLClientFingerprint: testSHA256Fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("LookupIdentity returned error: %v", err)
+	}
+
+	if result == nil || !result.Success || result.Username != testCanonicalIdentity {
+		t.Fatalf("LookupIdentity result = %+v", result)
+	}
+
+	req := fake.lookupRequest.Load()
+	if req == nil || req.GetUsername() != testCertificateIdentity ||
+		req.GetMethod() != saslMechanismExternal || req.GetClientIp() != testRemoteIPv4 ||
+		req.GetSslClientVerify() != tlsClientVerifySuccess || req.GetSslFingerprint() != testSHA256Fingerprint {
+		t.Fatalf("LookupIdentity request = %+v", req)
+	}
+}
+
+func TestNauthilusGRPCSASLAuthenticatorLookupIdentityRejectsUnsafeCanonicalAccount(t *testing.T) {
+	fake := &fakeAuthServer{}
+
+	address, stop := startFakeAuthServer(t, fake)
+	defer stop()
+
+	pool := NewGRPCConnPool()
+	defer pool.CloseAll()
+
+	authenticator := NewNauthilusGRPCSASLAuthenticator(&Config{DovecotSASL: map[string]Request{
+		grpcTestSASLEntry: {
+			Transport: transportGRPC,
+			GRPC:      GRPCRequest{Address: address, Timeout: 2 * time.Second},
+		},
+	}}, grpcTestSASLEntry, pool, nil, nil)
+
+	for _, username := range []string{
+		" " + testCanonicalIdentity,
+		testCanonicalIdentity + " ",
+		testCanonicalIdentity + "\tuser=attacker",
+		testCanonicalIdentity + "\rFAIL",
+		testCanonicalIdentity + "\nFAIL",
+		testCanonicalIdentity + "\x00suffix",
+	} {
+		fake.response = &authv1.AuthResponse{
+			Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+			AccountField: testAccountFieldMail,
+			Attributes: map[string]*commonv1.AttributeValues{
+				testAccountFieldMail: {Values: []string{username}},
+			},
+		}
+
+		result, err := authenticator.LookupIdentity(t.Context(), testCertificateIdentity, &DovecotAuthRequest{
+			ID:                    "42",
+			Service:               "smtp",
+			Mechanism:             saslMechanismExternal,
+			SSLClientVerify:       tlsClientVerifySuccess,
+			SSLClientSANEmail:     testCertificateIdentity,
+			SSLClientFingerprint: testSHA256Fingerprint,
+		})
+		if err != nil {
+			t.Fatalf("LookupIdentity(%q) returned error: %v", username, err)
+		}
+
+		if result.Success || !result.Temporary || result.Reason != invalidCanonicalAccountReason {
+			t.Fatalf("LookupIdentity(%q) = %+v", username, result)
+		}
 	}
 }
 
@@ -672,6 +795,55 @@ func TestHandleSASLResultUsesReloadedConfig(t *testing.T) {
 
 	if newBackend.callCount.Load() == 0 {
 		t.Fatal("reloaded gRPC backend was not called")
+	}
+}
+
+func TestHandleSASLResultUsesListenerSpecificCanonicalLineLimit(t *testing.T) {
+	canonicalAccount := strings.Repeat("a", 60)
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Auth-User", canonicalAccount)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(backend.Close)
+
+	tests := []struct {
+		name          string
+		globalLimit   int
+		listenerLimit int
+		wantOK        bool
+	}{
+		{name: "smaller listener override rejects", globalLimit: 128, listenerLimit: 64},
+		{name: "larger listener override permits", globalLimit: 64, listenerLimit: 128, wantOK: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deps := &Deps{
+				Config: &Config{
+					Server: Server{ProtocolLimits: ProtocolLimitsConfig{
+						DovecotSASL: DovecotSASLProtocolLimits{MaxLineBytes: test.globalLimit},
+					}},
+					DovecotSASL: map[string]Request{
+						grpcTestSASLEntry: {Target: backend.URL, StatusCode: http.StatusOK},
+					},
+				},
+				Logger:     slog.New(slog.DiscardHandler),
+				HTTPClient: backend.Client(),
+			}
+			server := &MultiServer{
+				name: grpcTestSASLEntry,
+				deps: deps,
+				ctx:  context.Background(),
+				protocolLimits: ProtocolLimitsConfig{
+					DovecotSASL: DovecotSASLProtocolLimits{MaxLineBytes: test.listenerLimit},
+				},
+			}
+
+			response := runHandleSASLResultForTest(t, server, slog.New(slog.DiscardHandler), "1")
+			if gotOK := strings.HasPrefix(response, string(DovecotCmdOK)+"\t"); gotOK != test.wantOK {
+				t.Fatalf("response = %q, want OK=%v", response, test.wantOK)
+			}
+		})
 	}
 }
 
@@ -931,8 +1103,10 @@ func runObservedHandleSASLResultForTest(
 type recordingAuthenticator struct {
 	passwordResult *SASLAuthResult
 	tokenResult    *SASLAuthResult
+	lookupResult   *SASLAuthResult
 	passwordCalled bool
 	tokenCalled    bool
+	lookupCalled   bool
 }
 
 func (r *recordingAuthenticator) AuthenticatePassword(_ context.Context, _, _ string, _ *DovecotAuthRequest) (*SASLAuthResult, error) {
@@ -945,6 +1119,12 @@ func (r *recordingAuthenticator) AuthenticateToken(_ context.Context, _, _ strin
 	r.tokenCalled = true
 
 	return r.tokenResult, nil
+}
+
+func (r *recordingAuthenticator) LookupIdentity(_ context.Context, _ string, _ *DovecotAuthRequest) (*SASLAuthResult, error) {
+	r.lookupCalled = true
+
+	return r.lookupResult, nil
 }
 
 var _ SASLAuthenticator = (*recordingAuthenticator)(nil)
