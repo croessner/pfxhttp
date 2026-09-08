@@ -24,7 +24,7 @@ permissions:
 
 env:
   RUNTIME_IMAGE: alpine:3.24
-  GO_IMAGE: golang:1.26.5-alpine3.24
+  GO_IMAGE: golang:1.26.8-alpine3.24
   OCI_IMAGE_DESCRIPTION: Postfix to HTTP wrapper
 
 concurrency:

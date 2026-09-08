@@ -91,7 +91,7 @@ run `pfxhttp.service` without socket activation, edit the listener to remove
 
 #### Prerequisites
 
-- Go 1.26 or later
+- Go 1.26.8 for development, CI, and release builds (module language baseline: Go 1.26).
 
 ### Running as a System Service
 
@@ -1002,6 +1002,9 @@ Notes:
   `http_auth_basic` or `backend_oidc_auth` for caller authorization.
 - `custom_headers` are HTTP-only. Entries using `transport: grpc` must use
   `grpc.metadata` instead.
+- gRPC receive-buffer compaction limits the memory overhead of fragmented HTTP/2
+  DATA frames. Keep the upstream default enabled; do not set
+  `GRPC_GO_EXPERIMENTAL_ENABLE_RECEIVE_BUFFER_COMPACTION=false` in deployments.
 - The shared connection pool maintains one long-lived `*grpc.ClientConn` per
   `dovecot_sasl` entry. Multiple SASL sessions multiplex over the same HTTP/2
   connection. Existing Dovecot connections use the reloaded backend settings
