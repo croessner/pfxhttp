@@ -19,7 +19,7 @@ command -v docker >/dev/null 2>&1 || block docker-unavailable "docker command is
 docker info >/dev/null 2>&1 || block docker-daemon-unavailable "docker daemon is unavailable"
 docker compose version >/dev/null 2>&1 || block compose-unavailable "docker compose is unavailable"
 
-for image in "${postfix_image}" golang:1.26.8-alpine3.24 alpine:3.23; do
+for image in "${postfix_image}" golang:1.26.9-alpine3.24 alpine:3.23; do
     docker image inspect "${image}" >/dev/null 2>&1 || \
         block image-unavailable "required local image is unavailable; see test/e2e/postfix/README.md"
 done

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 runtime_image="${RUNTIME_IMAGE:-alpine:3.24}"
-golang_image="${GO_IMAGE:-golang:1.26.8-alpine3.24}"
+golang_image="${GO_IMAGE:-golang:1.26.9-alpine3.24}"
 
 hash_cmd() {
 	if command -v sha256sum >/dev/null 2>&1; then

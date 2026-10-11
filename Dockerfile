@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG GO_IMAGE=golang:1.26.8-alpine3.24
+ARG GO_IMAGE=golang:1.26.9-alpine3.24
 ARG RUNTIME_IMAGE=alpine:3.24
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder

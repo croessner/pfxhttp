@@ -91,7 +91,7 @@ run `pfxhttp.service` without socket activation, edit the listener to remove
 
 #### Prerequisites
 
-- Go 1.26.8 for development, CI, and release builds (module language baseline: Go 1.26).
+- Go 1.26.9 for development, CI, and release builds (module language baseline: Go 1.26).
 
 ### Running as a System Service
 

@@ -10,7 +10,7 @@ Install the required images before entering an offline or restricted test
 environment:
 
 ```sh
-docker pull golang:1.26.8-alpine3.24
+docker pull golang:1.26.9-alpine3.24
 docker pull alpine:3.23
 docker pull chrroessner/postfix:latest
 ```
