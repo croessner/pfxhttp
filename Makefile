@@ -1,3 +1,6 @@
+GOEXPERIMENT ?= runtimesecret
+export GOEXPERIMENT
+
 # Variables
 APP_NAME := pfxhttp
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'dev')

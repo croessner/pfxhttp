@@ -91,7 +91,7 @@ run `pfxhttp.service` without socket activation, edit the listener to remove
 
 #### Prerequisites
 
-- Go 1.26.9 for development, CI, and release builds (module language baseline: Go 1.26).
+- Go 1.27.3 for development, CI, and release builds (module language baseline: Go 1.27).
 
 ### Running as a System Service
 
@@ -1089,7 +1089,7 @@ Before committing code changes, run the local quality gate:
 make guardrails
 ```
 
-This requires `golangci-lint` v2.12.1 or a compatible v2 release on `PATH`.
+This requires `golangci-lint` v2.14.0 on `PATH`.
 
 Dependency updates should be followed by `go mod tidy` and `go mod vendor` so the vendored build remains reproducible.
 

@@ -4,7 +4,7 @@ These rules are mandatory for coding changes in this repository.
 
 ## Must Rules
 
-- MUST: Keep the project on Go 1.26 across module metadata, CI, Docker builds,
+- MUST: Keep the project on Go 1.27 across module metadata, CI, Docker builds,
   and documentation.
 - MUST: Run `make guardrails` before committing or opening a pull request.
 - MUST: Keep `.golangci.yml` aligned with the repository guardrail policy and
@@ -33,3 +33,6 @@ These rules are mandatory for coding changes in this repository.
 - [ ] Comments and technical docs introduced by the change are English-only.
 - [ ] Commit messages use the approved prefix, headline, and bullet-list body
       format.
+
+Go 1.27 toolchain contract: use exactly Go 1.27.3 and golangci-lint 2.14.0.
+Run every Go test with `GOEXPERIMENT=runtimesecret`; the Makefile exports it.

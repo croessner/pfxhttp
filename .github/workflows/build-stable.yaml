@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 env:
+  GOEXPERIMENT: runtimesecret
   APP_NAME: pfxhttp
   GOVULNCHECK_VERSION: v1.3.0
   SYFT_VERSION: v1.16.0
@@ -23,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
-          go-version: 1.26.9
+          go-version: 1.27.3
 
       - name: Install govulncheck
         run: |
@@ -57,7 +58,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
-          go-version: 1.26.9
+          go-version: 1.27.3
 
       - name: Build binary
         env:
@@ -135,7 +136,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
-          go-version: 1.26.9
+          go-version: 1.27.3
 
       - name: Build binary
         env:

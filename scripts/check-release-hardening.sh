@@ -62,8 +62,11 @@ require_contains .github/workflows/docker-stable-build.yaml 'RUNTIME_IMAGE=\$\{r
 	"stable Docker build must pin the runtime image by digest"
 require_contains .github/workflows/docker-build-push.yaml '^[[:space:]]+sbom:[[:space:]]+\$\{\{ inputs\.sbom \}\}$' \
 	"reusable Docker build must pass through SBOM generation"
-require_contains Dockerfile '^ARG GO_IMAGE=golang:1\.26\.9-alpine3\.24$' \
-	"Dockerfile must default to the release Go toolchain"
+# Derive the release builder from the module contract instead of duplicating its version.
+release_go_version="$(awk '$1 == "toolchain" { sub(/^go/, "", $2); print $2 }' go.mod)"
+[[ -n "${release_go_version}" ]] || fail "go.mod must pin the release Go toolchain"
+grep -Fxq "ARG GO_IMAGE=golang:${release_go_version}-alpine3.24" Dockerfile || \
+ fail "Dockerfile must default to the release Go toolchain"
 require_contains Makefile '^GOVULNCHECK_GOFLAGS \?= -mod=vendor$' \
 	"govulncheck must default to vendored dependencies"
 

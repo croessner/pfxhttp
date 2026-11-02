@@ -1,7 +1,7 @@
 # PostfixToHTTP Development Guidelines
 
-This repository is a Go 1.26 project. Keep `go.mod`, Docker builds, CI, and
-operator-facing documentation aligned with Go 1.26 whenever toolchain details
+This repository is a Go 1.27 project. Keep `go.mod`, Docker builds, CI, and
+operator-facing documentation aligned with Go 1.27 whenever toolchain details
 change.
 
 ## Required Workflow
@@ -60,3 +60,6 @@ describe the change cleanly.
 - `make test`
 - `make race`
 - `make build-check`
+
+Go 1.27 toolchain contract: use exactly Go 1.27.3 and golangci-lint 2.14.0.
+Run every Go test with `GOEXPERIMENT=runtimesecret`; the Makefile exports it.
