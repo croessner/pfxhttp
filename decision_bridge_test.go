@@ -186,3 +186,22 @@ func TestDecisionDefaultsOwnTheirConfiguration(t *testing.T) {
 }
 
 const fixtureObservationScope = "mx.example"
+
+// TestDecisionDomainAcceptsQuotedEnvelopeSenders preserves valid quoted SMTP local parts.
+func TestDecisionDomainAcceptsQuotedEnvelopeSenders(t *testing.T) {
+	for _, sender := range []string{`"Jane Doe"@example.com`, `"user@relay"@example.com`} {
+		receiver := NewPostfixPolicyReceiver(fixtureDecisionName)
+		policy := NewPostfixPolicy()
+		policy.SetData("request", "smtpd_access_policy")
+		policy.SetData("sender", sender)
+
+		if err := receiver.ReadPolcy(policy); err != nil {
+			t.Fatal(err)
+		}
+
+		domain, valid := decisionDomain(receiver, componentPolicyService)
+		if !valid || domain != "example.com" {
+			t.Fatalf("quoted envelope %q rejected: %q %v", sender, domain, valid)
+		}
+	}
+}

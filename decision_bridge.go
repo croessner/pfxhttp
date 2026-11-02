@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"net/netip"
 	"strings"
 )
@@ -47,22 +48,21 @@ func decisionDomain(receiver Receiver, component string) (string, bool) {
 		return "", true
 	}
 
-	if strings.ContainsAny(sender, "\x00\r\n \t<>") {
+	if strings.ContainsAny(sender, "\x00\r\n") || strings.TrimSpace(sender) != sender {
 		return "", false
 	}
 
 	if strings.Contains(sender, "@") {
-		local, domain, ok := strings.Cut(sender, "@")
-		if !validMailboxParts(local, domain, ok) {
+		domain, valid := mailboxDomain(sender)
+		if !valid {
 			return "", false
 		}
-
 		sender = domain
 	} else if component == componentPolicyService {
 		return "", false
 	}
 
-	if sender == "" || len(sender) > 253 || strings.ContainsAny(sender, "/:[]\\") {
+	if sender == "" || len(sender) > 253 || strings.ContainsAny(sender, "/:[]\\ \t<>") {
 		return "", false
 	}
 
@@ -285,7 +285,17 @@ func (response decisionResponse) action() string {
 	return decisionTemporaryAction
 }
 
-// validMailboxParts rejects ambiguous multi-address socketmap or envelope keys.
-func validMailboxParts(local, domain string, found bool) bool {
-	return found && local != "" && !strings.Contains(domain, "@")
+// mailboxDomain validates a single envelope mailbox before extracting its final domain separator.
+func mailboxDomain(sender string) (string, bool) {
+	address, err := mail.ParseAddress(sender)
+	if err != nil || address.Name != "" {
+		return "", false
+	}
+
+	separator := strings.LastIndexByte(address.Address, '@')
+	if separator <= 0 {
+		return "", false
+	}
+
+	return address.Address[separator+1:], true
 }
