@@ -360,6 +360,10 @@ func (c *MapClient) SendAndReceiveContext(ctx context.Context) error {
 		return errors.New("target URL is not specified in the settings")
 	}
 
+	if settings.Decision != nil && settings.Decision.Enabled {
+		return sendDecision(ctx, c.httpClient, c.receiver, c.sender, settings, componentSocketMap, c.oidcManager, c.logger)
+	}
+
 	renderedPayload, err := c.RenderTemplate(settings.Payload)
 	if err != nil {
 		return err
@@ -615,6 +619,10 @@ func (p *PolicyClient) SendAndReceiveContext(ctx context.Context) error {
 
 	if settings.Target == "" {
 		return errors.New("target URL is not specified in the settings")
+	}
+
+	if settings.Decision != nil && settings.Decision.Enabled {
+		return sendDecision(ctx, p.httpClient, p.receiver, p.sender, settings, componentPolicyService, p.oidcManager, p.logger)
 	}
 
 	renderedPayload, err := p.RenderTemplate(settings.Payload)

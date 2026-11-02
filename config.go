@@ -246,6 +246,7 @@ type GRPCTLS struct {
 }
 
 type Request struct {
+	Decision                *DecisionBridge  `mapstructure:"decision" validate:"omitempty"`
 	Target                  string           `mapstructure:"target" validate:"omitempty,http_url"`
 	HTTPAuthBasic           string           `mapstructure:"http_auth_basic" validate:"omitempty"`
 	CustomHeaders           []string         `mapstructure:"custom_headers" validate:"omitempty,dive,printascii"`
@@ -269,6 +270,11 @@ type Request struct {
 // Explicit (non-zero) values in entry take precedence over defaults.
 // CustomHeaders are merged additively (defaults first, then entry-specific).
 func mergeRequest(defaults, entry Request) Request {
+	if entry.Decision == nil && defaults.Decision != nil {
+		decisionDefaults := *defaults.Decision
+		entry.Decision = &decisionDefaults
+	}
+
 	if entry.Target == "" {
 		entry.Target = defaults.Target
 	}
